@@ -1,0 +1,1 @@
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS driver_arrived_at TIMESTAMPTZ;

@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Go build output
+dist/
+tmp/
+
+# Env files — never commit secrets
+artifacts/api-server/.env
+
+# Agent memory (internal notes, not needed in repo)
+.agents/
+
+# Internal AI planning prompts
+.prompt.backend.md
+
+# Claude Code local settings
+.claude/

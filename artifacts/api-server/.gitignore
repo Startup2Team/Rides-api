@@ -1,0 +1,21 @@
+# Compiled binary
+dist/
+
+# Environment secrets — NEVER commit
+.env
+firebase-service-account.json
+
+# Go build artifacts
+*.test
+*.out
+vendor/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

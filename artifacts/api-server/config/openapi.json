@@ -1,0 +1,1084 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Ride-Hailing & Delivery Platform API",
+    "description": "API specification for the Go (Chi/Gin) modular monolith ride-hailing platform in Rwanda & East Africa.",
+    "version": "1.1.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Local Development Server"
+    },
+    {
+      "url": "http://localhost:8080/api/v1",
+      "description": "Local Development Server, API v1 base path"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health Check",
+        "description": "Checks database and cache status, returning current server health.",
+        "responses": {
+          "200": {
+            "description": "System operational",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "example": "ok"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/register": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Register or Request Login OTP",
+        "description": "Registers a new phone number or triggers an OTP login for an existing number. Capture device information for collision audits.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["phone_number", "device_id", "platform"],
+                "properties": {
+                  "phone_number": { "type": "string", "example": "+250780000000" },
+                  "device_id": { "type": "string", "example": "device_iphone15_pro" },
+                  "platform": { "type": "string", "example": "ios" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "OTP sent successfully" }
+        }
+      }
+    },
+    "/api/v1/auth/verify-otp": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Verify OTP and Receive Token",
+        "description": "Exchanges an SMS OTP code for access and refresh tokens. Role state indicates onboarding progress.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["phone_number", "otp"],
+                "properties": {
+                  "phone_number": { "type": "string", "example": "+250780000000" },
+                  "otp": { "type": "string", "example": "123456" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authentication successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_token": { "type": "string" },
+                    "refresh_token": { "type": "string" },
+                    "role_state": { "type": "string", "example": "CUSTOMER_ONLY" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Refresh Access Token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["refresh_token"],
+                "properties": {
+                  "refresh_token": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New access token granted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "access_token": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Log out from Platform",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "204": { "description": "Successfully logged out" }
+        }
+      }
+    },
+    "/api/v1/customer/profile": {
+      "get": {
+        "tags": ["Customer"],
+        "summary": "Get Profile details",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Profile details returned" }
+        }
+      },
+      "put": {
+        "tags": ["Customer"],
+        "summary": "Update Profile details",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "full_name": { "type": "string", "example": "John Doe" },
+                  "fcm_token": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Profile updated successfully" }
+        }
+      }
+    },
+    "/api/v1/customer/location": {
+      "post": {
+        "tags": ["Customer"],
+        "summary": "Retrieve Anonymized Nearby Drivers",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["lat", "lng"],
+                "properties": {
+                  "lat": { "type": "number", "format": "double", "example": -1.9441 },
+                  "lng": { "type": "number", "format": "double", "example": 30.0619 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "List of nearby driver vehicle types and distance returned" }
+        }
+      }
+    },
+    "/api/v1/customer/rides": {
+      "post": {
+        "tags": ["Customer"],
+        "summary": "Book a Ride Request",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["pickup_lat", "pickup_lng", "pickup_address", "dest_lat", "dest_lng", "dest_address", "transport_type"],
+                "properties": {
+                  "pickup_lat": { "type": "number", "format": "double", "example": -1.9441 },
+                  "pickup_lng": { "type": "number", "format": "double", "example": 30.0619 },
+                  "pickup_address": { "type": "string", "example": "Kigali Heights, Kigali" },
+                  "dest_lat": { "type": "number", "format": "double", "example": -1.9582 },
+                  "dest_lng": { "type": "number", "format": "double", "example": 30.0912 },
+                  "dest_address": { "type": "string", "example": "Kigali International Airport" },
+                  "transport_type": { "type": "string", "enum": ["MOTO_BIKE", "CAB_TAXI", "HEAVY_FUSO", "LIGHT_HILUX"], "example": "MOTO_BIKE" },
+                  "initial_fare": { "type": "number", "format": "double", "nullable": true, "description": "Optional customer-provided starting fare. The API stores this value for negotiation data; it is not a system-generated fare suggestion.", "example": 1500.00 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Ride booked, search sequence started" }
+        }
+      },
+      "get": {
+        "tags": ["Customer"],
+        "summary": "List Previous Rides",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Paginated ride history list" }
+        }
+      }
+    },
+    "/api/v1/customer/rides/{ride_id}": {
+      "get": {
+        "tags": ["Customer"],
+        "summary": "Get Specific Ride details",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Ride detail returned" }
+        }
+      },
+      "delete": {
+        "tags": ["Customer"],
+        "summary": "Cancel Pending Ride Request",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Ride successfully cancelled" }
+        }
+      }
+    },
+    "/api/v1/customer/rides/{ride_id}/negotiation/propose": {
+      "post": {
+        "tags": ["Customer"],
+        "summary": "Customer Counter-offer",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["amount"],
+                "properties": {
+                  "amount": { "type": "number", "format": "double", "example": 1500.00 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Offer sent to driver" }
+        }
+      }
+    },
+    "/api/v1/customer/rides/{ride_id}/negotiation/accept": {
+      "post": {
+        "tags": ["Customer"],
+        "summary": "Customer Accepts Driver's Fare",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Fare confirmed and locked" }
+        }
+      }
+    },
+    "/api/v1/customer/rides/{ride_id}/negotiation/decline": {
+      "post": {
+        "tags": ["Customer"],
+        "summary": "Customer Declines Driver's Fare",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Offer declined" }
+        }
+      }
+    },
+    "/api/v1/driver/apply": {
+      "post": {
+        "tags": ["Driver Onboarding"],
+        "summary": "Submit Driver Profile Application",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["transport_type", "vehicle_plate", "license_number", "date_of_birth", "city", "momo_pay_code"],
+                "properties": {
+                  "transport_type": { "type": "string", "enum": ["MOTO_BIKE", "CAB_TAXI", "HEAVY_FUSO", "LIGHT_HILUX"], "example": "MOTO_BIKE" },
+                  "vehicle_plate": { "type": "string", "example": "RAA123B" },
+                  "license_number": { "type": "string", "example": "DL-987654321" },
+                  "date_of_birth": { "type": "string", "format": "date", "example": "1995-05-15" },
+                  "city": { "type": "string", "example": "Kigali" },
+                  "momo_pay_code": { "type": "string", "example": "654321" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Application submitted successfully" }
+        }
+      }
+    },
+    "/api/v1/driver/profile": {
+      "get": {
+        "tags": ["Driver"],
+        "summary": "Get Driver Profile",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Profile details returned" }
+        }
+      }
+    },
+    "/api/v1/driver/availability": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Set Online/Offline Status",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["is_online"],
+                "properties": {
+                  "is_online": { "type": "boolean", "example": true }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Availability set" }
+        }
+      }
+    },
+    "/api/v1/driver/location": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Update GPS Location",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["lat", "lng", "speed_kmh", "heading"],
+                "properties": {
+                  "lat": { "type": "number", "format": "double", "example": -1.9448 },
+                  "lng": { "type": "number", "format": "double", "example": 30.0625 },
+                  "speed_kmh": { "type": "number", "format": "double", "example": 35.5 },
+                  "heading": { "type": "number", "format": "double", "example": 180.0 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Location captured, verified, and indexed" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/accept": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Accept Ride Request",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Request accepted" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/decline": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Decline Ride Request",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Request declined" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/cancel": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Cancel After Pickup Expiry",
+        "description": "Driver-only cancel path for customer no-show. Allowed only after pickup_expired=true, and does not record a driver decline penalty.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Ride cancelled as customer no-show" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/negotiation/propose": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Driver Counter-offer",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["amount"],
+                "properties": {
+                  "amount": { "type": "number", "format": "double", "example": 1800.00 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Offer sent to customer" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/negotiation/accept": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Driver Accepts Customer's Fare",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Fare locked" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/negotiation/decline": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Driver Declines Customer's Fare",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Offer declined" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/negotiation/lock-fare": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Lock Manually Agreed Fare",
+        "description": "Driver-only MVP endpoint for verbal fare agreements. It locks agreed_fare and confirms the ride without consuming negotiation offer count.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["amount"],
+                "properties": {
+                  "amount": { "type": "number", "format": "double", "example": 2000.00 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Fare locked and ride confirmed" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/negotiation/initiate-call": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Initiate Phone Call Bidding",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call logging initialized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "masked_number": { "type": "string", "example": "+250000000000" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/en-route": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Begin Driving To Pickup",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Ride moved to DRIVER_EN_ROUTE" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/arrive": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Mark Driver Arrived",
+        "description": "Marks the driver as arrived at pickup after a pickup geofence check and starts the pickup expiry timer.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Driver arrived at pickup" }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/start": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Start Ride",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Ride started. Location verified within 150m of pickup point." }
+        }
+      }
+    },
+    "/api/v1/driver/rides/{ride_id}/complete": {
+      "post": {
+        "tags": ["Driver"],
+        "summary": "Complete Ride",
+        "description": "Completes a ride. For generic/TBD destinations, the driver app may include final destination coordinates so the backend stores the real endpoint before completion.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "ride_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "dest_lat": { "type": "number", "format": "double", "example": -1.9582 },
+                  "dest_lng": { "type": "number", "format": "double", "example": 30.0912 },
+                  "dest_address": { "type": "string", "example": "Final dropoff selected by driver" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Ride completed, driver released, and route fare data recorded when agreed_fare exists." }
+        }
+      }
+    },
+    "/api/v1/driver/earnings/daily": {
+      "get": {
+        "tags": ["Driver"],
+        "summary": "Get Today's Earnings",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Daily driver payout summary after 15% platform commission" }
+        }
+      }
+    },
+    "/api/v1/driver/earnings/weekly": {
+      "get": {
+        "tags": ["Driver"],
+        "summary": "Get Weekly Earnings",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Weekly driver payout summary after 15% platform commission" }
+        }
+      }
+    },
+    "/api/v1/driver/stats": {
+      "get": {
+        "tags": ["Driver"],
+        "summary": "Get Performance Stats",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Decline, acceptance, and priority tier metrics" }
+        }
+      }
+    },
+    "/api/v1/users/mode": {
+      "patch": {
+        "tags": ["Users"],
+        "summary": "Switch Active User Mode",
+        "description": "Switches an authenticated user between customer and driver mode when onboarding and active-ride checks pass.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mode"],
+                "properties": {
+                  "mode": { "type": "string", "enum": ["customer", "driver"], "example": "driver" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Mode switched" }
+        }
+      }
+    },
+    "/api/v1/users/me/saved-locations": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "List Saved Locations",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Saved locations returned" }
+        }
+      },
+      "post": {
+        "tags": ["Users"],
+        "summary": "Create Saved Location",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["label", "address", "lat", "lng"],
+                "properties": {
+                  "label": { "type": "string", "example": "Home" },
+                  "address": { "type": "string", "example": "Kacyiru, Kigali" },
+                  "lat": { "type": "number", "format": "double", "example": -1.9441 },
+                  "lng": { "type": "number", "format": "double", "example": 30.0619 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Saved location created" }
+        }
+      }
+    },
+    "/api/v1/users/me/saved-locations/{id}": {
+      "put": {
+        "tags": ["Users"],
+        "summary": "Update Saved Location",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["label", "address", "lat", "lng"],
+                "properties": {
+                  "label": { "type": "string", "example": "Work" },
+                  "address": { "type": "string", "example": "Kigali Heights" },
+                  "lat": { "type": "number", "format": "double", "example": -1.9522 },
+                  "lng": { "type": "number", "format": "double", "example": 30.0928 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Saved location updated" }
+        }
+      },
+      "delete": {
+        "tags": ["Users"],
+        "summary": "Delete Saved Location",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Saved location deleted" }
+        }
+      }
+    },
+    "/api/v1/locations/landmarks": {
+      "get": {
+        "tags": ["Locations"],
+        "summary": "List Public Landmarks",
+        "description": "Returns curated landmark destinations used by clients for destination search and route cache warmup.",
+        "responses": {
+          "200": { "description": "Landmarks returned" }
+        }
+      }
+    },
+    "/api/v1/locations/suggestions": {
+      "get": {
+        "tags": ["Locations"],
+        "summary": "Get Location Suggestions",
+        "description": "Returns saved locations, recent destinations, and landmarks. No fare suggestion is returned.",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Location suggestions returned" }
+        }
+      }
+    },
+    "/api/v1/locations/route": {
+      "get": {
+        "tags": ["Locations"],
+        "summary": "Get Cached Route Data",
+        "description": "Returns route cache data only. Fare data may be collected internally for future analytics, but this endpoint does not return fare suggestions.",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "pickup_lat", "in": "query", "required": true, "schema": { "type": "number", "format": "double" }, "example": -1.9441 },
+          { "name": "pickup_lng", "in": "query", "required": true, "schema": { "type": "number", "format": "double" }, "example": 30.0619 },
+          { "name": "dest_lat", "in": "query", "required": true, "schema": { "type": "number", "format": "double" }, "example": -1.9582 },
+          { "name": "dest_lng", "in": "query", "required": true, "schema": { "type": "number", "format": "double" }, "example": 30.0912 },
+          { "name": "vehicle_type", "in": "query", "required": true, "schema": { "type": "string", "enum": ["MOTO_BIKE", "CAB_TAXI", "LIGHT_HILUX", "HEAVY_FUSO"] }, "example": "MOTO_BIKE" }
+        ],
+        "responses": {
+          "200": { "description": "Route cache data returned without fare suggestion" }
+        }
+      },
+      "post": {
+        "tags": ["Locations"],
+        "summary": "Upsert Route Data",
+        "description": "Stores route distance and duration data from the client. The response returns route data only and does not suggest a fare.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["pickup_lat", "pickup_lng", "dest_lat", "dest_lng", "vehicle_type", "distance_km", "duration_minutes"],
+                "properties": {
+                  "pickup_lat": { "type": "number", "format": "double", "example": -1.9441 },
+                  "pickup_lng": { "type": "number", "format": "double", "example": 30.0619 },
+                  "dest_lat": { "type": "number", "format": "double", "example": -1.9582 },
+                  "dest_lng": { "type": "number", "format": "double", "example": 30.0912 },
+                  "vehicle_type": { "type": "string", "enum": ["MOTO_BIKE", "CAB_TAXI", "LIGHT_HILUX", "HEAVY_FUSO"], "example": "MOTO_BIKE" },
+                  "distance_km": { "type": "number", "format": "double", "example": 7.4 },
+                  "duration_minutes": { "type": "integer", "example": 24 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Route data saved and returned without fare suggestion" }
+        }
+      }
+    },
+    "/api/v1/rides/active": {
+      "get": {
+        "tags": ["Rides"],
+        "summary": "Get Active Ride",
+        "description": "Returns the authenticated customer's current active ride for reconnect recovery.",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Active ride returned" }
+        }
+      }
+    },
+    "/api/v1/admin/drivers": {
+      "get": {
+        "tags": ["Admin Driver Actions"],
+        "summary": "List Driver Applications",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string", "default": "PENDING_REVIEW" } }
+        ],
+        "responses": {
+          "200": { "description": "List of driver profiles returned" }
+        }
+      }
+    },
+    "/api/v1/admin/drivers/{id}/approve": {
+      "post": {
+        "tags": ["Admin Driver Actions"],
+        "summary": "Approve Driver Profile",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "notes": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Driver application approved" }
+        }
+      }
+    },
+    "/api/v1/admin/drivers/{id}/reject": {
+      "post": {
+        "tags": ["Admin Driver Actions"],
+        "summary": "Reject Driver Profile",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["reason"],
+                "properties": {
+                  "reason": { "type": "string", "example": "Invalid license" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Driver application rejected" }
+        }
+      }
+    },
+    "/api/v1/admin/drivers/{id}/suspend": {
+      "post": {
+        "tags": ["Admin Driver Actions"],
+        "summary": "Suspend Driver",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["reason", "duration_hours"],
+                "properties": {
+                  "reason": { "type": "string" },
+                  "duration_hours": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Driver suspended" }
+        }
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "tags": ["Admin User Actions"],
+        "summary": "List Platform Users",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "List of user accounts" }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/suspend": {
+      "post": {
+        "tags": ["Admin User Actions"],
+        "summary": "Suspend User Account",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["reason", "duration_hours"],
+                "properties": {
+                  "reason": { "type": "string" },
+                  "duration_hours": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "User suspended" }
+        }
+      }
+    },
+    "/api/v1/admin/flags/gps-anomalies": {
+      "get": {
+        "tags": ["Admin Audits"],
+        "summary": "View GPS Spoofing anomalies",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "GPS anomaly logs" }
+        }
+      }
+    },
+    "/api/v1/admin/flags/device-collisions": {
+      "get": {
+        "tags": ["Admin Audits"],
+        "summary": "View Device ID collisions",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Multi-account collisons list" }
+        }
+      }
+    },
+    "/api/v1/admin/rides": {
+      "get": {
+        "tags": ["Admin Audits"],
+        "summary": "Audit All Platform Rides",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Full ride logs list" }
+        }
+      }
+    },
+    "/api/v1/admin/analytics/overview": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Overview metrics",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Active operational counts returned" }
+        }
+      }
+    },
+    "/api/v1/admin/analytics/rides/daily": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Daily Ride Growth",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/admin/analytics/rides/weekly": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Weekly Ride Growth",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/admin/analytics/revenue/breakdown": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Revenue breaks",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/admin/analytics/drivers/performance": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Driver standings ranking",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/admin/analytics/negotiation/stats": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Bidding efficiency statistics",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/admin/analytics/heatmap": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Demand density clusters",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/admin/analytics/cancellations": {
+      "get": {
+        "tags": ["Admin Analytics"],
+        "summary": "Audits on cancellations patterns",
+        "security": [{ "BearerAuth": [] }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Paste your JWT access_token here."
+      }
+    }
+  }
+}

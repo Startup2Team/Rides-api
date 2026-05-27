@@ -1,0 +1,1259 @@
+{
+  "info": {
+    "_postman_id": "a90df2cd-cb41-4770-9831-cb03f47e2469",
+    "name": "Ride-Hailing & Delivery Platform API",
+    "description": "Comprehensive Postman collection for testing the Go (Chi/Gin) Ride-Hailing & Delivery Platform backend endpoints.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Auth (Public)",
+      "description": "Endpoints for user registration, OTP verification, refreshing tokens, and logging out.",
+      "item": [
+        {
+          "name": "Register User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+250780000000\",\n  \"device_id\": \"device_iphone15_pro\",\n  \"platform\": \"ios\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Sends a verification OTP SMS to the specified phone number. Captures device ID to detect multi-account collisions."
+          },
+          "response": []
+        },
+        {
+          "name": "Verify OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+250780000000\",\n  \"otp\": \"123456\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/verify-otp",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "verify-otp"
+              ]
+            },
+            "description": "Verifies the received OTP. Returns the JWT access_token, refresh_token, and role_state. Copy these tokens to the collection variables."
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refreshToken}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Uses a valid, non-expired refresh token to generate a brand new short-lived access token."
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Blacklists the current user session refresh token in Redis."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Customer",
+      "description": "Endpoints accessed by customers (roles: CUSTOMER_ONLY, DRIVER_ACTIVE, DRIVER_PENDING).",
+      "item": [
+        {
+          "name": "Get Customer Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "profile"
+              ]
+            },
+            "description": "Fetches current customer user details."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Customer Profile",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"John Doe\",\n  \"fcm_token\": \"fcm_token_placeholder\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "profile"
+              ]
+            },
+            "description": "Updates profile details like full name and Firebase push token."
+          },
+          "response": []
+        },
+        {
+          "name": "Fetch Nearby Drivers",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lat\": -1.9441,\n  \"lng\": 30.0619\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/location",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "location"
+              ]
+            },
+            "description": "Fetches lists of nearby drivers. Returns anonymized distance and vehicle types only (identity hidden for privacy)."
+          },
+          "response": []
+        },
+        {
+          "name": "Book Ride",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pickup_lat\": -1.9441,\n  \"pickup_lng\": 30.0619,\n  \"pickup_address\": \"Kigali Heights, Kigali\",\n  \"dest_lat\": -1.9582,\n  \"dest_lng\": 30.0912,\n  \"dest_address\": \"Kigali International Airport\",\n  \"transport_type\": \"MOTO_BIKE\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/rides",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "rides"
+              ]
+            },
+            "description": "Creates a ride booking request. Triggers matching engine to find closest available driver."
+          },
+          "response": []
+        },
+        {
+          "name": "List Ride History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/rides?page=1&limit=10",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "rides"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            },
+            "description": "Retrieves a paginated list of all customer's previous rides."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Ride Details",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/rides/{{rideId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "rides",
+                "{{rideId}}"
+              ]
+            },
+            "description": "Fetches current details of a specific ride. Driver metadata is blank until matching reaches CONFIRMED state."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Ride",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/rides/{{rideId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "rides",
+                "{{rideId}}"
+              ]
+            },
+            "description": "Cancels a pending ride request. Tracked in Redis; abusing cancellations triggers suspensions."
+          },
+          "response": []
+        },
+        {
+          "name": "Negotiation: Propose Fare",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 1500.00\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/rides/{{rideId}}/negotiation/propose",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "rides",
+                "{{rideId}}",
+                "negotiation",
+                "propose"
+              ]
+            },
+            "description": "Counter-propose a ride fare. Max 4 total rounds of automatic in-app bidding."
+          },
+          "response": []
+        },
+        {
+          "name": "Negotiation: Accept Fare",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/rides/{{rideId}}/negotiation/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "rides",
+                "{{rideId}}",
+                "negotiation",
+                "accept"
+              ]
+            },
+            "description": "Accepts the driver's current fare offer, locking the ride price."
+          },
+          "response": []
+        },
+        {
+          "name": "Negotiation: Decline Fare",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/customer/rides/{{rideId}}/negotiation/decline",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "customer",
+                "rides",
+                "{{rideId}}",
+                "negotiation",
+                "decline"
+              ]
+            },
+            "description": "Rejects the driver's fare. Advances negotiation rounds."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Driver",
+      "description": "Endpoints accessed by driver applicants and approved online drivers.",
+      "item": [
+        {
+          "name": "Apply for Driver Profile",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"transport_type\": \"MOTO_BIKE\",\n  \"vehicle_plate\": \"RAA123B\",\n  \"license_number\": \"DL-987654321\",\n  \"date_of_birth\": \"1995-05-15\",\n  \"city\": \"Kigali\",\n  \"momo_pay_code\": \"654321\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/apply",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "apply"
+              ]
+            },
+            "description": "Creates a driver application profile. Status is set to PENDING_REVIEW."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Driver Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "profile"
+              ]
+            },
+            "description": "Gets the driver profile details, rating, and approval status."
+          },
+          "response": []
+        },
+        {
+          "name": "Set Online Availability",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"is_online\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/availability",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "availability"
+              ]
+            },
+            "description": "Sets the driver availability to Online or Offline. Cooldown penalties apply for short session toggles."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Location (GPS)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lat\": -1.9448,\n  \"lng\": 30.0625,\n  \"speed_kmh\": 35.5,\n  \"heading\": 180.0\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/location",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "location"
+              ]
+            },
+            "description": "Pushes the current GPS location. Triggers plausibility checks (200km/h threshold) and updates the local spatial index."
+          },
+          "response": []
+        },
+        {
+          "name": "Accept Ride Request",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "accept"
+              ]
+            },
+            "description": "Accepts a dispatched ride. Enforces strict 15-second response TTL. If expired, request is automatically declined."
+          },
+          "response": []
+        },
+        {
+          "name": "Decline Ride Request",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/decline",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "decline"
+              ]
+            },
+            "description": "Declines a dispatched ride. Increments decline counters in Redis. Exceeding thresholds results in priority demotion or temporary offline suspension."
+          },
+          "response": []
+        },
+        {
+          "name": "Negotiation: Propose Fare",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 1800.00\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/negotiation/propose",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "negotiation",
+                "propose"
+              ]
+            },
+            "description": "Sends a fare counter-offer to the customer."
+          },
+          "response": []
+        },
+        {
+          "name": "Negotiation: Accept Fare",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/negotiation/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "negotiation",
+                "accept"
+              ]
+            },
+            "description": "Accepts the customer's current fare offer."
+          },
+          "response": []
+        },
+        {
+          "name": "Negotiation: Decline Fare",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/negotiation/decline",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "negotiation",
+                "decline"
+              ]
+            },
+            "description": "Rejects the customer's fare. Advances negotiation rounds."
+          },
+          "response": []
+        },
+        {
+          "name": "Negotiation: Initiate Call",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/negotiation/initiate-call",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "negotiation",
+                "initiate-call"
+              ]
+            },
+            "description": "Logs that phone negotiation is being initiated. Returns an Africa's Talking masked phone number for calling the customer."
+          },
+          "response": []
+        },
+        {
+          "name": "Start Ride",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/start",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "start"
+              ]
+            },
+            "description": "Starts the ride once customer is in vehicle. Enforces PostGIS spatial check: driver's current GPS location must be within 150m of pickup point."
+          },
+          "response": []
+        },
+        {
+          "name": "Complete Ride",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/rides/{{rideId}}/complete",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "rides",
+                "{{rideId}}",
+                "complete"
+              ]
+            },
+            "description": "Completes the ride at the destination. Enforces PostGIS spatial check: driver's current GPS location must be within 200m of destination point."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Daily Earnings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/earnings/daily",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "earnings",
+                "daily"
+              ]
+            },
+            "description": "Fetches breakdown of today's driver earnings."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Weekly Earnings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/earnings/weekly",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "earnings",
+                "weekly"
+              ]
+            },
+            "description": "Fetches weekly earnings reports."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Performance Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/driver/stats",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "driver",
+                "stats"
+              ]
+            },
+            "description": "Fetches driver total rides, acceptance rate, completion rate, and priority tier."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "description": "Administrative actions. Requires role: ADMIN.",
+      "item": [
+        {
+          "name": "List Driver Applications",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/drivers?status=PENDING_REVIEW",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "drivers"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "PENDING_REVIEW"
+                }
+              ]
+            },
+            "description": "Lists drivers applying to the platform, filtered by approval status."
+          },
+          "response": []
+        },
+        {
+          "name": "Approve Driver Profile",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"KYC verified and background checks complete.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/drivers/{{driverId}}/approve",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "drivers",
+                "{{driverId}}",
+                "approve"
+              ]
+            },
+            "description": "Approves a driver's application. Role transitions to DRIVER_ACTIVE. Admin self-approval is forbidden."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject Driver Profile",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Invalid driver's license number.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/drivers/{{driverId}}/reject",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "drivers",
+                "{{driverId}}",
+                "reject"
+              ]
+            },
+            "description": "Rejects a driver application with a reason."
+          },
+          "response": []
+        },
+        {
+          "name": "Suspend Driver Profile",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Dangerous driving behavior reported by multiple customers.\",\n  \"duration_hours\": 24\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/drivers/{{driverId}}/suspend",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "drivers",
+                "{{driverId}}",
+                "suspend"
+              ]
+            },
+            "description": "Temporarily suspends an active driver profile."
+          },
+          "response": []
+        },
+        {
+          "name": "List Users",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "users"
+              ]
+            },
+            "description": "Fetches list of all users registered on the platform."
+          },
+          "response": []
+        },
+        {
+          "name": "Suspend User Account",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Fraudulent card payments detected.\",\n  \"duration_hours\": 72\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/users/{{userId}}/suspend",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "users",
+                "{{userId}}",
+                "suspend"
+              ]
+            },
+            "description": "Suspends a user account (rejects auth attempts)."
+          },
+          "response": []
+        },
+        {
+          "name": "View GPS Anomaly Logs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/flags/gps-anomalies",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "flags",
+                "gps-anomalies"
+              ]
+            },
+            "description": "Fetches audit trail of drivers flagged for impossible high-speed position delta updates (GPS spoofing detection)."
+          },
+          "response": []
+        },
+        {
+          "name": "View Device Collision Flags",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/flags/device-collisions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "flags",
+                "device-collisions"
+              ]
+            },
+            "description": "Fetches flags for single devices logging into or registering multiple accounts."
+          },
+          "response": []
+        },
+        {
+          "name": "List All Platform Rides",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/rides",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "rides"
+              ]
+            },
+            "description": "Lists every ride in the database with extensive filters for auditing."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: KPI Overview",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/overview",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "overview"
+              ]
+            },
+            "description": "Fetches high-level operational statistics (active rides, online drivers, total fares, etc.) from analytics schema."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: Daily Ride Growth",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/rides/daily",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "rides",
+                "daily"
+              ]
+            },
+            "description": "Daily ride volumes and growth metrics."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: Weekly Ride Growth",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/rides/weekly",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "rides",
+                "weekly"
+              ]
+            },
+            "description": "Weekly ride volumes."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: Revenue Breakdown",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/revenue/breakdown",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "revenue",
+                "breakdown"
+              ]
+            },
+            "description": "Fares breakdown and platform fee cuts by vehicle types."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: Driver Performance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/drivers/performance",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "drivers",
+                "performance"
+              ]
+            },
+            "description": "Ranks active drivers based on completion, acceptance rate, and rating indexes."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: Negotiation Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/negotiation/stats",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "negotiation",
+                "stats"
+              ]
+            },
+            "description": "Analyzes negotiation efficiency (average bidding rounds, call-initiated rate, counter-proposal success metrics)."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: Demand Heatmap",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/heatmap",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "heatmap"
+              ]
+            },
+            "description": "Fetches grid coordinates representing demand clusters from aggregated geocoded pickup locations (without leaking PII)."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics: Cancellations Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/admin/analytics/cancellations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "admin",
+                "analytics",
+                "cancellations"
+              ]
+            },
+            "description": "Audits platform cancellation patterns to locate bad actors."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "paste_jwt_access_token_here",
+      "type": "string"
+    },
+    {
+      "key": "refreshToken",
+      "value": "paste_jwt_refresh_token_here",
+      "type": "string"
+    },
+    {
+      "key": "rideId",
+      "value": "insert_active_ride_uuid",
+      "type": "string"
+    },
+    {
+      "key": "driverId",
+      "value": "insert_active_driver_profile_uuid",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "insert_active_user_uuid",
+      "type": "string"
+    }
+  ]
+}
