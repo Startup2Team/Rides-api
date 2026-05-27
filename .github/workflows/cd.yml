@@ -1,78 +1,39 @@
 name: CD
 
+# Triggers after code lands on dev (→ staging) or main (→ production).
+# Branch protection guarantees CI already passed before this runs.
+#
+# Required GitHub Secrets:
+#   RAILWAY_TOKEN               — from railway.app → Account Settings → Tokens
+#   RAILWAY_SERVICE_ID_STAGING  — Railway service ID for staging (dev branch)
+#   RAILWAY_SERVICE_ID_PROD     — Railway service ID for production (main branch)
+
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
     paths:
       - "api-server/**"
       - ".github/workflows/cd.yml"
 
-defaults:
-  run:
-    working-directory: api-server
-
 jobs:
-  # ── Build & push Docker image to GitHub Container Registry ────────────────
-  publish:
-    name: Build & Push Image
+  deploy:
+    name: Deploy (${{ github.ref_name }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    outputs:
-      image: ${{ steps.meta.outputs.tags }}
-      sha: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
 
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/backend-travels
-          tags: |
-            type=sha,prefix=sha-
-            type=raw,value=latest
+      - name: Deploy to staging (dev branch)
+        if: github.ref_name == 'dev'
+        run: railway up --service ${{ secrets.RAILWAY_SERVICE_ID_STAGING }} --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: api-server
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ── Deploy to server ──────────────────────────────────────────────────────
-  # Uncomment and fill in when you have a server ready.
-  # deploy:
-  #   name: Deploy
-  #   needs: publish
-  #   runs-on: ubuntu-latest
-  #   environment: production
-  #
-  #   steps:
-  #     - name: Deploy via SSH
-  #       uses: appleboy/ssh-action@v1
-  #       with:
-  #         host: ${{ secrets.SERVER_HOST }}
-  #         username: ${{ secrets.SERVER_USER }}
-  #         key: ${{ secrets.SERVER_SSH_KEY }}
-  #         script: |
-  #           cd /opt/backend-travels
-  #           echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-  #           docker pull ghcr.io/${{ github.repository_owner }}/backend-travels:latest
-  #           docker compose up -d --no-build
+      - name: Deploy to production (main branch)
+        if: github.ref_name == 'main'
+        run: railway up --service ${{ secrets.RAILWAY_SERVICE_ID_PROD }} --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

@@ -1,13 +1,16 @@
 name: CI
 
+# Runs on every PR targeting dev or main.
+# These are the status checks that branch protection requires to pass before merge.
+
 on:
-  push:
-    branches: [main]
+  pull_request:
+    branches: [dev, main]
     paths:
       - "api-server/**"
       - ".github/workflows/ci.yml"
-  pull_request:
-    branches: [main]
+  push:
+    branches: [dev, main]
     paths:
       - "api-server/**"
       - ".github/workflows/ci.yml"
@@ -17,7 +20,7 @@ defaults:
     working-directory: api-server
 
 jobs:
-  # ── 1. Lint & format check ────────────────────────────────────────────────
+  # ── 1. Lint & format ──────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -56,7 +59,7 @@ jobs:
       - name: Run tests
         run: go test -race -count=1 ./...
 
-      - name: Coverage report
+      - name: Coverage
         run: |
           go test ./... -coverprofile=coverage.out
           go tool cover -func=coverage.out | tail -n 1
@@ -71,7 +74,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (no push)
+      - name: Build image (verify it compiles, no push)
         uses: docker/build-push-action@v5
         with:
           context: api-server
