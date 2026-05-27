@@ -84,7 +84,7 @@ func main() {
 
 	// ── Repositories ──────────────────────────────────────────────────────────
 	authRepo := auth.NewRepository(db)
-	custRepo := customer.NewRepository(db)
+	custRepo   := customer.NewRepository(db)
 	driverRepo := driver.NewRepository(db)
 	rideRepo := ride.NewRepository(db)
 	negRepo := negotiation.NewRepository(db)
@@ -104,8 +104,10 @@ func main() {
 	locSvc := location.NewService(db, rdb, cfg, log)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
+	custSvc := customer.NewService(custRepo)
+
 	authH := auth.NewHandler(authSvc)
-	custH := customer.NewHandler(custRepo)
+	custH := customer.NewHandler(custSvc)
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
 	negH := negotiation.NewHandler(negSvc)

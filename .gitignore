@@ -11,7 +11,7 @@ dist/
 tmp/
 
 # Env files — never commit secrets
-artifacts/api-server/.env
+api-server/.env
 
 # Agent memory (internal notes, not needed in repo)
 .agents/

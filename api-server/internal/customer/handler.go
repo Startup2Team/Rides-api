@@ -11,18 +11,18 @@ import (
 
 // Handler exposes customer profile endpoints.
 type Handler struct {
-	repo *Repository
+	svc *Service
 }
 
-func NewHandler(repo *Repository) *Handler {
-	return &Handler{repo: repo}
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
 }
 
 // GET /api/v1/customer/profile
 func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
-	profile, err := h.repo.FindByID(r.Context(), claims.UserID)
+	profile, err := h.svc.GetProfile(r.Context(), claims.UserID)
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -44,7 +44,7 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.repo.UpdateProfile(r.Context(), claims.UserID, body.FullName, body.Email, body.FCMToken); err != nil {
+	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.FullName, body.Email, body.FCMToken); err != nil {
 		respond.Error(w, err)
 		return
 	}
