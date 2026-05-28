@@ -29,7 +29,7 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		TransportType  string  `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX"`
+		TransportType  string  `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
 		VehiclePlate   string  `json:"vehicle_plate"    validate:"required"`
 		LicenseNumber  string  `json:"license_number"   validate:"required"`
 		DateOfBirth    string  `json:"date_of_birth"    validate:"required"` // YYYY-MM-DD

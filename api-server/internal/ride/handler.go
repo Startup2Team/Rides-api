@@ -36,7 +36,7 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 		DestLat      float64  `json:"dest_lat"      validate:"required,min=-90,max=90"`
 		DestLng      float64  `json:"dest_lng"      validate:"required,min=-180,max=180"`
 		DestAddr     string   `json:"dest_address"  validate:"required"`
-		TransportType string  `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX"`
+		TransportType string  `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
 		InitialFare  *float64 `json:"initial_fare"`
 	}
 

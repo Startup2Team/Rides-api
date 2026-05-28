@@ -28,6 +28,7 @@ import (
 	mw "github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/internal/negotiation"
 	"github.com/workspace/ride-platform/internal/notification"
+	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
 	"github.com/workspace/ride-platform/internal/ride"
 	"github.com/workspace/ride-platform/internal/telephony"
@@ -88,6 +89,7 @@ func main() {
 	driverRepo := driver.NewRepository(db)
 	rideRepo := ride.NewRepository(db)
 	negRepo := negotiation.NewRepository(db)
+	pkgRepo := packages.NewRepository(db)
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
 	hub := tracking.NewHub(log)
@@ -95,6 +97,7 @@ func main() {
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
 	driverSvc := driver.NewService(driverRepo, rdb, anaSvc, cfg, log)
+	pkgSvc := packages.NewService(pkgRepo, log)
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
@@ -115,6 +118,7 @@ func main() {
 	anaH := analytics.NewHandler(anaRepo)
 	trackH := tracking.NewHandler(hub, driverSvc, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
+	pkgH := packages.NewHandler(pkgSvc)
 
 	// ── Background goroutines ─────────────────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -193,7 +197,11 @@ func main() {
 			r.Post("/availability", driverH.SetAvailability)
 			r.Post("/location", driverH.UpdateLocation)
 
-			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc))
+			r.Get("/packages", pkgH.ListPackages)
+			r.Post("/packages/purchase", pkgH.PurchasePackage)
+			r.Get("/credits", pkgH.GetCredits)
+
+			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
 			r.Post("/rides/{ride_id}/cancel", driverCancelAfterPickupExpiryHandler(rideSvc))
 			r.Post("/rides/{ride_id}/en-route", driverEnRouteHandler(rideSvc))
@@ -278,6 +286,8 @@ func main() {
 	// Wire matching engine into ride service
 	rideSvc.SetMatchingEngine(engine)
 	rideSvc.SetRouteFareRecorder(locSvc)
+	rideSvc.SetPackagesService(pkgSvc)
+	adminSvc.SetPackagesService(pkgSvc)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	srv := &http.Server{
@@ -333,14 +343,32 @@ func runMigrations(databaseURL string) error {
 
 // ── Inline driver ride-action handlers ───────────────────────────────────
 
-func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, driverSvc *driver.Service) http.HandlerFunc {
+// creditChecker is the subset of packages.Service the accept handler needs.
+type creditChecker interface {
+	HasCredits(ctx context.Context, driverUserID, vehicleType string) (bool, error)
+}
+
+func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, driverSvc *driver.Service, credits creditChecker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
+
 		_, valid := engine.ValidateAcceptTTL(r.Context(), rideID)
 		if !valid {
 			respond.Error(w, apperrors.ErrAcceptExpired)
 			return
 		}
+
+		// Gate: driver must have credits for their vehicle type to accept rides.
+		profile, err := driverSvc.GetProfile(r.Context(), claims.UserID)
+		if err == nil {
+			hasCredits, credErr := credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+			if credErr == nil && !hasCredits {
+				respond.Error(w, apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding."))
+				return
+			}
+		}
+
 		engine.AcceptRide(rideID)
 		respond.NoContent(w)
 	}
