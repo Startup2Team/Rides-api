@@ -11,7 +11,7 @@ import (
 
 // Message is a push notification payload.
 type Message struct {
-	Token string            // FCM device token
+	Token string // FCM device token
 	Title string
 	Body  string
 	Data  map[string]string // custom key-value pairs for the mobile app

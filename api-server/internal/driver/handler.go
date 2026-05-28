@@ -29,20 +29,20 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		TransportType  string  `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
-		VehiclePlate   string  `json:"vehicle_plate"    validate:"required"`
-		LicenseNumber  string  `json:"license_number"   validate:"required"`
-		DateOfBirth    string  `json:"date_of_birth"    validate:"required"` // YYYY-MM-DD
-		City           string  `json:"city"             validate:"required"`
-		MomoPayCode    string  `json:"momo_pay_code"    validate:"required"`
-		MomoProvider   string  `json:"momo_provider"    validate:"required,oneof=mtn airtel"`
-		Province       string  `json:"province"         validate:"required"`
-		District       string  `json:"district"         validate:"required"`
-		Sector         string  `json:"sector"           validate:"required"`
-		Cell           string  `json:"cell"             validate:"required"`
-		Village        string  `json:"village"          validate:"required"`
-		PassengerSeats *int    `json:"passenger_seats"`
-		LoadCapacityKg *int    `json:"load_capacity_kg"`
+		TransportType  string `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+		VehiclePlate   string `json:"vehicle_plate"    validate:"required"`
+		LicenseNumber  string `json:"license_number"   validate:"required"`
+		DateOfBirth    string `json:"date_of_birth"    validate:"required"` // YYYY-MM-DD
+		City           string `json:"city"             validate:"required"`
+		MomoPayCode    string `json:"momo_pay_code"    validate:"required"`
+		MomoProvider   string `json:"momo_provider"    validate:"required,oneof=mtn airtel"`
+		Province       string `json:"province"         validate:"required"`
+		District       string `json:"district"         validate:"required"`
+		Sector         string `json:"sector"           validate:"required"`
+		Cell           string `json:"cell"             validate:"required"`
+		Village        string `json:"village"          validate:"required"`
+		PassengerSeats *int   `json:"passenger_seats"`
+		LoadCapacityKg *int   `json:"load_capacity_kg"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -103,10 +103,10 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		City           *string `json:"city"`
-		MomoPayCode    *string `json:"momo_pay_code"`
-		MomoProvider   *string `json:"momo_provider" validate:"omitempty,oneof=mtn airtel"`
-		FCMToken       *string `json:"fcm_token"`
+		City         *string `json:"city"`
+		MomoPayCode  *string `json:"momo_pay_code"`
+		MomoProvider *string `json:"momo_provider" validate:"omitempty,oneof=mtn airtel"`
+		FCMToken     *string `json:"fcm_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)

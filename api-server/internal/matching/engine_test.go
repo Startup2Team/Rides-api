@@ -40,17 +40,17 @@ func TestMatching_ScoringFormula(t *testing.T) {
 		wantScore      float64
 	}{
 		{
-			name: "perfect driver — close, no declines, 100% acceptance",
+			name:  "perfect driver — close, no declines, 100% acceptance",
 			distM: 500, declines: 0, acceptanceRate: 100.0,
 			wantScore: (500/expandedRadius)*0.6 + 0*0.25 + 0*0.15,
 		},
 		{
-			name: "far driver — 8km, 5 declines, 80% acceptance",
+			name:  "far driver — 8km, 5 declines, 80% acceptance",
 			distM: 8000, declines: 5, acceptanceRate: 80.0,
 			wantScore: (8000/expandedRadius)*0.6 + (5.0/10)*0.25 + (0.2)*0.15,
 		},
 		{
-			name: "worst driver — max distance, 10+ declines, 0% acceptance",
+			name:  "worst driver — max distance, 10+ declines, 0% acceptance",
 			distM: 10000, declines: 15, acceptanceRate: 0.0,
 			wantScore: (10000/expandedRadius)*0.6 + (10.0/10)*0.25 + 1.0*0.15,
 		},

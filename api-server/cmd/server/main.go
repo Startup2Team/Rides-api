@@ -85,7 +85,7 @@ func main() {
 
 	// ── Repositories ──────────────────────────────────────────────────────────
 	authRepo := auth.NewRepository(db)
-	custRepo   := customer.NewRepository(db)
+	custRepo := customer.NewRepository(db)
 	driverRepo := driver.NewRepository(db)
 	rideRepo := ride.NewRepository(db)
 	negRepo := negotiation.NewRepository(db)

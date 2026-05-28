@@ -13,8 +13,8 @@ import (
 type Provider string
 
 const (
-	ProviderMTNMoMo  Provider = "MTN_MOMO"
-	ProviderAirtel   Provider = "AIRTEL_MONEY"
+	ProviderMTNMoMo Provider = "MTN_MOMO"
+	ProviderAirtel  Provider = "AIRTEL_MONEY"
 )
 
 // PaymentResult captures the outcome of a payment initiation.
@@ -26,8 +26,8 @@ type PaymentResult struct {
 
 // Service wraps MTN MoMo and Airtel Money payment APIs.
 type Service struct {
-	cfg    *config.Config
-	log    zerolog.Logger
+	cfg *config.Config
+	log zerolog.Logger
 }
 
 func New(cfg *config.Config, log zerolog.Logger) *Service {
