@@ -30,14 +30,14 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		PickupLat    float64  `json:"pickup_lat"    validate:"required,min=-90,max=90"`
-		PickupLng    float64  `json:"pickup_lng"    validate:"required,min=-180,max=180"`
-		PickupAddr   string   `json:"pickup_address" validate:"required"`
-		DestLat      float64  `json:"dest_lat"      validate:"required,min=-90,max=90"`
-		DestLng      float64  `json:"dest_lng"      validate:"required,min=-180,max=180"`
-		DestAddr     string   `json:"dest_address"  validate:"required"`
-		TransportType string  `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX"`
-		InitialFare  *float64 `json:"initial_fare"`
+		PickupLat     float64  `json:"pickup_lat"    validate:"required,min=-90,max=90"`
+		PickupLng     float64  `json:"pickup_lng"    validate:"required,min=-180,max=180"`
+		PickupAddr    string   `json:"pickup_address" validate:"required"`
+		DestLat       float64  `json:"dest_lat"      validate:"required,min=-90,max=90"`
+		DestLng       float64  `json:"dest_lng"      validate:"required,min=-180,max=180"`
+		DestAddr      string   `json:"dest_address"  validate:"required"`
+		TransportType string   `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+		InitialFare   *float64 `json:"initial_fare"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

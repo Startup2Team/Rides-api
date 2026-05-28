@@ -45,11 +45,11 @@ func (s *Service) Publish(ctx context.Context, eventType, actorRole, actorID str
 
 	// Publish to Redis Stream
 	streamPayload, _ := json.Marshal(map[string]interface{}{
-		"event_type": eventType,
-		"actor_role": actorRole,
-		"actor_id":   actorID,
-		"ride_id":    rideID,
-		"payload":    payload,
+		"event_type":  eventType,
+		"actor_role":  actorRole,
+		"actor_id":    actorID,
+		"ride_id":     rideID,
+		"payload":     payload,
 		"occurred_at": time.Now().UTC().Format(time.RFC3339),
 	})
 

@@ -34,6 +34,11 @@ type RouteFareRecorder interface {
 	RecordAgreedFare(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string, agreedFare float64)
 }
 
+// PackagesService is used to deduct a ride credit when a trip completes.
+type PackagesService interface {
+	DeductCredit(ctx context.Context, driverUserID string) error
+}
+
 // Service handles ride lifecycle business logic.
 type Service struct {
 	repo      *Repository
@@ -45,6 +50,7 @@ type Service struct {
 	log       zerolog.Logger
 	engine    MatchingEngineInterface
 	routes    RouteFareRecorder
+	packages  PackagesService
 }
 
 func NewService(repo *Repository, rdb *goredis.Client, notify *notification.Service, ana *analytics.Service, hub *tracking.Hub, cfg *config.Config, log zerolog.Logger) *Service {
@@ -57,6 +63,10 @@ func (s *Service) SetMatchingEngine(engine MatchingEngineInterface) {
 
 func (s *Service) SetRouteFareRecorder(routes RouteFareRecorder) {
 	s.routes = routes
+}
+
+func (s *Service) SetPackagesService(svc PackagesService) {
+	s.packages = svc
 }
 
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
@@ -365,6 +375,13 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 	_ = s.repo.IncrementDriverRides(ctx, driverUserID)
 	if s.routes != nil && r.AgreedFare != nil {
 		s.routes.RecordAgreedFare(ctx, r.PickupPoint.Lat, r.PickupPoint.Lng, destination.Lat, destination.Lng, r.TransportType, *r.AgreedFare)
+	}
+
+	// Deduct one ride credit — fire-and-forget on error so the completion is never blocked.
+	if s.packages != nil {
+		if err := s.packages.DeductCredit(ctx, driverUserID); err != nil {
+			s.log.Warn().Err(err).Str("driver_id", driverUserID).Msg("ride: credit deduction failed on complete")
+		}
 	}
 
 	profile, _ := s.repo.FindDriverProfileByUserID(ctx, driverUserID)

@@ -12,24 +12,33 @@ import (
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
+// PackagesService grants the free-trial credit when a driver is first approved.
+type PackagesService interface {
+	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
+}
+
 // Service handles admin business logic.
 type Service struct {
-	db  *pgxpool.Pool
-	log zerolog.Logger
+	db       *pgxpool.Pool
+	log      zerolog.Logger
+	packages PackagesService
 }
 
 func NewService(db *pgxpool.Pool, log zerolog.Logger) *Service {
 	return &Service{db: db, log: log}
 }
 
+func (s *Service) SetPackagesService(svc PackagesService) {
+	s.packages = svc
+}
+
 // ApproveDriver approves a pending driver application.
 // Admin cannot approve their own application (self-approval prevention).
 func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID string) error {
-	// Self-approval check
-	var driverUserID string
+	var driverUserID, transportType string
 	err := s.db.QueryRow(ctx,
-		`SELECT user_id FROM driver_profiles WHERE id = $1`, profileID,
-	).Scan(&driverUserID)
+		`SELECT user_id, transport_type FROM driver_profiles WHERE id = $1`, profileID,
+	).Scan(&driverUserID, &transportType)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apperrors.ErrNotFound
@@ -53,14 +62,27 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 		return err
 	}
 
-	// Update user role_state to DRIVER_ACTIVE
 	_, err = s.db.Exec(ctx, `
 		UPDATE users u
 		SET role_state = 'DRIVER_ACTIVE', updated_at = NOW()
 		FROM driver_profiles dp
 		WHERE dp.id = $1 AND u.id = dp.user_id
 	`, profileID)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Grant one-time free trial for this vehicle type — logged but never blocks approval.
+	if s.packages != nil {
+		if err := s.packages.GrantFreeTrialIfEligible(ctx, driverUserID, transportType); err != nil {
+			s.log.Error().Err(err).
+				Str("driver_user_id", driverUserID).
+				Str("transport_type", transportType).
+				Msg("admin: free trial grant failed after approval")
+		}
+	}
+
+	return nil
 }
 
 // RejectDriver rejects a driver application with a reason.

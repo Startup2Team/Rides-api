@@ -235,9 +235,9 @@ func (r *Repository) CancellationStats(ctx context.Context) (map[string]interfac
 	`).Scan(&totalCancels, &customerCancels, &driverCancels, &noCancelCount)
 
 	return map[string]interface{}{
-		"total_cancellations":    totalCancels,
-		"by_customer":            customerCancels,
-		"by_driver":              driverCancels,
-		"no_driver_found":        noCancelCount,
+		"total_cancellations": totalCancels,
+		"by_customer":         customerCancels,
+		"by_driver":           driverCancels,
+		"no_driver_found":     noCancelCount,
 	}, nil
 }

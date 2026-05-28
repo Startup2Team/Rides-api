@@ -10,15 +10,15 @@ import (
 type Status string
 
 const (
-	StatusSearching      Status = "SEARCHING"
-	StatusMatched        Status = "MATCHED"
-	StatusNegotiating    Status = "NEGOTIATING"
-	StatusConfirmed      Status = "CONFIRMED"
-	StatusDriverEnRoute  Status = "DRIVER_EN_ROUTE"
-	StatusDriverArrived  Status = "DRIVER_ARRIVED"
-	StatusInProgress     Status = "IN_PROGRESS"
-	StatusCompleted      Status = "COMPLETED"
-	StatusCancelled      Status = "CANCELLED"
+	StatusSearching     Status = "SEARCHING"
+	StatusMatched       Status = "MATCHED"
+	StatusNegotiating   Status = "NEGOTIATING"
+	StatusConfirmed     Status = "CONFIRMED"
+	StatusDriverEnRoute Status = "DRIVER_EN_ROUTE"
+	StatusDriverArrived Status = "DRIVER_ARRIVED"
+	StatusInProgress    Status = "IN_PROGRESS"
+	StatusCompleted     Status = "COMPLETED"
+	StatusCancelled     Status = "CANCELLED"
 )
 
 // allowedTransitions is the authoritative state machine definition.
@@ -34,8 +34,8 @@ var allowedTransitions = map[Status]map[Status]bool{
 	},
 	StatusNegotiating: {
 		StatusConfirmed: true,
-		StatusSearching: true,  // negotiation failed — find next driver
-		StatusCancelled: true,  // customer cancelled during negotiation
+		StatusSearching: true, // negotiation failed — find next driver
+		StatusCancelled: true, // customer cancelled during negotiation
 	},
 	StatusConfirmed: {
 		StatusDriverEnRoute: true,

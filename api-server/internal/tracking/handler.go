@@ -34,10 +34,10 @@ const (
 
 // Handler manages WebSocket upgrades for drivers and customers.
 type Handler struct {
-	hub        *Hub
-	driverSvc  *driver.Service
-	cfg        *config.Config
-	log        zerolog.Logger
+	hub       *Hub
+	driverSvc *driver.Service
+	cfg       *config.Config
+	log       zerolog.Logger
 }
 
 func NewHandler(hub *Hub, driverSvc *driver.Service, cfg *config.Config, log zerolog.Logger) *Handler {

@@ -27,13 +27,13 @@ var (
 	ErrInternal     = &AppError{StatusCode: http.StatusInternalServerError, Code: "INTERNAL", Message: "internal server error"}
 
 	// Auth
-	ErrInvalidOTP       = &AppError{StatusCode: http.StatusBadRequest, Code: "INVALID_OTP", Message: "OTP is invalid or expired"}
-	ErrOTPExpired       = &AppError{StatusCode: http.StatusBadRequest, Code: "OTP_EXPIRED", Message: "OTP has expired"}
-	ErrOTPAlreadyUsed   = &AppError{StatusCode: http.StatusBadRequest, Code: "OTP_ALREADY_USED", Message: "OTP has already been used"}
-	ErrTokenExpired     = &AppError{StatusCode: http.StatusUnauthorized, Code: "TOKEN_EXPIRED", Message: "token has expired"}
-	ErrTokenRevoked     = &AppError{StatusCode: http.StatusUnauthorized, Code: "TOKEN_REVOKED", Message: "session has been revoked"}
-	ErrTokenInvalid     = &AppError{StatusCode: http.StatusUnauthorized, Code: "TOKEN_INVALID", Message: "token is invalid"}
-	ErrRateLimited      = &AppError{StatusCode: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "too many requests, please wait"}
+	ErrInvalidOTP     = &AppError{StatusCode: http.StatusBadRequest, Code: "INVALID_OTP", Message: "OTP is invalid or expired"}
+	ErrOTPExpired     = &AppError{StatusCode: http.StatusBadRequest, Code: "OTP_EXPIRED", Message: "OTP has expired"}
+	ErrOTPAlreadyUsed = &AppError{StatusCode: http.StatusBadRequest, Code: "OTP_ALREADY_USED", Message: "OTP has already been used"}
+	ErrTokenExpired   = &AppError{StatusCode: http.StatusUnauthorized, Code: "TOKEN_EXPIRED", Message: "token has expired"}
+	ErrTokenRevoked   = &AppError{StatusCode: http.StatusUnauthorized, Code: "TOKEN_REVOKED", Message: "session has been revoked"}
+	ErrTokenInvalid   = &AppError{StatusCode: http.StatusUnauthorized, Code: "TOKEN_INVALID", Message: "token is invalid"}
+	ErrRateLimited    = &AppError{StatusCode: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "too many requests, please wait"}
 
 	// Driver
 	ErrDriverNotActive       = &AppError{StatusCode: http.StatusForbidden, Code: "DRIVER_NOT_ACTIVE", Message: "driver profile is not active"}
