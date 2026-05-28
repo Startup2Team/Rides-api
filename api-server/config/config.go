@@ -10,8 +10,9 @@ import (
 )
 
 type Config struct {
-	Port string
-	Env  string
+	Port        string
+	Env         string
+	AdminOrigin string // CORS allowed origin for admin frontend (production URL)
 
 	Database DatabaseConfig
 	Redis    RedisConfig
@@ -101,6 +102,7 @@ func Load() (*Config, error) {
 
 	cfg.Port = getEnv("PORT", "8080")
 	cfg.Env = getEnv("ENV", "development")
+	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")

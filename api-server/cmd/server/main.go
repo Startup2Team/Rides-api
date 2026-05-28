@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	chiCors "github.com/go-chi/cors"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -22,7 +23,10 @@ import (
 	"github.com/workspace/ride-platform/internal/analytics"
 	"github.com/workspace/ride-platform/internal/auth"
 	"github.com/workspace/ride-platform/internal/customer"
+	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
+	"github.com/workspace/ride-platform/internal/inbox"
+	"github.com/workspace/ride-platform/internal/incidents"
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
 	mw "github.com/workspace/ride-platform/internal/middleware"
@@ -30,8 +34,12 @@ import (
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
+	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
+	"github.com/workspace/ride-platform/internal/settings"
+	"github.com/workspace/ride-platform/internal/team"
 	"github.com/workspace/ride-platform/internal/telephony"
+	"github.com/workspace/ride-platform/internal/tickets"
 	"github.com/workspace/ride-platform/internal/tracking"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
@@ -91,6 +99,14 @@ func main() {
 	negRepo := negotiation.NewRepository(db)
 	pkgRepo := packages.NewRepository(db)
 
+	// ── New module repositories ───────────────────────────────────────────────
+	incidentRepo := incidents.NewRepository(db)
+	ticketRepo := tickets.NewRepository(db)
+	inboxRepo := inbox.NewRepository(db)
+	reportRepo := reports.NewRepository(db)
+	settingsRepo := settings.NewRepository(db)
+	teamRepo := team.NewRepository(db)
+
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
 	hub := tracking.NewHub(log)
 
@@ -106,6 +122,15 @@ func main() {
 	adminSvc := admin.NewService(db, log)
 	locSvc := location.NewService(db, rdb, cfg, log)
 
+	// ── New module services ───────────────────────────────────────────────────
+	incidentSvc := incidents.NewService(incidentRepo)
+	ticketSvc := tickets.NewService(ticketRepo)
+	inboxSvc := inbox.NewService(inboxRepo)
+	reportSvc := reports.NewService(reportRepo)
+	settingsSvc := settings.NewService(settingsRepo)
+	teamSvc := team.NewService(teamRepo, cfg)
+	dashSvc := dashboard.NewService(db, rdb, log)
+
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	custSvc := customer.NewService(custRepo)
 
@@ -120,6 +145,15 @@ func main() {
 	locH := location.NewHandler(locSvc, rideSvc)
 	pkgH := packages.NewHandler(pkgSvc)
 
+	// New module handlers
+	incidentH := incidents.NewHandler(incidentSvc)
+	ticketH := tickets.NewHandler(ticketSvc)
+	inboxH := inbox.NewHandler(inboxSvc)
+	reportH := reports.NewHandler(reportSvc)
+	settingsH := settings.NewHandler(settingsSvc)
+	teamH := team.NewHandler(teamSvc)
+	dashH := dashboard.NewHandler(dashSvc)
+
 	// ── Background goroutines ─────────────────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
@@ -130,8 +164,28 @@ func main() {
 	// Pre-warm landmark route cache
 	locSvc.WarmLandmarkRoutes(bgCtx)
 
+	// Pre-warm dashboard cache and start background refresh
+	dashSvc.WarmCache(bgCtx)
+	go dashSvc.PollLoop(bgCtx)
+
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
+
+	// ── CORS ──────────────────────────────────────────────────────────────────
+	// Allow the admin Next.js dev server and any configured production origin.
+	allowedOrigins := []string{"http://localhost:3000", "http://localhost:3001"}
+	if origin := cfg.AdminOrigin; origin != "" {
+		allowedOrigins = append(allowedOrigins, origin)
+	}
+	r.Use(chiCors.Handler(chiCors.Options{
+		AllowedOrigins:   allowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID"},
+		ExposedHeaders:   []string{"X-Request-ID"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
@@ -248,24 +302,53 @@ func main() {
 	// ── Active ride (reconnect recovery) ─────────────────────────────────────
 	r.With(mw.Authenticate(cfg, rdb)).Get(apiV1Prefix+"/rides/active", locH.GetActiveRide)
 
-	// ── Admin ─────────────────────────────────────────────────────────────────
+	// ── Admin auth (public — no admin JWT required) ───────────────────────────
+	r.Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
+	r.Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
+	r.Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+
+	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
 		r.Use(mw.RequireRole(mw.RoleAdmin))
 
+		// Dashboard
+		r.Get("/dashboard", dashH.Get)
+
+		// Drivers
 		r.Get("/drivers", adminH.ListDrivers)
+		r.Get("/drivers/overview", adminH.DriverOverview)
 		r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 		r.Post("/drivers/{id}/reject", adminH.RejectDriver)
 		r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
+		r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
 
+		// Customers
+		r.Get("/customers", adminH.ListCustomers)
+		r.Get("/customers/{id}", adminH.GetCustomer)
+		r.Post("/customers/{id}/suspend", adminH.SuspendUser)
+		r.Post("/customers/{id}/reinstate", adminH.ReinstateUser)
+
+		// Backwards-compat users alias
 		r.Get("/users", adminH.ListUsers)
 		r.Post("/users/{id}/suspend", adminH.SuspendUser)
 
+		// Safety flags
 		r.Get("/flags/gps-anomalies", adminH.GPSAnomalies)
 		r.Get("/flags/device-collisions", adminH.DeviceCollisions)
 
+		// Rides (live + history)
 		r.Get("/rides", adminH.ListRides)
+		r.Get("/rides/{id}", adminH.GetRide)
 
+		// Negotiations
+		r.Get("/negotiations", adminH.ListNegotiations)
+
+		// Revenue / transactions
+		r.Get("/revenue/kpis", adminH.RevenueKPIs)
+		r.Get("/revenue/transactions", adminH.ListTransactions)
+
+		// Analytics
 		r.Get("/analytics/overview", anaH.Overview)
 		r.Get("/analytics/rides/daily", anaH.DailyRides)
 		r.Get("/analytics/rides/weekly", anaH.WeeklyRides)
@@ -273,7 +356,71 @@ func main() {
 		r.Get("/analytics/drivers/performance", anaH.DriverPerformance)
 		r.Get("/analytics/negotiation/stats", anaH.NegotiationStats)
 		r.Get("/analytics/heatmap", anaH.Heatmap)
+		r.Get("/analytics/heatmap/zones", anaH.HeatmapZones)
 		r.Get("/analytics/cancellations", anaH.Cancellations)
+		r.Get("/analytics/funnel", anaH.Funnel)
+		r.Get("/analytics/vehicle-mix", anaH.VehicleMix)
+		r.Get("/analytics/activity-heatmap", anaH.ActivityHeatmap)
+		r.Get("/analytics/satisfaction", anaH.Satisfaction)
+
+		// Safety incidents
+		r.Get("/incidents", incidentH.List)
+		r.Post("/incidents", incidentH.Create)
+		r.Get("/incidents/{id}", incidentH.Get)
+		r.Post("/incidents/{id}/acknowledge", incidentH.Acknowledge)
+		r.Post("/incidents/{id}/escalate", incidentH.Escalate)
+		r.Post("/incidents/{id}/resolve", incidentH.Resolve)
+		r.Post("/incidents/{id}/message", incidentH.Message)
+
+		// Support tickets
+		r.Get("/tickets", ticketH.List)
+		r.Post("/tickets", ticketH.Create)
+		r.Get("/tickets/{id}", ticketH.Get)
+		r.Post("/tickets/{id}/reply", ticketH.Reply)
+		r.Post("/tickets/{id}/assign", ticketH.Assign)
+		r.Post("/tickets/{id}/resolve", ticketH.Resolve)
+
+		// Inbox
+		r.Get("/inbox", inboxH.List)
+		r.Get("/inbox/{id}", inboxH.Get)
+		r.Post("/inbox/{id}/reply", inboxH.Reply)
+		r.Post("/inbox/{id}/archive", inboxH.Archive)
+		r.Post("/inbox/{id}/spam", inboxH.Spam)
+
+		// Reports
+		r.Get("/reports", reportH.List)
+		r.Post("/reports", reportH.Generate)
+		r.Get("/reports/scheduled", reportH.ListScheduled)
+		r.Post("/reports/scheduled", reportH.CreateScheduled)
+		r.Post("/reports/scheduled/{id}/toggle", reportH.ToggleScheduled)
+		r.Get("/reports/{id}", reportH.Get)
+
+		// Settings
+		r.Get("/settings", settingsH.GetAll)
+		r.Put("/settings/commission", settingsH.UpdateCommission)
+		r.Put("/settings/negotiation", settingsH.UpdateNegotiation)
+		r.Put("/settings/fares", settingsH.UpdateFares)
+		r.Put("/settings/integrations", settingsH.UpdateIntegrations)
+		r.Put("/settings/notifications", settingsH.UpdateNotifications)
+		r.Put("/settings/regions/{id}", settingsH.UpdateRegion)
+
+		// Current admin account (own profile + 2FA management)
+		r.Get("/account", teamH.GetAccount)
+		r.Put("/account", teamH.UpdateAccount)
+		r.Post("/account/password", teamH.ChangePassword)
+		r.Get("/account/2fa/setup", teamH.Setup2FA)
+		r.Post("/account/2fa/enable", teamH.Enable2FA)
+		r.Post("/account/2fa/disable", teamH.Disable2FA)
+
+		// Team / admin accounts
+		r.Get("/team", teamH.List)
+		r.Post("/team/invite", teamH.Invite)
+		r.Get("/team/roles", teamH.ListRoles)
+		r.Post("/team/members/{id}/role", teamH.UpdateRole)
+		r.Post("/team/members/{id}/suspend", teamH.Suspend)
+		r.Post("/team/members/{id}/reinstate", teamH.Reinstate)
+		r.Post("/team/members/{id}/remove", teamH.Remove)
+		r.Post("/team/members/{id}/set-password", teamH.SetPassword)
 	})
 
 	// ── WebSocket ─────────────────────────────────────────────────────────────

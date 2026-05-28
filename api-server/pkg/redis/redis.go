@@ -146,3 +146,13 @@ func (Keys) GPSAnomalyCount(driverID string) string {
 func (Keys) AnalyticsStream() string {
 	return "analytics:events"
 }
+
+// ── Admin dashboard ────────────────────────────────────────────────────────
+
+func (Keys) DashboardCache() string {
+	return "admin:dashboard:cache"
+}
+
+func (Keys) RevenueTodayCache() string {
+	return "admin:revenue:today"
+}

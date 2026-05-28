@@ -19,3 +19,10 @@ vendor/
 # OS
 .DS_Store
 Thumbs.db
+# Logslogs
+*.log
+logs/
+.cache/
+*.log
+*.env
+.env
