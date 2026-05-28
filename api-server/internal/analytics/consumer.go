@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	consumerGroup  = "analytics-consumer"
-	consumerName   = "analytics-worker-1"
-	blockTimeout   = 5 * time.Second
-	batchSize      = 100
+	consumerGroup = "analytics-consumer"
+	consumerName  = "analytics-worker-1"
+	blockTimeout  = 5 * time.Second
+	batchSize     = 100
 )
 
 // Consumer reads from the Redis Stream and can forward events to external

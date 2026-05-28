@@ -14,7 +14,7 @@ type Round struct {
 	RoundNumber     int
 	ProposedBy      string // "CUSTOMER" | "DRIVER"
 	ProposedAmount  float64
-	Response        *string  // ACCEPTED | COUNTERED | DECLINED | TIMEOUT
+	Response        *string // ACCEPTED | COUNTERED | DECLINED | TIMEOUT
 	CallInitiated   bool
 	CallInitiatedAt *time.Time
 	CreatedAt       time.Time

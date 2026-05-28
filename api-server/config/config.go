@@ -82,9 +82,9 @@ type GPSConfig struct {
 }
 
 type DriverConfig struct {
-	OfflineCooldownMinutes        int
-	DeclinePriorityThreshold      int
-	DeclineAutoOfflineThreshold   int
+	OfflineCooldownMinutes      int
+	DeclinePriorityThreshold    int
+	DeclineAutoOfflineThreshold int
 }
 
 type CustomerConfig struct {
