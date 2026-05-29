@@ -336,24 +336,48 @@ func main() {
 		r.Use(mw.Authenticate(cfg, rdb))
 		r.Use(mw.RequireRole(mw.RoleAdmin))
 
+		// Auth (protected actions)
+		r.Post("/auth/logout", teamH.Logout)
+		r.Post("/auth/totp/reset", teamH.ResetTOTP)
+
 		// Dashboard
 		r.Get("/dashboard", dashH.Get)
+
+		// Account (self)
+		r.Get("/account", teamH.GetAccount)
+		r.Get("/account/me", teamH.GetAccount)
+		r.Put("/account", teamH.UpdateAccount)
+		r.Patch("/account/me", teamH.UpdateAccount)
+		r.Post("/account/password", teamH.ChangePassword)
+		r.Post("/account/change-password", teamH.ChangePassword)
+		r.Get("/account/sessions", teamH.GetSessions)
+		r.Delete("/account/sessions/{sessionId}", teamH.RevokeSession)
+		r.Get("/account/2fa/setup", teamH.Setup2FA)
+		r.Post("/account/2fa/enable", teamH.Enable2FA)
+		r.Post("/account/2fa/disable", teamH.Disable2FA)
 
 		// Drivers
 		r.Get("/drivers", adminH.ListDrivers)
 		r.Get("/drivers/overview", adminH.DriverOverview)
+		r.Get("/drivers/{id}", adminH.GetDriver)
+		r.Patch("/drivers/{id}", adminH.UpdateDriver)
+		r.Delete("/drivers/{id}", adminH.DeleteDriver)
 		r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 		r.Post("/drivers/{id}/reject", adminH.RejectDriver)
 		r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
 		r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
+		r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
+		r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 
 		// Customers
 		r.Get("/customers", adminH.ListCustomers)
 		r.Get("/customers/{id}", adminH.GetCustomer)
+		r.Patch("/customers/{id}", adminH.UpdateCustomer)
+		r.Patch("/customers/{id}/ban", adminH.BanCustomer)
 		r.Post("/customers/{id}/suspend", adminH.SuspendUser)
 		r.Post("/customers/{id}/reinstate", adminH.ReinstateUser)
 
-		// Backwards-compat users alias
+		// Users (backwards compat)
 		r.Get("/users", adminH.ListUsers)
 		r.Post("/users/{id}/suspend", adminH.SuspendUser)
 
@@ -361,9 +385,16 @@ func main() {
 		r.Get("/flags/gps-anomalies", adminH.GPSAnomalies)
 		r.Get("/flags/device-collisions", adminH.DeviceCollisions)
 
-		// Rides (live + history)
+		// Live rides
+		r.Get("/rides/live", adminH.ListLiveRides)
+		r.Get("/rides/live/{id}", adminH.GetLiveRide)
+		r.Post("/rides/live/{id}/intervene", adminH.InterveneRide)
+
+		// All rides (history)
 		r.Get("/rides", adminH.ListRides)
 		r.Get("/rides/{id}", adminH.GetRide)
+
+		// Pricing
 		r.Get("/pricing", fareH.ListActivePricing)
 		r.Get("/pricing/{vehicle_type_code}", fareH.GetActivePricingByType)
 		r.Get("/pricing/{vehicle_type_code}/history", fareH.GetPricingHistory)
@@ -371,10 +402,13 @@ func main() {
 
 		// Negotiations
 		r.Get("/negotiations", adminH.ListNegotiations)
+		r.Get("/negotiations/{id}", adminH.GetNegotiation)
 
-		// Revenue / transactions
+		// Revenue
+		r.Get("/revenue", adminH.Revenue)
 		r.Get("/revenue/kpis", adminH.RevenueKPIs)
 		r.Get("/revenue/transactions", adminH.ListTransactions)
+		r.Post("/revenue/payouts/disburse", adminH.DisbursePayouts)
 
 		// Analytics
 		r.Get("/analytics/overview", anaH.Overview)
@@ -395,12 +429,21 @@ func main() {
 		r.Get("/incidents", incidentH.List)
 		r.Post("/incidents", incidentH.Create)
 		r.Get("/incidents/{id}", incidentH.Get)
+		r.Patch("/incidents/{id}/status", incidentH.UpdateStatus)
 		r.Post("/incidents/{id}/acknowledge", incidentH.Acknowledge)
 		r.Post("/incidents/{id}/escalate", incidentH.Escalate)
 		r.Post("/incidents/{id}/resolve", incidentH.Resolve)
 		r.Post("/incidents/{id}/message", incidentH.Message)
 
 		// Support tickets
+		r.Get("/support/tickets", ticketH.List)
+		r.Post("/support/tickets", ticketH.Create)
+		r.Get("/support/tickets/{id}", ticketH.Get)
+		r.Post("/support/tickets/{id}/reply", ticketH.Reply)
+		r.Post("/support/tickets/{id}/assign", ticketH.Assign)
+		r.Post("/support/tickets/{id}/resolve", ticketH.Resolve)
+		r.Patch("/support/tickets/{id}", ticketH.Patch)
+		// Keep old paths for compatibility
 		r.Get("/tickets", ticketH.List)
 		r.Post("/tickets", ticketH.Create)
 		r.Get("/tickets/{id}", ticketH.Get)
@@ -412,16 +455,21 @@ func main() {
 		r.Get("/inbox", inboxH.List)
 		r.Get("/inbox/{id}", inboxH.Get)
 		r.Post("/inbox/{id}/reply", inboxH.Reply)
+		r.Patch("/inbox/{id}", inboxH.UpdateStatus)
+		r.Delete("/inbox/{id}", inboxH.Delete)
 		r.Post("/inbox/{id}/archive", inboxH.Archive)
 		r.Post("/inbox/{id}/spam", inboxH.Spam)
 
 		// Reports
 		r.Get("/reports", reportH.List)
 		r.Post("/reports", reportH.Generate)
+		r.Post("/reports/generate", reportH.Generate)
 		r.Get("/reports/scheduled", reportH.ListScheduled)
 		r.Post("/reports/scheduled", reportH.CreateScheduled)
 		r.Post("/reports/scheduled/{id}/toggle", reportH.ToggleScheduled)
 		r.Get("/reports/{id}", reportH.Get)
+		r.Get("/reports/{id}/download", reportH.Download)
+		r.Delete("/reports/{id}", reportH.Delete)
 
 		// Settings
 		r.Get("/settings", settingsH.GetAll)
@@ -430,20 +478,18 @@ func main() {
 		r.Put("/settings/fares", settingsH.UpdateFares)
 		r.Put("/settings/integrations", settingsH.UpdateIntegrations)
 		r.Put("/settings/notifications", settingsH.UpdateNotifications)
+		r.Post("/settings/regions", settingsH.CreateRegion)
 		r.Put("/settings/regions/{id}", settingsH.UpdateRegion)
-
-		// Current admin account (own profile + 2FA management)
-		r.Get("/account", teamH.GetAccount)
-		r.Put("/account", teamH.UpdateAccount)
-		r.Post("/account/password", teamH.ChangePassword)
-		r.Get("/account/2fa/setup", teamH.Setup2FA)
-		r.Post("/account/2fa/enable", teamH.Enable2FA)
-		r.Post("/account/2fa/disable", teamH.Disable2FA)
+		r.Patch("/settings/regions/{id}", settingsH.UpdateRegion)
+		r.Delete("/settings/regions/{id}", settingsH.DeleteRegion)
 
 		// Team / admin accounts
 		r.Get("/team", teamH.List)
 		r.Post("/team/invite", teamH.Invite)
 		r.Get("/team/roles", teamH.ListRoles)
+		r.Post("/team/roles", teamH.CreateRole)
+		r.Patch("/team/roles/{roleId}", teamH.UpdateRoleByID)
+		r.Delete("/team/roles/{roleId}", teamH.DeleteRoleByID)
 		r.Post("/team/members/{id}/role", teamH.UpdateRole)
 		r.Post("/team/members/{id}/suspend", teamH.Suspend)
 		r.Post("/team/members/{id}/reinstate", teamH.Reinstate)

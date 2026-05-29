@@ -256,6 +256,230 @@ func (h *Handler) DeviceCollisions(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, data)
 }
 
+// GET /api/v1/admin/drivers/:id
+func (h *Handler) GetDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	driver, err := h.svc.GetDriver(r.Context(), profileID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, driver)
+}
+
+// PATCH /api/v1/admin/drivers/:id
+func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	var fields map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil || len(fields) == 0 {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.UpdateDriver(r.Context(), profileID, fields); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// DELETE /api/v1/admin/drivers/:id
+func (h *Handler) DeleteDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	if err := h.svc.DeleteDriver(r.Context(), profileID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "deleted"})
+}
+
+// PATCH /api/v1/admin/drivers/:id/verify  (unified approve/reject)
+func (h *Handler) VerifyDriver(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	profileID := chi.URLParam(r, "id")
+	var body struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Action == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	switch body.Action {
+	case "approve":
+		if err := h.svc.ApproveDriver(r.Context(), profileID, claims.UserID); err != nil {
+			respond.Error(w, err)
+			return
+		}
+		respond.OK(w, map[string]string{"message": "driver approved"})
+	case "reject":
+		if body.Reason == "" {
+			respond.ErrorMsg(w, http.StatusBadRequest, "REASON_REQUIRED", "reason is required for rejection")
+			return
+		}
+		if err := h.svc.RejectDriver(r.Context(), profileID, claims.UserID, body.Reason); err != nil {
+			respond.Error(w, err)
+			return
+		}
+		respond.OK(w, map[string]string{"message": "driver rejected"})
+	default:
+		respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_ACTION", "action must be approve or reject")
+	}
+}
+
+// PATCH /api/v1/admin/drivers/:id/status  (unified suspend/reinstate)
+func (h *Handler) UpdateDriverStatus(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	profileID := chi.URLParam(r, "id")
+	var body struct {
+		Status        string `json:"status"`
+		Reason        string `json:"reason"`
+		DurationHours int    `json:"duration_hours"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Status == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	switch body.Status {
+	case "Suspended":
+		if body.DurationHours <= 0 {
+			body.DurationHours = 24
+		}
+		if err := h.svc.SuspendDriver(r.Context(), profileID, claims.UserID, body.Reason, body.DurationHours); err != nil {
+			respond.Error(w, err)
+			return
+		}
+	case "Active":
+		if err := h.svc.ReinstateDriver(r.Context(), profileID); err != nil {
+			respond.Error(w, err)
+			return
+		}
+	default:
+		respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_STATUS", "status must be Active or Suspended")
+		return
+	}
+	respond.OK(w, map[string]string{"status": body.Status})
+}
+
+// PATCH /api/v1/admin/customers/:id
+func (h *Handler) UpdateCustomer(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	var body struct {
+		Status string `json:"status"`
+		Notes  string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.UpdateCustomer(r.Context(), userID, body.Status, body.Notes); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// PATCH /api/v1/admin/customers/:id/ban
+func (h *Handler) BanCustomer(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Reason == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.BanCustomer(r.Context(), userID, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"status": "Banned"})
+}
+
+// GET /api/v1/admin/rides/live
+func (h *Handler) ListLiveRides(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, offset := paginate(r)
+	rides, total, err := h.svc.ListLiveRides(r.Context(),
+		q.Get("status"), q.Get("district"), q.Get("search"),
+		limit, offset)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"rides": rides, "total": total})
+}
+
+// GET /api/v1/admin/rides/live/:id
+func (h *Handler) GetLiveRide(w http.ResponseWriter, r *http.Request) {
+	rideID := chi.URLParam(r, "id")
+	ride, err := h.svc.GetLiveRide(r.Context(), rideID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, ride)
+}
+
+// POST /api/v1/admin/rides/live/:id/intervene
+func (h *Handler) InterveneRide(w http.ResponseWriter, r *http.Request) {
+	rideID := chi.URLParam(r, "id")
+	var body struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Action == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.InterveneRide(r.Context(), rideID, body.Action, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "action applied"})
+}
+
+// GET /api/v1/admin/negotiations/:id
+func (h *Handler) GetNegotiation(w http.ResponseWriter, r *http.Request) {
+	rideID := chi.URLParam(r, "id")
+	neg, err := h.svc.GetNegotiation(r.Context(), rideID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, neg)
+}
+
+// GET /api/v1/admin/revenue  (unified)
+func (h *Handler) Revenue(w http.ResponseWriter, r *http.Request) {
+	period := r.URL.Query().Get("period")
+	if period == "" {
+		period = "month"
+	}
+	data, err := h.svc.Revenue(r.Context(), period)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
+// POST /api/v1/admin/revenue/payouts/disburse
+func (h *Handler) DisbursePayouts(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TransactionIDs []string `json:"transactionIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TransactionIDs) == 0 {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	count, total, err := h.svc.DisbursePayouts(r.Context(), body.TransactionIDs)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"disbursed": count, "totalAmount": total})
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 func paginate(r *http.Request) (int, int) {

@@ -44,7 +44,7 @@ func (r *Repository) List(ctx context.Context, status, format string, limit, off
 
 	args = append(args, limit, offset)
 	rows, err := r.db.Query(ctx,
-		`SELECT id, template, status, format, date_range, file_size, generated_at, created_by, created_at `+
+		`SELECT id, template, status, format, date_range, file_size, file_path, generated_at, created_by, created_at `+
 			base+where+` ORDER BY created_at DESC LIMIT $`+itoa(n)+` OFFSET $`+itoa(n+1),
 		args...)
 	if err != nil {
@@ -56,7 +56,7 @@ func (r *Repository) List(ctx context.Context, status, format string, limit, off
 	for rows.Next() {
 		rep := &Report{}
 		if err := rows.Scan(&rep.ID, &rep.Template, &rep.Status, &rep.Format,
-			&rep.DateRange, &rep.FileSize, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt); err != nil {
+			&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, rep)
@@ -67,10 +67,10 @@ func (r *Repository) List(ctx context.Context, status, format string, limit, off
 func (r *Repository) FindByID(ctx context.Context, id string) (*Report, error) {
 	rep := &Report{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, template, status, format, date_range, file_size, generated_at, created_by, created_at
+		SELECT id, template, status, format, date_range, file_size, file_path, generated_at, created_by, created_at
 		FROM reports WHERE id = $1
 	`, id).Scan(&rep.ID, &rep.Template, &rep.Status, &rep.Format,
-		&rep.DateRange, &rep.FileSize, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
+		&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
 	return rep, err
 }
 
@@ -79,10 +79,10 @@ func (r *Repository) Create(ctx context.Context, template, format, dateRange str
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO reports (template, format, date_range, created_by)
 		VALUES ($1,$2,$3,$4)
-		RETURNING id, template, status, format, date_range, file_size, generated_at, created_by, created_at
+		RETURNING id, template, status, format, date_range, file_size, file_path, generated_at, created_by, created_at
 	`, template, format, dateRange, createdBy).Scan(
 		&rep.ID, &rep.Template, &rep.Status, &rep.Format,
-		&rep.DateRange, &rep.FileSize, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
+		&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
 	return rep, err
 }
 
@@ -141,4 +141,21 @@ func (r *Repository) ToggleScheduled(ctx context.Context, id string) error {
 
 func itoa(n int) string {
 	return fmt.Sprintf("%d", n)
+}
+
+func (r *Repository) Delete(ctx context.Context, id string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM reports WHERE id = $1`, id)
+	return err
+}
+
+func (r *Repository) GetFilePath(ctx context.Context, id string) (string, error) {
+	var filePath *string
+	err := r.db.QueryRow(ctx, `SELECT file_path FROM reports WHERE id = $1`, id).Scan(&filePath)
+	if err != nil {
+		return "", err
+	}
+	if filePath == nil || *filePath == "" {
+		return "", fmt.Errorf("no file")
+	}
+	return *filePath, nil
 }
