@@ -53,7 +53,7 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 
 	_, err = s.db.Exec(ctx, `
 		UPDATE driver_profiles
-		SET approval_status = 'ACTIVE',
+		SET approval_status = 'APPROVED',
 		    approved_by = $1,
 		    approved_at = NOW(),
 		    rejection_reason = NULL,

@@ -15,6 +15,7 @@ import (
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 
 	"github.com/workspace/ride-platform/internal/analytics"
+	"github.com/workspace/ride-platform/internal/fare"
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/tracking"
 )
@@ -51,6 +52,12 @@ type Service struct {
 	engine    MatchingEngineInterface
 	routes    RouteFareRecorder
 	packages  PackagesService
+	fareRepo  FareConfigRepository
+}
+
+type FareConfigRepository interface {
+	GetActiveConfig(ctx context.Context, vehicleTypeCode string) (*fare.Config, error)
+	GetConfigByID(ctx context.Context, id string) (*fare.Config, error)
 }
 
 func NewService(repo *Repository, rdb *goredis.Client, notify *notification.Service, ana *analytics.Service, hub *tracking.Hub, cfg *config.Config, log zerolog.Logger) *Service {
@@ -69,15 +76,33 @@ func (s *Service) SetPackagesService(svc PackagesService) {
 	s.packages = svc
 }
 
+func (s *Service) SetFareRepository(repo FareConfigRepository) {
+	s.fareRepo = repo
+}
+
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
-func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare *float64) (*Ride, error) {
+func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64) (*Ride, error) {
 	key := rkeys.K.CustomerDailyCancel(customerID)
 	count, _ := s.redis.Get(ctx, key).Int()
 	if count >= s.cfg.Customer.CancelSuspendThreshold {
 		return nil, apperrors.ErrCustomerSuspended
 	}
 
-	r, err := s.repo.CreateRide(ctx, customerID, transportType, pickupAddr, destAddr, pickup, dest, initialFare)
+	var estimatedFare *float64
+	var pricingConfigID *string
+	if s.fareRepo != nil {
+		pricingCfg, err := s.fareRepo.GetActiveConfig(ctx, transportType)
+		if err != nil {
+			return nil, fmt.Errorf("pricing config unavailable: %w", err)
+		}
+		pricingConfigID = &pricingCfg.ID
+		if distanceKM != nil {
+			b := fare.Calculate(pricingCfg, *distanceKM, time.Now(), 0)
+			estimatedFare = &b.TotalFare
+		}
+	}
+
+	r, err := s.repo.CreateRide(ctx, customerID, transportType, pickupAddr, destAddr, pickup, dest, initialFare, estimatedFare, pricingConfigID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +151,23 @@ func (s *Service) GetActiveRide(ctx context.Context, customerID string) (*Ride, 
 	return r, nil
 }
 
+// GetRideForDriver retrieves a ride by ID for an assigned driver.
+func (s *Service) GetRideForDriver(ctx context.Context, rideID, driverUserID string) (*Ride, error) {
+	return s.repo.FindByIDAndDriver(ctx, rideID, driverUserID)
+}
+
+// GetActiveRideForDriver returns the driver's current active ride.
+func (s *Service) GetActiveRideForDriver(ctx context.Context, driverUserID string) (*Ride, error) {
+	profile, err := s.repo.FindDriverProfileByUserID(ctx, driverUserID)
+	if err == nil {
+		rideID, redisErr := s.redis.Get(ctx, rkeys.K.DriverActiveRide(profile.ID)).Result()
+		if redisErr == nil && rideID != "" {
+			return s.repo.FindByIDAndDriver(ctx, rideID, driverUserID)
+		}
+	}
+	return s.repo.FindActiveByDriver(ctx, driverUserID)
+}
+
 // CancelRide cancels a ride initiated by a customer.
 func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason string) error {
 	r, err := s.repo.FindByIDAndCustomer(ctx, rideID, customerID)
@@ -135,7 +177,15 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 	if !CancellableStatuses[r.Status] {
 		return apperrors.ErrInvalidTransition
 	}
-	if err := s.repo.Cancel(ctx, rideID, reason, "CUSTOMER"); err != nil {
+	cancellationFee := 0.0
+	if r.Status == StatusDriverArrived && r.PricingConfigID != nil && s.fareRepo != nil {
+		cfg, err := s.fareRepo.GetConfigByID(ctx, *r.PricingConfigID)
+		if err == nil {
+			cancellationFee = fare.CancellationFee(cfg, true)
+		}
+	}
+
+	if err := s.repo.CancelWithFee(ctx, rideID, reason, "CUSTOMER", cancellationFee); err != nil {
 		return err
 	}
 
@@ -372,6 +422,49 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 	if err := s.repo.SetCompleted(ctx, rideID); err != nil {
 		return err
 	}
+
+	waitingSeconds := 0
+	if r.DriverArrivedAt != nil && r.StartedAt != nil {
+		waitingSeconds = int(r.StartedAt.Sub(*r.DriverArrivedAt).Seconds())
+		if waitingSeconds < 0 {
+			waitingSeconds = 0
+		}
+	}
+	if waitingSeconds > 120*60 {
+		waitingSeconds = 120 * 60
+	}
+
+	var finalFare *float64
+	waitingCharge := 0.0
+	nightApplied := false
+	nightPct := 0.0
+	if s.fareRepo != nil && r.PricingConfigID != nil && r.StartedAt != nil {
+		pricingCfg, err := s.fareRepo.GetConfigByID(ctx, *r.PricingConfigID)
+		if err != nil {
+			s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: could not load pricing config for final fare")
+		} else {
+			distKM := 0.0
+			if r.EstimatedDistanceKM != nil {
+				distKM = *r.EstimatedDistanceKM
+			}
+			b := fare.Calculate(pricingCfg, distKM, *r.StartedAt, waitingSeconds)
+			waitingCharge = b.WaitingCharge
+			nightApplied = b.NightApplied
+			nightPct = pricingCfg.NightSurchargePct
+			if r.AgreedFare != nil {
+				f := *r.AgreedFare + waitingCharge
+				finalFare = &f
+			} else {
+				f := b.TotalFare
+				finalFare = &f
+			}
+		}
+	} else if r.AgreedFare != nil {
+		finalFare = r.AgreedFare
+	}
+	if err := s.repo.SetFinalFare(ctx, rideID, finalFare, waitingSeconds, waitingCharge, nightApplied, nightPct); err != nil {
+		return err
+	}
 	_ = s.repo.IncrementDriverRides(ctx, driverUserID)
 	if s.routes != nil && r.AgreedFare != nil {
 		s.routes.RecordAgreedFare(ctx, r.PickupPoint.Lat, r.PickupPoint.Lng, destination.Lat, destination.Lng, r.TransportType, *r.AgreedFare)
@@ -394,6 +487,16 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.completed", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.completed", "DRIVER", driverUserID, &rideID, map[string]interface{}{
 		"ride_id": rideID, "agreed_fare": r.AgreedFare,
+	})
+	s.hub.SendToCustomer(rideID, tracking.Message{
+		Type: "ride_completed", RideID: rideID,
+		Payload: map[string]interface{}{
+			"agreed_fare":     r.AgreedFare,
+			"waiting_seconds": waitingSeconds,
+			"waiting_charge":  waitingCharge,
+			"night_applied":   nightApplied,
+			"final_fare":      finalFare,
+		},
 	})
 	return nil
 }

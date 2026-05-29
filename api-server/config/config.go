@@ -21,6 +21,7 @@ type Config struct {
 	Firebase FirebaseConfig
 	GMaps    GoogleMapsConfig
 	MoMo     MoMoConfig
+	Storage  StorageConfig
 	Matching MatchingConfig
 	Ride     RideConfig
 	GPS      GPSConfig
@@ -64,6 +65,15 @@ type MoMoConfig struct {
 	APIKey          string
 	SubscriptionKey string
 	Environment     string
+}
+
+type StorageConfig struct {
+	Provider string
+	Bucket   string
+	Region   string
+	KeyID    string
+	Secret   string
+	CDNURL   string
 }
 
 type MatchingConfig struct {
@@ -126,6 +136,13 @@ func Load() (*Config, error) {
 	cfg.MoMo.APIKey = getEnv("MOMO_API_KEY", "")
 	cfg.MoMo.SubscriptionKey = getEnv("MOMO_SUBSCRIPTION_KEY", "")
 	cfg.MoMo.Environment = getEnv("MOMO_ENVIRONMENT", "sandbox")
+
+	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
+	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
+	cfg.Storage.Region = getEnv("STORAGE_REGION", "auto")
+	cfg.Storage.KeyID = getEnv("STORAGE_KEY_ID", "")
+	cfg.Storage.Secret = getEnv("STORAGE_SECRET", "")
+	cfg.Storage.CDNURL = getEnv("STORAGE_CDN_URL", "")
 
 	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 5000)
 	cfg.Matching.ExpandedRadiusM = getEnvInt("MATCH_RADIUS_EXPANDED_M", 10000)

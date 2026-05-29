@@ -268,10 +268,10 @@ func (r *Repository) FindNearby(ctx context.Context, loc geo.Point, radiusM int,
 		JOIN driver_profiles dp ON dp.id = dl.driver_id
 		JOIN users u ON u.id = dp.user_id
 		WHERE dp.is_online = TRUE
-		  AND dp.approval_status = 'ACTIVE'
+		  AND dp.approval_status = 'APPROVED'
 		  AND dp.transport_type = $2
 		  AND ST_DWithin(dl.location, ST_GeographyFromText($1), $3)
-		  AND dp.id != ALL($4::TEXT[])
+		  AND dp.id != ALL($4::uuid[])
 		  AND dp.user_id NOT IN (
 		      SELECT COALESCE(dp2.user_id, '00000000-0000-0000-0000-000000000000'::UUID)
 		      FROM rides r2
@@ -328,8 +328,8 @@ func (r *Repository) SetApprovalStatus(ctx context.Context, profileID, status, a
 	_, err := r.db.Exec(ctx, `
 		UPDATE driver_profiles
 		SET approval_status = $1,
-		    approved_by = CASE WHEN $1 = 'ACTIVE' AND $2 != '' THEN $2::UUID ELSE approved_by END,
-		    approved_at = CASE WHEN $1 = 'ACTIVE' THEN NOW() ELSE approved_at END,
+		    approved_by = CASE WHEN $1 = 'APPROVED' AND $2 != '' THEN $2::UUID ELSE approved_by END,
+		    approved_at = CASE WHEN $1 = 'APPROVED' THEN NOW() ELSE approved_at END,
 		    rejection_reason = $3,
 		    updated_at = NOW()
 		WHERE id = $4
