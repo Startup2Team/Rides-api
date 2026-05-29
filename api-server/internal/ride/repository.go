@@ -14,27 +14,50 @@ import (
 
 // Ride is the full operational ride record.
 type Ride struct {
-	ID                  string
-	CustomerID          string
-	DriverID            *string
-	TransportType       string
-	Status              Status
-	PickupPoint         geo.Point
-	PickupAddress       string
-	DestinationPoint    geo.Point
-	DestinationAddress  string
-	EstimatedDistanceKM *float64
-	CustomerInitialFare *float64
-	AgreedFare          *float64
-	FareLockedAt        *time.Time
-	CancelReason        *string
-	CancelledByRole     *string
-	DriverArrivedAt     *time.Time
-	StartedAt           *time.Time
-	CompletedAt         *time.Time
-	PickupExpired       bool
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                    string
+	CustomerID            string
+	DriverID              *string
+	TransportType         string
+	Status                Status
+	PickupPoint           geo.Point
+	PickupAddress         string
+	DestinationPoint      geo.Point
+	DestinationAddress    string
+	EstimatedDistanceKM   *float64
+	CustomerInitialFare   *float64
+	AgreedFare            *float64
+	FareLockedAt          *time.Time
+	CancelReason          *string
+	CancelledByRole       *string
+	DriverArrivedAt       *time.Time
+	StartedAt             *time.Time
+	CompletedAt           *time.Time
+	PricingConfigID       *string
+	EstimatedFareRWF      *float64
+	NightSurchargeApplied bool
+	NightSurchargePct     float64
+	WaitingSeconds        int
+	WaitingChargeRWF      float64
+	CancellationFeeRWF    float64
+	FinalFareRWF          *float64
+	PickupExpired         bool
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
+type RideRequestPayload struct {
+	RideID             string
+	TransportType      string
+	DistanceKM         float64
+	PickupLat          float64
+	PickupLng          float64
+	PickupAddress      string
+	DestinationLat     float64
+	DestinationLng     float64
+	DestinationAddress string
+	SuggestedFare      float64
+	CustomerName       string
+	CustomerPhone      string
 }
 
 // Repository handles all ride DB operations.
@@ -58,6 +81,10 @@ const rideSelectCols = `
 	agreed_fare, fare_locked_at,
 	cancel_reason, cancelled_by_role,
 	driver_arrived_at, started_at, completed_at,
+	pricing_config_id, estimated_fare_rwf,
+	COALESCE(night_surcharge_applied, FALSE), COALESCE(night_surcharge_pct, 0.0),
+	COALESCE(waiting_seconds, 0), COALESCE(waiting_charge_rwf, 0.0),
+	COALESCE(cancellation_fee_rwf, 0.0), final_fare_rwf,
 	COALESCE(pickup_expired, FALSE),
 	created_at, updated_at
 `
@@ -73,6 +100,8 @@ func scanRide(row pgx.Row) (*Ride, error) {
 		&r.AgreedFare, &r.FareLockedAt,
 		&r.CancelReason, &r.CancelledByRole,
 		&r.DriverArrivedAt, &r.StartedAt, &r.CompletedAt,
+		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
+		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
 		&r.PickupExpired, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if err != nil {
@@ -106,17 +135,72 @@ func (repo *Repository) FindByIDAndDriver(ctx context.Context, rideID, driverUse
 	return scanRide(row)
 }
 
-func (repo *Repository) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare *float64) (*Ride, error) {
+func (repo *Repository) FindActiveByDriver(ctx context.Context, driverUserID string) (*Ride, error) {
+	row := repo.db.QueryRow(ctx, `
+		SELECT `+rideSelectCols+`
+		FROM rides r
+		JOIN driver_profiles dp ON dp.id = r.driver_id
+		WHERE dp.user_id = $1
+		  AND r.status NOT IN ('COMPLETED','CANCELLED')
+		ORDER BY r.created_at DESC
+		LIMIT 1
+	`, driverUserID)
+	return scanRide(row)
+}
+
+func (repo *Repository) GetRideRequestPayload(ctx context.Context, rideID string) (*RideRequestPayload, error) {
+	row := repo.db.QueryRow(ctx, `
+		SELECT r.id,
+		       r.transport_type,
+		       COALESCE(r.estimated_distance_km, 0),
+		       ST_Y(r.pickup_point::geometry) AS pickup_lat,
+		       ST_X(r.pickup_point::geometry) AS pickup_lng,
+		       r.pickup_address,
+		       ST_Y(r.destination_point::geometry) AS dest_lat,
+		       ST_X(r.destination_point::geometry) AS dest_lng,
+		       r.destination_address,
+		       COALESCE(r.estimated_fare_rwf, r.customer_initial_fare, 0) AS suggested_fare,
+		       COALESCE(u.full_name, 'Customer') AS customer_name,
+		       COALESCE(u.phone_number, '') AS customer_phone
+		FROM rides r
+		JOIN users u ON u.id = r.customer_id
+		WHERE r.id = $1
+	`, rideID)
+
+	payload := &RideRequestPayload{}
+	if err := row.Scan(
+		&payload.RideID,
+		&payload.TransportType,
+		&payload.DistanceKM,
+		&payload.PickupLat,
+		&payload.PickupLng,
+		&payload.PickupAddress,
+		&payload.DestinationLat,
+		&payload.DestinationLng,
+		&payload.DestinationAddress,
+		&payload.SuggestedFare,
+		&payload.CustomerName,
+		&payload.CustomerPhone,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrRideNotFound
+		}
+		return nil, err
+	}
+	return payload, nil
+}
+
+func (repo *Repository) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, estimatedFare *float64, pricingConfigID *string) (*Ride, error) {
 	var id string
 	err := repo.db.QueryRow(ctx, `
 		INSERT INTO rides (
 			customer_id, transport_type, status,
 			pickup_point, pickup_address,
 			destination_point, destination_address,
-			customer_initial_fare
-		) VALUES ($1, $2, 'SEARCHING', ST_GeographyFromText($3), $4, ST_GeographyFromText($5), $6, $7)
+			customer_initial_fare, estimated_fare_rwf, pricing_config_id
+		) VALUES ($1, $2, 'SEARCHING', ST_GeographyFromText($3), $4, ST_GeographyFromText($5), $6, $7, $8, $9)
 		RETURNING id
-	`, customerID, transportType, pickup.WKT(), pickupAddr, dest.WKT(), destAddr, initialFare).Scan(&id)
+	`, customerID, transportType, pickup.WKT(), pickupAddr, dest.WKT(), destAddr, initialFare, estimatedFare, pricingConfigID).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +280,33 @@ func (repo *Repository) Cancel(ctx context.Context, rideID, reason, cancelledByR
 		UPDATE rides SET status = 'CANCELLED', cancel_reason = $1, cancelled_by_role = $2, updated_at = NOW()
 		WHERE id = $3
 	`, reason, cancelledByRole, rideID)
+	return err
+}
+
+func (repo *Repository) CancelWithFee(ctx context.Context, rideID, reason, cancelledByRole string, cancellationFee float64) error {
+	_, err := repo.db.Exec(ctx, `
+		UPDATE rides
+		SET status = 'CANCELLED',
+		    cancel_reason = $1,
+		    cancelled_by_role = $2,
+		    cancellation_fee_rwf = $3,
+		    updated_at = NOW()
+		WHERE id = $4
+	`, reason, cancelledByRole, cancellationFee, rideID)
+	return err
+}
+
+func (repo *Repository) SetFinalFare(ctx context.Context, rideID string, finalFare *float64, waitingSeconds int, waitingCharge float64, nightApplied bool, nightPct float64) error {
+	_, err := repo.db.Exec(ctx, `
+		UPDATE rides
+		SET final_fare_rwf = $1,
+		    waiting_seconds = $2,
+		    waiting_charge_rwf = $3,
+		    night_surcharge_applied = $4,
+		    night_surcharge_pct = $5,
+		    updated_at = NOW()
+		WHERE id = $6
+	`, finalFare, waitingSeconds, waitingCharge, nightApplied, nightPct, rideID)
 	return err
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/analytics"
+	"github.com/workspace/ride-platform/internal/fare"
 	"github.com/workspace/ride-platform/internal/ride"
 	"github.com/workspace/ride-platform/internal/telephony"
 	"github.com/workspace/ride-platform/internal/tracking"
@@ -29,6 +30,11 @@ type Service struct {
 	analytics *analytics.Service
 	cfg       *config.Config
 	log       zerolog.Logger
+	fareRepo  FareConfigRepository
+}
+
+type FareConfigRepository interface {
+	GetConfigByVehicleType(ctx context.Context, vehicleTypeCode string) (*fare.Config, error)
 }
 
 func NewService(repo *Repository, rideRepo *ride.Repository, rdb *goredis.Client, hub *tracking.Hub, tel *telephony.Service, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
@@ -36,6 +42,10 @@ func NewService(repo *Repository, rideRepo *ride.Repository, rdb *goredis.Client
 		repo: repo, rideRepo: rideRepo, redis: rdb, hub: hub,
 		telephony: tel, analytics: ana, cfg: cfg, log: log,
 	}
+}
+
+func (s *Service) SetFareRepository(repo FareConfigRepository) {
+	s.fareRepo = repo
 }
 
 // Propose submits a fare counter-offer from a customer or driver.
@@ -120,6 +130,12 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 	if latest.ProposedBy == actorRole {
 		return apperrors.New(409, "CANNOT_ACCEPT_OWN_PROPOSAL", "cannot accept your own proposal")
 	}
+	if s.fareRepo != nil {
+		cfg, err := s.fareRepo.GetConfigByVehicleType(ctx, r.TransportType)
+		if err == nil && latest.ProposedAmount < float64(cfg.MinFareRWF) {
+			return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
+		}
+	}
 
 	if err := s.repo.SetResponse(ctx, latest.ID, "ACCEPTED"); err != nil {
 		return err
@@ -164,6 +180,12 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 	}
 	if r.Status != ride.StatusNegotiating {
 		return apperrors.ErrInvalidTransition
+	}
+	if s.fareRepo != nil {
+		cfg, err := s.fareRepo.GetConfigByVehicleType(ctx, r.TransportType)
+		if err == nil && amount < float64(cfg.MinFareRWF) {
+			return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
+		}
 	}
 
 	if err := s.rideRepo.LockFare(ctx, rideID, amount); err != nil {

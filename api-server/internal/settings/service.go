@@ -21,3 +21,11 @@ func (s *Service) Update(ctx context.Context, key string, value interface{}) err
 func (s *Service) UpdateRegion(ctx context.Context, regionID string, updates map[string]interface{}) error {
 	return s.repo.UpdateRegion(ctx, regionID, updates)
 }
+
+func (s *Service) CreateRegion(ctx context.Context, name, status string) (map[string]interface{}, error) {
+	return s.repo.CreateRegion(ctx, name, status)
+}
+
+func (s *Service) DeleteRegion(ctx context.Context, regionID string) error {
+	return s.repo.DeleteRegion(ctx, regionID)
+}

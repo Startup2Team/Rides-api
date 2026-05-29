@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -84,6 +85,58 @@ func (r *Repository) UpdateRegion(ctx context.Context, regionID string, updates 
 		}
 	}
 	newRaw, err := json.Marshal(regions)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `UPDATE platform_settings SET value=$1, updated_at=NOW() WHERE key='regions'`, newRaw)
+	return err
+}
+
+func (r *Repository) CreateRegion(ctx context.Context, name, status string) (map[string]interface{}, error) {
+	var rawVal []byte
+	if err := r.db.QueryRow(ctx, `SELECT value FROM platform_settings WHERE key = 'regions'`).Scan(&rawVal); err != nil {
+		rawVal = []byte("[]")
+	}
+	var regions []map[string]interface{}
+	_ = json.Unmarshal(rawVal, &regions)
+
+	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	newRegion := map[string]interface{}{
+		"id": id, "name": name, "status": status, "drivers": 0,
+	}
+	regions = append(regions, newRegion)
+
+	newRaw, err := json.Marshal(regions)
+	if err != nil {
+		return nil, err
+	}
+	_, err = r.db.Exec(ctx, `
+		INSERT INTO platform_settings (key, value, updated_at)
+		VALUES ('regions', $1, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+	`, newRaw)
+	if err != nil {
+		return nil, err
+	}
+	return newRegion, nil
+}
+
+func (r *Repository) DeleteRegion(ctx context.Context, regionID string) error {
+	var rawVal []byte
+	if err := r.db.QueryRow(ctx, `SELECT value FROM platform_settings WHERE key = 'regions'`).Scan(&rawVal); err != nil {
+		return err
+	}
+	var regions []map[string]interface{}
+	if err := json.Unmarshal(rawVal, &regions); err != nil {
+		return err
+	}
+	filtered := regions[:0]
+	for _, region := range regions {
+		if id, ok := region["id"].(string); !ok || id != regionID {
+			filtered = append(filtered, region)
+		}
+	}
+	newRaw, err := json.Marshal(filtered)
 	if err != nil {
 		return err
 	}

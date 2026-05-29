@@ -79,3 +79,34 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request, key string) 
 	}
 	respond.NoContent(w)
 }
+
+// POST /api/v1/admin/settings/regions
+func (h *Handler) CreateRegion(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if body.Status == "" {
+		body.Status = "Coming soon"
+	}
+	region, err := h.svc.CreateRegion(r.Context(), body.Name, body.Status)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.Created(w, region)
+}
+
+// DELETE /api/v1/admin/settings/regions/:id
+func (h *Handler) DeleteRegion(w http.ResponseWriter, r *http.Request) {
+	regionID := chi.URLParam(r, "id")
+	if err := h.svc.DeleteRegion(r.Context(), regionID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "deleted"})
+}

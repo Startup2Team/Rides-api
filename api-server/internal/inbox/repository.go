@@ -81,6 +81,11 @@ func (r *Repository) UpdateStatus(ctx context.Context, id, status string) error 
 	return err
 }
 
+func (r *Repository) Delete(ctx context.Context, id string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM inbox_messages WHERE id = $1`, id)
+	return err
+}
+
 func buildWhere(f ListFilter) (string, []interface{}) {
 	var clauses []string
 	var args []interface{}

@@ -126,6 +126,24 @@ func (h *Handler) Message(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+// PATCH /api/v1/admin/incidents/:id/status
+func (h *Handler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Status string `json:"status"`
+		Event  string `json:"event"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Status == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "status is required")
+		return
+	}
+	if err := h.svc.UpdateStatus(r.Context(), id, body.Status, body.Event); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
 func parseIntDefault(s string, def int) int {
 	if s == "" {
 		return def

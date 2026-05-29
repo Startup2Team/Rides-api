@@ -55,7 +55,7 @@ func (h *Handler) UpsertRoute(w http.ResponseWriter, r *http.Request) {
 		PickupLng       float64 `json:"pickup_lng"       validate:"required"`
 		DestLat         float64 `json:"dest_lat"         validate:"required"`
 		DestLng         float64 `json:"dest_lng"         validate:"required"`
-		VehicleType     string  `json:"vehicle_type"     validate:"required,oneof=MOTO_BIKE CAB_TAXI LIGHT_HILUX HEAVY_FUSO"`
+		VehicleType     string  `json:"vehicle_type"     validate:"required,oneof=MOTO_BIKE CAB_TAXI LIGHT_HILUX HEAVY_FUSO TUK_TUK"`
 		DistanceKM      float64 `json:"distance_km"      validate:"required,gt=0"`
 		DurationMinutes int     `json:"duration_minutes" validate:"required,gt=0"`
 	}

@@ -278,13 +278,27 @@ func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate)
 		_ = e.notify.SendRideRequest(ctx, *c.fcmToken, rideID, "", "", c.distanceM)
 	}
 
+	payload := map[string]interface{}{
+		"ride_id":    rideID,
+		"distance_m": c.distanceM,
+	}
+	if ridePayload, rpErr := e.rideRepo.GetRideRequestPayload(ctx, rideID); rpErr == nil && ridePayload != nil {
+		payload["transport_type"] = ridePayload.TransportType
+		payload["distance_km"] = ridePayload.DistanceKM
+		payload["pickup_lat"] = ridePayload.PickupLat
+		payload["pickup_lng"] = ridePayload.PickupLng
+		payload["pickup_address"] = ridePayload.PickupAddress
+		payload["dest_lat"] = ridePayload.DestinationLat
+		payload["dest_lng"] = ridePayload.DestinationLng
+		payload["dest_address"] = ridePayload.DestinationAddress
+		payload["suggested_fare"] = ridePayload.SuggestedFare
+		payload["customer_name"] = ridePayload.CustomerName
+		payload["customer_phone"] = ridePayload.CustomerPhone
+	}
 	e.hub.SendToDriver(c.userID, tracking.Message{
-		Type:   "ride_request",
-		RideID: rideID,
-		Payload: map[string]interface{}{
-			"ride_id":    rideID,
-			"distance_m": c.distanceM,
-		},
+		Type:    "ride_request",
+		RideID:  rideID,
+		Payload: payload,
 	})
 
 	_ = e.rideRepo.AppendEvent(ctx, rideID, "ride.request_sent", "SYSTEM", c.profileID, map[string]interface{}{

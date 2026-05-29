@@ -77,3 +77,17 @@ func (s *Service) Create(ctx context.Context, incType, severity, description, re
 	_ = s.repo.AppendEvent(ctx, inc.ID, "Incident created", "system")
 	return inc, nil
 }
+
+// UpdateStatus is the unified PATCH handler: Acknowledged | Escalated | Resolved
+func (s *Service) UpdateStatus(ctx context.Context, id, status, event string) error {
+	switch status {
+	case "Acknowledged":
+		return s.Acknowledge(ctx, id)
+	case "Escalated":
+		return s.Escalate(ctx, id)
+	case "Resolved":
+		return s.Resolve(ctx, id, event)
+	default:
+		return apperrors.New(http.StatusBadRequest, "INVALID_STATUS", "status must be Acknowledged, Escalated, or Resolved")
+	}
+}
