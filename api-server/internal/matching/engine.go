@@ -355,7 +355,7 @@ func (e *Engine) onAccepted(ctx context.Context, rideID string, c *candidate) {
 
 func (e *Engine) notifyCustomerDriverMatched(ctx context.Context, rideID string, c *candidate) {
 	payload := map[string]interface{}{
-		"driver_id": c.profileID,
+		"driver_id":  c.profileID,
 		"distance_m": c.distanceM,
 	}
 	if info, err := e.driverRepo.GetMatchNotificationInfo(ctx, c.profileID); err == nil && info != nil {

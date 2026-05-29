@@ -14,8 +14,8 @@ import (
 
 // Ride is the full operational ride record (internal model — no JSON tags intentionally).
 type Ride struct {
-	ID                    string
-	CustomerID            string
+	ID         string
+	CustomerID string
 	// CustomerName and CustomerPhone are populated by driver-side queries (JOIN with users).
 	CustomerName          string
 	CustomerPhone         string
