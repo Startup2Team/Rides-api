@@ -60,13 +60,17 @@ func WithLogger(log zerolog.Logger) func(http.Handler) http.Handler {
 func Authenticate(cfg *config.Config, rdb *goredis.Client) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			header := r.Header.Get("Authorization")
-			if header == "" || !strings.HasPrefix(header, "Bearer ") {
+			tokenStr := ""
+			if header := r.Header.Get("Authorization"); header != "" && strings.HasPrefix(header, "Bearer ") {
+				tokenStr = strings.TrimPrefix(header, "Bearer ")
+			} else if q := r.URL.Query().Get("token"); q != "" {
+				// Mobile WebSocket clients cannot set Authorization headers; they pass JWT via query.
+				tokenStr = q
+			}
+			if tokenStr == "" {
 				respond.Error(w, apperrors.ErrUnauthorized)
 				return
 			}
-
-			tokenStr := strings.TrimPrefix(header, "Bearer ")
 
 			claims := &Claims{}
 			token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {

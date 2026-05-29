@@ -61,9 +61,25 @@ func NewService(repo *Repository, rdb *goredis.Client, ana *analytics.Service, c
 }
 
 // Apply submits a driver application.
+// In dev mode (DEV_AUTO_APPROVE_DRIVERS=true) the profile is immediately
+// approved and the user's role_state is promoted to DRIVER_ACTIVE so
+// they can go online without waiting for an admin action.
 func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
-	_, err := s.repo.FindProfileByUserID(ctx, in.UserID)
+	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
 	if err == nil {
+		// Profile already exists.
+		if s.cfg.Driver.DevAutoApprove && existing.ApprovalStatus != "APPROVED" {
+			// Dev shortcut: approve the pending profile so the caller can proceed.
+			if aerr := s.repo.SetApprovalStatus(ctx, existing.ID, "APPROVED", "", nil); aerr != nil {
+				return nil, fmt.Errorf("dev auto-approve existing profile: %w", aerr)
+			}
+			if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); aerr != nil {
+				return nil, fmt.Errorf("update role state: %w", aerr)
+			}
+			existing.ApprovalStatus = "APPROVED"
+			s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: existing pending profile approved")
+			return existing, nil
+		}
 		return nil, apperrors.ErrDriverAlreadyApplied
 	}
 
@@ -75,8 +91,20 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 		return nil, err
 	}
 
-	if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_PENDING"); err != nil {
-		return nil, fmt.Errorf("update role state: %w", err)
+	if s.cfg.Driver.DevAutoApprove {
+		// Skip admin queue — approve immediately for dev/testing.
+		if err := s.repo.SetApprovalStatus(ctx, profile.ID, "APPROVED", "dev-auto-approve", nil); err != nil {
+			return nil, fmt.Errorf("dev auto-approve: %w", err)
+		}
+		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); err != nil {
+			return nil, fmt.Errorf("update role state: %w", err)
+		}
+		profile.ApprovalStatus = "APPROVED"
+		s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: driver approved instantly — disable in production")
+	} else {
+		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_PENDING"); err != nil {
+			return nil, fmt.Errorf("update role state: %w", err)
+		}
 	}
 
 	return profile, nil
@@ -377,6 +405,11 @@ func endOfDay() time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
 }
 
+// jitter adds a small random offset to driver coordinates before sending them
+// to customers. This prevents customers from pinpointing a driver's exact location
+// before a ride is booked (privacy), while keeping the map marker believable.
+// ±0.0015° ≈ ±165 m per axis — large enough for privacy, small enough to stay
+// within the same city block so the marker looks correct on the map.
 func jitter() float64 {
-	return (rand.Float64() - 0.5) * 0.006
+	return (rand.Float64() - 0.5) * 0.003
 }
