@@ -218,7 +218,7 @@ func (r *Repository) ClearTOTP(ctx context.Context, id string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE admin_accounts
 		SET totp_secret=NULL, backup_codes='[]', two_factor=FALSE, updated_at=NOW()
-		WHERE id=$2
+		WHERE id=$1
 	`, id)
 	return err
 }
@@ -245,5 +245,68 @@ func (r *Repository) SaveBackupCodes(ctx context.Context, id string, codes []Bac
 	}
 	_, err = r.db.Exec(ctx,
 		`UPDATE admin_accounts SET backup_codes=$1, updated_at=NOW() WHERE id=$2`, raw, id)
+	return err
+}
+
+// ── Role CRUD ─────────────────────────────────────────────────────────────
+
+func (r *Repository) CreateRole(ctx context.Context, name, description string, permissions interface{}) (*Role, error) {
+	raw, err := json.Marshal(permissions)
+	if err != nil {
+		return nil, err
+	}
+	role := &Role{}
+	var rawPerms []byte
+	err = r.db.QueryRow(ctx, `
+		INSERT INTO admin_roles (name, description, permissions)
+		VALUES ($1, $2, $3)
+		RETURNING id, name, description, permissions, is_system, created_at
+	`, name, description, raw).Scan(
+		&role.ID, &role.Name, &role.Description, &rawPerms, &role.IsSystem, &role.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var perms interface{}
+	if err := json.Unmarshal(rawPerms, &perms); err == nil {
+		role.Permissions = perms
+	}
+	return role, nil
+}
+
+func (r *Repository) UpdateRoleByID(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error) {
+	raw, err := json.Marshal(permissions)
+	if err != nil {
+		return nil, err
+	}
+	role := &Role{}
+	var rawPerms []byte
+	err = r.db.QueryRow(ctx, `
+		UPDATE admin_roles SET name=$1, description=$2, permissions=$3
+		WHERE id=$4 AND is_system=FALSE
+		RETURNING id, name, description, permissions, is_system, created_at
+	`, name, description, raw, roleID).Scan(
+		&role.ID, &role.Name, &role.Description, &rawPerms, &role.IsSystem, &role.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var perms interface{}
+	if err := json.Unmarshal(rawPerms, &perms); err == nil {
+		role.Permissions = perms
+	}
+	return role, nil
+}
+
+func (r *Repository) DeleteRoleByID(ctx context.Context, roleID string) error {
+	var isSystem bool
+	if err := r.db.QueryRow(ctx,
+		`SELECT is_system FROM admin_roles WHERE id=$1`, roleID).Scan(&isSystem); err != nil {
+		return err
+	}
+	if isSystem {
+		return fmt.Errorf("cannot_delete_system_role")
+	}
+	_, err := r.db.Exec(ctx, `DELETE FROM admin_roles WHERE id=$1`, roleID)
 	return err
 }

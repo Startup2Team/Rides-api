@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -460,8 +461,8 @@ func (s *Service) ListRides(ctx context.Context, status, transportType, search s
 		}
 		result = append(result, map[string]interface{}{
 			"id": id, "status": status2, "transport_type": tType,
-			"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-			"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
+			"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+			"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
 			"pickup_address": pickupAddr, "destination_address": destAddr,
 			"agreed_fare": agreedFare, "initial_fare": initialFare,
 			"distance_km": distKm, "created_at": createdAt, "completed_at": completedAt,
@@ -526,8 +527,8 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 
 	return map[string]interface{}{
 		"id": id, "status": status, "transport_type": tType,
-		"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-		"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
+		"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+		"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
 		"pickup_address": pickupAddr, "destination_address": destAddr,
 		"agreed_fare": agreedFare, "initial_fare": initialFare, "distance_km": distKm,
 		"created_at": createdAt, "completed_at": completedAt,
@@ -613,9 +614,9 @@ func (s *Service) ListNegotiations(ctx context.Context, status, search string, l
 		result = append(result, map[string]interface{}{
 			"id": id, "ride_id": id, "status": negStatus,
 			"transport_type": rType,
-			"customer": map[string]interface{}{"phone": custPhone, "name": custName},
-			"driver":   map[string]interface{}{"phone": driverPhone, "name": driverName, "vehicle_type": driverType},
-			"initial_fare": initialFare, "agreed_fare": agreedFare,
+			"customer":       map[string]interface{}{"phone": custPhone, "name": custName},
+			"driver":         map[string]interface{}{"phone": driverPhone, "name": driverName, "vehicle_type": driverType},
+			"initial_fare":   initialFare, "agreed_fare": agreedFare,
 			"uplift": uplift, "rounds": roundCount, "created_at": createdAt,
 		})
 	}
@@ -674,10 +675,10 @@ func (s *Service) ListTransactions(ctx context.Context, txStatus, sort string, l
 		result = append(result, map[string]interface{}{
 			"id": id, "transport_type": tType,
 			"fare": agreedFare, "commission": commission, "payout": payout,
-			"status": "Settled",
+			"status":         "Settled",
 			"pickup_address": pickupAddr, "destination_address": destAddr,
-			"customer": map[string]interface{}{"phone": custPhone, "name": custName},
-			"driver":   map[string]interface{}{"phone": driverPhone, "name": driverName, "plate": plate, "vehicle_type": tType},
+			"customer":     map[string]interface{}{"phone": custPhone, "name": custName},
+			"driver":       map[string]interface{}{"phone": driverPhone, "name": driverName, "plate": plate, "vehicle_type": tType},
 			"completed_at": completedAt,
 		})
 	}
@@ -802,4 +803,309 @@ func periodToInterval(period string) string {
 	default:
 		return "INTERVAL '1 day'"
 	}
+}
+
+// ── Driver detail / create / update / delete ──────────────────────────────
+
+func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]interface{}, error) {
+	var id, userID, phone, tType, plate, license, city, momoCode, approvalStatus string
+	var fullName, province, district, sector, cell, village, momoProvider, suspensionReason, rejectionReason *string
+	var passengerSeats, loadCapacityKg *int
+	var dob *time.Time
+	var acceptanceRate float64
+	var totalRides int
+	var isOnline bool
+	var createdAt time.Time
+
+	err := s.db.QueryRow(ctx, `
+		SELECT dp.id, dp.user_id, u.phone_number, u.full_name,
+		       dp.transport_type, dp.vehicle_plate, dp.license_number,
+		       dp.date_of_birth, dp.city,
+		       dp.province, dp.district, dp.sector, dp.cell, dp.village,
+		       dp.passenger_seats, dp.load_capacity_kg,
+		       dp.momo_provider, dp.momo_pay_code,
+		       dp.approval_status, dp.suspension_reason, dp.rejection_reason,
+		       dp.acceptance_rate, dp.total_rides, dp.is_online,
+		       dp.created_at
+		FROM driver_profiles dp JOIN users u ON u.id = dp.user_id
+		WHERE dp.id = $1
+	`, profileID).Scan(
+		&id, &userID, &phone, &fullName,
+		&tType, &plate, &license,
+		&dob, &city,
+		&province, &district, &sector, &cell, &village,
+		&passengerSeats, &loadCapacityKg,
+		&momoProvider, &momoCode,
+		&approvalStatus, &suspensionReason, &rejectionReason,
+		&acceptanceRate, &totalRides, &isOnline,
+		&createdAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrNotFound
+		}
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"id": id, "user_id": userID, "phone": phone, "full_name": fullName,
+		"transport_type": tType, "vehicle_plate": plate, "license_number": license,
+		"date_of_birth": dob, "city": city,
+		"address": map[string]interface{}{
+			"province": province, "district": district, "sector": sector,
+			"cell": cell, "village": village,
+		},
+		"passenger_seats": passengerSeats, "load_capacity_kg": loadCapacityKg,
+		"momo_provider": momoProvider, "momo_pay_code": momoCode,
+		"approval_status": approvalStatus, "suspension_reason": suspensionReason,
+		"rejection_reason": rejectionReason,
+		"acceptance_rate": acceptanceRate, "total_rides": totalRides, "is_online": isOnline,
+		"created_at": createdAt,
+	}, nil
+}
+
+func (s *Service) UpdateDriver(ctx context.Context, profileID string, fields map[string]interface{}) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	var setClauses []string
+	var args []interface{}
+	n := 1
+	for k, v := range fields {
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", k, n))
+		args = append(args, v)
+		n++
+	}
+	args = append(args, profileID)
+	query := fmt.Sprintf("UPDATE driver_profiles SET %s, updated_at=NOW() WHERE id = $%d",
+		strings.Join(setClauses, ", "), n)
+	_, err := s.db.Exec(ctx, query, args...)
+	return err
+}
+
+func (s *Service) DeleteDriver(ctx context.Context, profileID string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM driver_profiles WHERE id = $1`, profileID)
+	return err
+}
+
+// ── Customer update / ban ─────────────────────────────────────────────────
+
+func (s *Service) UpdateCustomer(ctx context.Context, userID, status, notes string) error {
+	if status != "" {
+		_, err := s.db.Exec(ctx,
+			`UPDATE users SET role_state = $1, updated_at = NOW() WHERE id = $2`, status, userID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) BanCustomer(ctx context.Context, userID, reason string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE users SET is_suspended=TRUE, suspension_reason=$1, updated_at=NOW() WHERE id=$2`,
+		reason, userID)
+	return err
+}
+
+// ── Live rides ────────────────────────────────────────────────────────────
+
+var liveStatuses = []string{"SEARCHING", "DRIVER_FOUND", "DRIVER_EN_ROUTE", "DRIVER_ARRIVED", "NEGOTIATING", "ON_TRIP"}
+
+func (s *Service) ListLiveRides(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error) {
+	var wheres []string
+	var args []interface{}
+	n := 1
+
+	if status != "" && status != "all" {
+		wheres = append(wheres, fmt.Sprintf("r.status = $%d", n))
+		args = append(args, status)
+		n++
+	} else {
+		placeholders := make([]string, len(liveStatuses))
+		for i, s := range liveStatuses {
+			placeholders[i] = fmt.Sprintf("$%d", n)
+			args = append(args, s)
+			n++
+		}
+		wheres = append(wheres, fmt.Sprintf("r.status IN (%s)", strings.Join(placeholders, ",")))
+	}
+	if search != "" {
+		wheres = append(wheres, fmt.Sprintf("(cu.phone_number ILIKE $%d OR du.phone_number ILIKE $%d)", n, n))
+		args = append(args, "%"+search+"%")
+		n++
+	}
+
+	base := `FROM rides r
+		JOIN users cu ON cu.id = r.customer_id
+		LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
+		LEFT JOIN users du ON du.id = dp.user_id`
+	where := buildWhere(wheres)
+
+	var total int
+	_ = s.db.QueryRow(ctx, "SELECT COUNT(*) "+base+where, args...).Scan(&total)
+
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		SELECT r.id, r.status, r.transport_type,
+		       r.customer_id, cu.phone_number, cu.full_name,
+		       r.driver_id, du.phone_number, du.full_name, dp.vehicle_plate,
+		       r.pickup_address, r.destination_address,
+		       r.agreed_fare, r.customer_initial_fare,
+		       r.estimated_distance_km, r.created_at
+		%s %s ORDER BY r.created_at DESC LIMIT $%d OFFSET $%d
+	`, base, where, n, n+1), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id, status2, tType, custID, custPhone, pickupAddr, destAddr string
+		var custName, driverID, driverPhone, driverName, plate *string
+		var agreedFare, initialFare, distKm *float64
+		var createdAt time.Time
+		if err := rows.Scan(&id, &status2, &tType,
+			&custID, &custPhone, &custName,
+			&driverID, &driverPhone, &driverName, &plate,
+			&pickupAddr, &destAddr,
+			&agreedFare, &initialFare, &distKm,
+			&createdAt); err != nil {
+			return nil, 0, err
+		}
+		result = append(result, map[string]interface{}{
+			"id": id, "status": status2, "transport_type": tType,
+			"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+			"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate},
+			"pickup_address": pickupAddr, "destination_address": destAddr,
+			"agreed_fare": agreedFare, "initial_fare": initialFare,
+			"distance_km": distKm, "created_at": createdAt,
+		})
+	}
+	return result, total, nil
+}
+
+func (s *Service) GetLiveRide(ctx context.Context, rideID string) (map[string]interface{}, error) {
+	return s.GetRide(ctx, rideID)
+}
+
+func (s *Service) InterveneRide(ctx context.Context, rideID, action, reason string) error {
+	switch action {
+	case "cancel":
+		_, err := s.db.Exec(ctx,
+			`UPDATE rides SET status='CANCELLED', updated_at=NOW() WHERE id=$1`, rideID)
+		return err
+	case "force-complete":
+		_, err := s.db.Exec(ctx,
+			`UPDATE rides SET status='COMPLETED', completed_at=NOW(), updated_at=NOW() WHERE id=$1`, rideID)
+		return err
+	default:
+		return apperrors.New(http.StatusBadRequest, "INVALID_ACTION", "action must be cancel or force-complete")
+	}
+}
+
+// ── Negotiation detail ────────────────────────────────────────────────────
+
+func (s *Service) GetNegotiation(ctx context.Context, rideID string) (map[string]interface{}, error) {
+	return s.GetRide(ctx, rideID)
+}
+
+// ── Revenue (unified) ─────────────────────────────────────────────────────
+
+func (s *Service) Revenue(ctx context.Context, period string) (map[string]interface{}, error) {
+	interval := periodToInterval(period)
+
+	var gross, grossPrev float64
+	var trips, tripsPrev int
+
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(agreed_fare),0), COUNT(*)
+		FROM rides WHERE status='COMPLETED' AND completed_at >= NOW() - %s
+	`, interval)).Scan(&gross, &trips)
+
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(agreed_fare),0), COUNT(*)
+		FROM rides WHERE status='COMPLETED'
+		  AND completed_at >= NOW() - 2*%s AND completed_at < NOW() - %s
+	`, interval, interval)).Scan(&grossPrev, &tripsPrev)
+
+	commission := gross * 0.15
+	payouts := gross - commission
+	grossDelta := 0.0
+	if grossPrev > 0 {
+		grossDelta = (gross - grossPrev) / grossPrev * 100
+	}
+
+	// Trend (daily buckets, last 7 entries)
+	trendRows, _ := s.db.Query(ctx, fmt.Sprintf(`
+		SELECT DATE(completed_at) AS day, COALESCE(SUM(agreed_fare),0)
+		FROM rides WHERE status='COMPLETED' AND completed_at >= NOW() - %s
+		GROUP BY day ORDER BY day
+	`, interval))
+	var trend []map[string]interface{}
+	if trendRows != nil {
+		defer trendRows.Close()
+		for trendRows.Next() {
+			var day time.Time
+			var val float64
+			if err := trendRows.Scan(&day, &val); err == nil {
+				trend = append(trend, map[string]interface{}{"label": day.Format("Jan 2"), "value": val})
+			}
+		}
+	}
+
+	// By vehicle type
+	vRows, _ := s.db.Query(ctx, fmt.Sprintf(`
+		SELECT transport_type, COALESCE(SUM(agreed_fare),0)
+		FROM rides WHERE status='COMPLETED' AND completed_at >= NOW() - %s
+		GROUP BY transport_type ORDER BY 2 DESC
+	`, interval))
+	var byVehicle []map[string]interface{}
+	if vRows != nil {
+		defer vRows.Close()
+		for vRows.Next() {
+			var vType string
+			var amount float64
+			if err := vRows.Scan(&vType, &amount); err == nil {
+				pct := 0.0
+				if gross > 0 {
+					pct = amount / gross * 100
+				}
+				byVehicle = append(byVehicle, map[string]interface{}{
+					"vehicle": vType, "amount": amount, "pct": pct,
+				})
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"period":     period,
+		"gross":      gross,
+		"commission": commission,
+		"payouts":    payouts,
+		"trips":      trips,
+		"deltas":     map[string]interface{}{"gross": grossDelta},
+		"trend":      trend,
+		"by_vehicle": byVehicle,
+	}, nil
+}
+
+func (s *Service) DisbursePayouts(ctx context.Context, transactionIDs []string) (int, float64, error) {
+	if len(transactionIDs) == 0 {
+		return 0, 0, apperrors.ErrBadRequest
+	}
+	placeholders := make([]string, len(transactionIDs))
+	args := make([]interface{}, len(transactionIDs))
+	for i, id := range transactionIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	var total float64
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(agreed_fare),0) FROM rides WHERE id IN (%s) AND status='COMPLETED'
+	`, strings.Join(placeholders, ",")), args...).Scan(&total)
+
+	return len(transactionIDs), total * 0.85, nil
 }

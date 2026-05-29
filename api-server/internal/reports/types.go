@@ -15,12 +15,12 @@ type Report struct {
 }
 
 type ScheduledReport struct {
-	ID         string    `json:"id"`
-	Template   string    `json:"template"`
-	Format     string    `json:"format"`
-	Frequency  string    `json:"frequency"`
-	Recipients []string  `json:"recipients"`
-	IsActive   bool      `json:"is_active"`
+	ID         string     `json:"id"`
+	Template   string     `json:"template"`
+	Format     string     `json:"format"`
+	Frequency  string     `json:"frequency"`
+	Recipients []string   `json:"recipients"`
+	IsActive   bool       `json:"is_active"`
 	NextRun    *time.Time `json:"next_run"`
 	CreatedAt  time.Time  `json:"created_at"`
 }

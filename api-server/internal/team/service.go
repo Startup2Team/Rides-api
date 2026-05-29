@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
+	goredis "github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/workspace/ride-platform/config"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
+	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
 const (
@@ -26,19 +29,20 @@ const (
 // LoginResult is returned by Login. When TwoFactorRequired is true, the
 // caller must call Verify2FA or VerifyBackupCode using PreAuthToken.
 type LoginResult struct {
-	AccessToken      string       `json:"access_token,omitempty"`
-	PreAuthToken     string       `json:"pre_auth_token,omitempty"`
-	TwoFactorRequired bool        `json:"two_factor_required"`
-	Admin            *AdminAccount `json:"admin,omitempty"`
+	AccessToken       string        `json:"access_token,omitempty"`
+	PreAuthToken      string        `json:"pre_auth_token,omitempty"`
+	TwoFactorRequired bool          `json:"two_factor_required"`
+	Admin             *AdminAccount `json:"admin,omitempty"`
 }
 
 type Service struct {
 	repo *Repository
 	cfg  *config.Config
+	rdb  *goredis.Client
 }
 
-func NewService(repo *Repository, cfg *config.Config) *Service {
-	return &Service{repo: repo, cfg: cfg}
+func NewService(repo *Repository, cfg *config.Config, rdb *goredis.Client) *Service {
+	return &Service{repo: repo, cfg: cfg, rdb: rdb}
 }
 
 // ── Admin management ──────────────────────────────────────────────────────
@@ -69,6 +73,18 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 
 func (s *Service) ListRoles(ctx context.Context) ([]*Role, error) {
 	return s.repo.ListRoles(ctx)
+}
+
+func (s *Service) CreateRole(ctx context.Context, name, description string, permissions interface{}) (*Role, error) {
+	return s.repo.CreateRole(ctx, name, description, permissions)
+}
+
+func (s *Service) UpdateRoleByID(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error) {
+	return s.repo.UpdateRoleByID(ctx, roleID, name, description, permissions)
+}
+
+func (s *Service) DeleteRoleByID(ctx context.Context, roleID string) error {
+	return s.repo.DeleteRoleByID(ctx, roleID)
 }
 
 func (s *Service) UpdateName(ctx context.Context, id, name string) error {
@@ -103,9 +119,6 @@ func (s *Service) ChangePassword(ctx context.Context, id, currentPassword, newPa
 
 // ── Authentication ────────────────────────────────────────────────────────
 
-// Login validates email+password. If 2FA is enabled it returns a short-lived
-// pre_auth_token that must be exchanged via Verify2FA or VerifyBackupCode.
-// If 2FA is not enabled it returns a full access token immediately.
 func (s *Service) Login(ctx context.Context, email, password string) (*LoginResult, error) {
 	admin, hash, err := s.repo.FindByEmail(ctx, email)
 	if err != nil {
@@ -121,7 +134,6 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
 	}
 
-	// 2FA is enabled — issue a short-lived pre-auth token instead of the real access token.
 	if admin.TwoFactor {
 		preAuth, err := s.issuePreAuthToken(admin.ID)
 		if err != nil {
@@ -133,8 +145,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 		}, nil
 	}
 
-	// 2FA not enabled — issue access token directly.
-	token, err := s.issueAccessToken(admin.ID)
+	token, err := s.issueAccessToken(ctx, admin.ID)
 	if err != nil {
 		return nil, apperrors.ErrInternal
 	}
@@ -146,7 +157,6 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 	}, nil
 }
 
-// Verify2FA completes login by verifying a TOTP code against the pre-auth token.
 func (s *Service) Verify2FA(ctx context.Context, preAuthToken, code string) (*LoginResult, error) {
 	adminID, err := s.validatePreAuthToken(preAuthToken)
 	if err != nil {
@@ -167,7 +177,7 @@ func (s *Service) Verify2FA(ctx context.Context, preAuthToken, code string) (*Lo
 		return nil, apperrors.ErrNotFound
 	}
 
-	token, err := s.issueAccessToken(adminID)
+	token, err := s.issueAccessToken(ctx, adminID)
 	if err != nil {
 		return nil, apperrors.ErrInternal
 	}
@@ -179,7 +189,6 @@ func (s *Service) Verify2FA(ctx context.Context, preAuthToken, code string) (*Lo
 	}, nil
 }
 
-// VerifyBackupCode completes login using one of the ten single-use backup codes.
 func (s *Service) VerifyBackupCode(ctx context.Context, preAuthToken, rawCode string) (*LoginResult, error) {
 	adminID, err := s.validatePreAuthToken(preAuthToken)
 	if err != nil {
@@ -205,7 +214,6 @@ func (s *Service) VerifyBackupCode(ctx context.Context, preAuthToken, rawCode st
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_BACKUP_CODE", "backup code is invalid or already used")
 	}
 
-	// Mark the used code.
 	codes[matched].Used = true
 	if err := s.repo.SaveBackupCodes(ctx, adminID, codes); err != nil {
 		return nil, apperrors.ErrInternal
@@ -216,7 +224,7 @@ func (s *Service) VerifyBackupCode(ctx context.Context, preAuthToken, rawCode st
 		return nil, apperrors.ErrNotFound
 	}
 
-	token, err := s.issueAccessToken(adminID)
+	token, err := s.issueAccessToken(ctx, adminID)
 	if err != nil {
 		return nil, apperrors.ErrInternal
 	}
@@ -228,10 +236,17 @@ func (s *Service) VerifyBackupCode(ctx context.Context, preAuthToken, rawCode st
 	}, nil
 }
 
+// Logout revokes the current session token in Redis.
+func (s *Service) Logout(ctx context.Context, adminID, jti string) error {
+	if jti == "" {
+		return nil
+	}
+	key := rkeys.K.Session(adminID, jti)
+	return s.rdb.Set(ctx, key, "revoked", s.cfg.JWT.AccessExpiry).Err()
+}
+
 // ── 2FA setup ─────────────────────────────────────────────────────────────
 
-// Generate2FASetup creates a fresh TOTP key and returns the secret + otpauth URI.
-// The secret is NOT stored yet — Enable2FA must be called after the user verifies.
 func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret, otpauthURL string, err error) {
 	admin, _, err := s.repo.FindByID(ctx, adminID)
 	if err != nil {
@@ -251,9 +266,6 @@ func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret,
 	return key.Secret(), key.URL(), nil
 }
 
-// Enable2FA verifies the provided TOTP code against the given secret (generated
-// by Generate2FASetup), then persists the secret and returns 10 plaintext backup codes.
-// The plain codes are shown once and never stored in plaintext.
 func (s *Service) Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error) {
 	if !totp.Validate(code, secret) {
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code does not match — check the secret and try again")
@@ -273,7 +285,6 @@ func (s *Service) Enable2FA(ctx context.Context, adminID, secret, code string) (
 	return plain, nil
 }
 
-// Disable2FA verifies the current password, then removes TOTP configuration.
 func (s *Service) Disable2FA(ctx context.Context, adminID, password string) error {
 	_, hash, err := s.repo.FindByID(ctx, adminID)
 	if err != nil {
@@ -288,10 +299,56 @@ func (s *Service) Disable2FA(ctx context.Context, adminID, password string) erro
 	return s.repo.ClearTOTP(ctx, adminID)
 }
 
+// ResetTOTP verifies the current TOTP code, clears the existing secret, and
+// returns a fresh secret + QR URI for re-enrollment.
+func (s *Service) ResetTOTP(ctx context.Context, adminID, currentCode string) (secret, otpauthURL string, backupCodes []string, err error) {
+	existing, repoErr := s.repo.GetTOTPSecret(ctx, adminID)
+	if repoErr != nil || existing == nil || *existing == "" {
+		err = apperrors.New(http.StatusConflict, "2FA_NOT_SETUP", "2FA is not configured")
+		return
+	}
+	if !totp.Validate(currentCode, *existing) {
+		err = apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid")
+		return
+	}
+
+	admin, _, findErr := s.repo.FindByID(ctx, adminID)
+	if findErr != nil {
+		err = apperrors.ErrNotFound
+		return
+	}
+
+	key, genErr := totp.Generate(totp.GenerateOpts{
+		Issuer:      totpIssuer,
+		AccountName: admin.Email,
+	})
+	if genErr != nil {
+		err = apperrors.ErrInternal
+		return
+	}
+
+	plain, hashed, genErr := generateBackupCodes()
+	if genErr != nil {
+		err = apperrors.ErrInternal
+		return
+	}
+
+	if saveErr := s.repo.SaveTOTP(ctx, adminID, key.Secret()); saveErr != nil {
+		err = apperrors.ErrInternal
+		return
+	}
+	if saveErr := s.repo.SaveBackupCodes(ctx, adminID, hashed); saveErr != nil {
+		err = apperrors.ErrInternal
+		return
+	}
+
+	return key.Secret(), key.URL(), plain, nil
+}
+
 // ── JWT helpers ───────────────────────────────────────────────────────────
 
-// issueAccessToken creates a full admin access token stored in Redis.
-func (s *Service) issueAccessToken(adminID string) (string, error) {
+// issueAccessToken creates a full admin access token and stores the session in Redis.
+func (s *Service) issueAccessToken(ctx context.Context, adminID string) (string, error) {
 	jti := uuid.NewString()
 	claims := jwt.MapClaims{
 		"user_id":    adminID,
@@ -302,11 +359,18 @@ func (s *Service) issueAccessToken(adminID string) (string, error) {
 		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.cfg.JWT.AccessSecret))
+	signed, err := token.SignedString([]byte(s.cfg.JWT.AccessSecret))
+	if err != nil {
+		return "", err
+	}
+
+	key := rkeys.K.Session(adminID, jti)
+	if err := s.rdb.Set(ctx, key, "valid", s.cfg.JWT.AccessExpiry).Err(); err != nil {
+		return "", fmt.Errorf("store admin session: %w", err)
+	}
+	return signed, nil
 }
 
-// issuePreAuthToken creates a 5-minute token that is only valid for the 2FA step.
-// It is NOT stored in Redis so the normal Authenticate middleware will reject it.
 func (s *Service) issuePreAuthToken(adminID string) (string, error) {
 	claims := jwt.MapClaims{
 		"user_id":    adminID,
@@ -318,7 +382,6 @@ func (s *Service) issuePreAuthToken(adminID string) (string, error) {
 	return token.SignedString([]byte(s.cfg.JWT.AccessSecret))
 }
 
-// validatePreAuthToken parses a pre_auth JWT and returns the admin ID.
 func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -347,8 +410,6 @@ func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
 
 // ── Backup codes ──────────────────────────────────────────────────────────
 
-// generateBackupCodes creates 10 random codes in XXXXX-XXXXX format.
-// Returns the plaintext codes (shown once to the user) and the hashed records for storage.
 func generateBackupCodes() (plain []string, hashed []BackupCode, err error) {
 	for i := 0; i < backupCodeCount; i++ {
 		raw := make([]byte, 5)
