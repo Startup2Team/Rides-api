@@ -393,6 +393,10 @@ func main() {
 		// All rides (history)
 		r.Get("/rides", adminH.ListRides)
 		r.Get("/rides/{id}", adminH.GetRide)
+		r.Get("/pricing", fareH.ListActivePricing)
+		r.Get("/pricing/{vehicle_type_code}", fareH.GetActivePricingByType)
+		r.Get("/pricing/{vehicle_type_code}/history", fareH.GetPricingHistory)
+		r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
 
 		// Pricing
 		r.Get("/pricing", fareH.ListActivePricing)
