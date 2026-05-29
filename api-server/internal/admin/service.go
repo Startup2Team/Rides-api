@@ -859,7 +859,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		"momo_provider": momoProvider, "momo_pay_code": momoCode,
 		"approval_status": approvalStatus, "suspension_reason": suspensionReason,
 		"rejection_reason": rejectionReason,
-		"acceptance_rate": acceptanceRate, "total_rides": totalRides, "is_online": isOnline,
+		"acceptance_rate":  acceptanceRate, "total_rides": totalRides, "is_online": isOnline,
 		"created_at": createdAt,
 	}, nil
 }
@@ -977,8 +977,8 @@ func (s *Service) ListLiveRides(ctx context.Context, status, district, search st
 		}
 		result = append(result, map[string]interface{}{
 			"id": id, "status": status2, "transport_type": tType,
-			"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-			"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate},
+			"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+			"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate},
 			"pickup_address": pickupAddr, "destination_address": destAddr,
 			"agreed_fare": agreedFare, "initial_fare": initialFare,
 			"distance_km": distKm, "created_at": createdAt,

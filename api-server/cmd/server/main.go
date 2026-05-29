@@ -133,7 +133,7 @@ func main() {
 	inboxSvc := inbox.NewService(inboxRepo)
 	reportSvc := reports.NewService(reportRepo)
 	settingsSvc := settings.NewService(settingsRepo)
-	teamSvc := team.NewService(teamRepo, cfg)
+	teamSvc := team.NewService(teamRepo, cfg, rdb)
 	dashSvc := dashboard.NewService(db, rdb, log)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
