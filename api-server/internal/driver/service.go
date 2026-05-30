@@ -159,6 +159,18 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 		if redisErr == nil {
 			s.log.Info().Str("driver_id", profile.ID).Msg("driver came online within cooldown — penalties preserved")
 		}
+		// Clear location history from the previous session so the first GPS
+		// update in this session is accepted as baseline (not compared against
+		// a stale position that could trigger false anomaly detection).
+		// Also reset the anomaly counter so a clean session starts at zero.
+		s.redis.Del(ctx, rkeys.K.DriverLocationHistory(profile.ID))
+		s.redis.Del(ctx, rkeys.K.GPSAnomalyCount(profile.ID))
+		// 60-second grace period: the mobile app sends the app-default position
+		// (KIGALI_CENTER) immediately when going online, before device GPS
+		// resolves. When real GPS arrives (typically 2-10 s later), the jump
+		// from the placeholder would be flagged as an impossible-speed anomaly.
+		// The grace period suppresses plausibility checks during this window.
+		s.redis.Set(ctx, rkeys.K.DriverGracePeriod(profile.ID), "1", 60*time.Second)
 		// Set driver state + add to GEO index
 		s.redis.Set(ctx, rkeys.K.DriverState(profile.ID), "AVAILABLE", 0)
 		s.analytics.Publish(ctx, "driver.went_online", "DRIVER", userID, nil, map[string]interface{}{"driver_id": profile.ID})
@@ -250,6 +262,14 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 }
 
 func (s *Service) checkGPSPlausibility(ctx context.Context, driverProfileID string, newPoint geo.Point) (bool, float64) {
+	// Skip the check entirely during the go-online grace period (first ~60 s).
+	// The mobile app sends the placeholder KIGALI_CENTER position before real
+	// device GPS resolves; comparing that to the actual GPS coordinates would
+	// compute a physically impossible speed and trigger a false anomaly.
+	if _, err := s.redis.Get(ctx, rkeys.K.DriverGracePeriod(driverProfileID)).Result(); err == nil {
+		return false, 0
+	}
+
 	entries, err := s.redis.LRange(ctx, rkeys.K.DriverLocationHistory(driverProfileID), 0, 0).Result()
 	if err != nil || len(entries) == 0 {
 		return false, 0
@@ -269,6 +289,9 @@ func (s *Service) checkGPSPlausibility(ctx context.Context, driverProfileID stri
 	}
 	elapsed := time.Since(prevTime).Seconds()
 	if elapsed <= 0 {
+		return false, 0
+	}
+	if s.cfg.GPS.StaleThresholdSeconds > 0 && elapsed > s.cfg.GPS.StaleThresholdSeconds {
 		return false, 0
 	}
 	speed := geo.SpeedKMH(prevPoint, newPoint, elapsed)
