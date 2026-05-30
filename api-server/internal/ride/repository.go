@@ -12,10 +12,13 @@ import (
 	"github.com/workspace/ride-platform/pkg/geo"
 )
 
-// Ride is the full operational ride record.
+// Ride is the full operational ride record (internal model — no JSON tags intentionally).
 type Ride struct {
-	ID                    string
-	CustomerID            string
+	ID         string
+	CustomerID string
+	// CustomerName and CustomerPhone are populated by driver-side queries (JOIN with users).
+	CustomerName          string
+	CustomerPhone         string
 	DriverID              *string
 	TransportType         string
 	Status                Status
@@ -43,6 +46,76 @@ type Ride struct {
 	PickupExpired         bool
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+}
+
+// RideResponse is the API-facing DTO with snake_case JSON tags expected by the mobile client.
+type RideResponse struct {
+	ID                    string     `json:"id"`
+	CustomerID            string     `json:"customer_id"`
+	CustomerName          string     `json:"customer_name,omitempty"`
+	CustomerPhone         string     `json:"customer_phone,omitempty"`
+	DriverID              *string    `json:"driver_id"`
+	TransportType         string     `json:"transport_type"`
+	Status                string     `json:"status"`
+	PickupLat             float64    `json:"pickup_lat"`
+	PickupLng             float64    `json:"pickup_lng"`
+	PickupAddress         string     `json:"pickup_address"`
+	DestLat               float64    `json:"dest_lat"`
+	DestLng               float64    `json:"dest_lng"`
+	DestinationAddress    string     `json:"destination_address"`
+	EstimatedDistanceKM   *float64   `json:"estimated_distance_km"`
+	CustomerInitialFare   *float64   `json:"customer_initial_fare"`
+	AgreedFare            *float64   `json:"agreed_fare"`
+	EstimatedFareRWF      *float64   `json:"estimated_fare_rwf"`
+	NightSurchargeApplied bool       `json:"night_surcharge_applied"`
+	NightSurchargePct     float64    `json:"night_surcharge_pct"`
+	WaitingSeconds        int        `json:"waiting_seconds"`
+	WaitingChargeRWF      float64    `json:"waiting_charge_rwf"`
+	CancellationFeeRWF    float64    `json:"cancellation_fee_rwf"`
+	FinalFareRWF          *float64   `json:"final_fare_rwf"`
+	CancelReason          *string    `json:"cancel_reason"`
+	DriverArrivedAt       *time.Time `json:"driver_arrived_at"`
+	StartedAt             *time.Time `json:"started_at"`
+	CompletedAt           *time.Time `json:"completed_at"`
+	PickupExpired         bool       `json:"pickup_expired"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+}
+
+// ToResponse converts the internal Ride model to the mobile-friendly API response.
+func (r *Ride) ToResponse() *RideResponse {
+	return &RideResponse{
+		ID:                    r.ID,
+		CustomerID:            r.CustomerID,
+		CustomerName:          r.CustomerName,
+		CustomerPhone:         r.CustomerPhone,
+		DriverID:              r.DriverID,
+		TransportType:         r.TransportType,
+		Status:                string(r.Status),
+		PickupLat:             r.PickupPoint.Lat,
+		PickupLng:             r.PickupPoint.Lng,
+		PickupAddress:         r.PickupAddress,
+		DestLat:               r.DestinationPoint.Lat,
+		DestLng:               r.DestinationPoint.Lng,
+		DestinationAddress:    r.DestinationAddress,
+		EstimatedDistanceKM:   r.EstimatedDistanceKM,
+		CustomerInitialFare:   r.CustomerInitialFare,
+		AgreedFare:            r.AgreedFare,
+		EstimatedFareRWF:      r.EstimatedFareRWF,
+		NightSurchargeApplied: r.NightSurchargeApplied,
+		NightSurchargePct:     r.NightSurchargePct,
+		WaitingSeconds:        r.WaitingSeconds,
+		WaitingChargeRWF:      r.WaitingChargeRWF,
+		CancellationFeeRWF:    r.CancellationFeeRWF,
+		FinalFareRWF:          r.FinalFareRWF,
+		CancelReason:          r.CancelReason,
+		DriverArrivedAt:       r.DriverArrivedAt,
+		StartedAt:             r.StartedAt,
+		CompletedAt:           r.CompletedAt,
+		PickupExpired:         r.PickupExpired,
+		CreatedAt:             r.CreatedAt,
+		UpdatedAt:             r.UpdatedAt,
+	}
 }
 
 type RideRequestPayload struct {
@@ -89,6 +162,57 @@ const rideSelectCols = `
 	created_at, updated_at
 `
 
+// rideSelectColsWithCustomer extends rideSelectCols with customer identity fields.
+// Used by driver-facing queries so the driver sees who they're picking up.
+const rideSelectColsWithCustomer = `
+	r.id, r.customer_id, r.driver_id, r.transport_type, r.status,
+	ST_X(r.pickup_point::geometry)      AS pickup_lng,
+	ST_Y(r.pickup_point::geometry)      AS pickup_lat,
+	r.pickup_address,
+	ST_X(r.destination_point::geometry) AS dest_lng,
+	ST_Y(r.destination_point::geometry) AS dest_lat,
+	r.destination_address,
+	r.estimated_distance_km, r.customer_initial_fare,
+	r.agreed_fare, r.fare_locked_at,
+	r.cancel_reason, r.cancelled_by_role,
+	r.driver_arrived_at, r.started_at, r.completed_at,
+	r.pricing_config_id, r.estimated_fare_rwf,
+	COALESCE(r.night_surcharge_applied, FALSE), COALESCE(r.night_surcharge_pct, 0.0),
+	COALESCE(r.waiting_seconds, 0), COALESCE(r.waiting_charge_rwf, 0.0),
+	COALESCE(r.cancellation_fee_rwf, 0.0), r.final_fare_rwf,
+	COALESCE(r.pickup_expired, FALSE),
+	r.created_at, r.updated_at,
+	COALESCE(u.full_name, 'Customer')  AS customer_name,
+	COALESCE(u.phone_number, '')       AS customer_phone
+`
+
+func scanRideWithCustomer(row pgx.Row) (*Ride, error) {
+	r := &Ride{}
+	var pickupLng, pickupLat, destLng, destLat float64
+	err := row.Scan(
+		&r.ID, &r.CustomerID, &r.DriverID, &r.TransportType, &r.Status,
+		&pickupLng, &pickupLat, &r.PickupAddress,
+		&destLng, &destLat, &r.DestinationAddress,
+		&r.EstimatedDistanceKM, &r.CustomerInitialFare,
+		&r.AgreedFare, &r.FareLockedAt,
+		&r.CancelReason, &r.CancelledByRole,
+		&r.DriverArrivedAt, &r.StartedAt, &r.CompletedAt,
+		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
+		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
+		&r.PickupExpired, &r.CreatedAt, &r.UpdatedAt,
+		&r.CustomerName, &r.CustomerPhone,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrRideNotFound
+		}
+		return nil, err
+	}
+	r.PickupPoint = geo.Point{Lat: pickupLat, Lng: pickupLng}
+	r.DestinationPoint = geo.Point{Lat: destLat, Lng: destLng}
+	return r, nil
+}
+
 func scanRide(row pgx.Row) (*Ride, error) {
 	r := &Ride{}
 	var pickupLng, pickupLat, destLng, destLat float64
@@ -127,25 +251,27 @@ func (repo *Repository) FindByIDAndCustomer(ctx context.Context, rideID, custome
 
 func (repo *Repository) FindByIDAndDriver(ctx context.Context, rideID, driverUserID string) (*Ride, error) {
 	row := repo.db.QueryRow(ctx, `
-		SELECT `+rideSelectCols+`
+		SELECT `+rideSelectColsWithCustomer+`
 		FROM rides r
+		JOIN users u ON u.id = r.customer_id
 		WHERE r.id = $1
 		  AND r.driver_id = (SELECT id FROM driver_profiles WHERE user_id = $2)
 	`, rideID, driverUserID)
-	return scanRide(row)
+	return scanRideWithCustomer(row)
 }
 
 func (repo *Repository) FindActiveByDriver(ctx context.Context, driverUserID string) (*Ride, error) {
 	row := repo.db.QueryRow(ctx, `
-		SELECT `+rideSelectCols+`
+		SELECT `+rideSelectColsWithCustomer+`
 		FROM rides r
 		JOIN driver_profiles dp ON dp.id = r.driver_id
+		JOIN users u ON u.id = r.customer_id
 		WHERE dp.user_id = $1
 		  AND r.status NOT IN ('COMPLETED','CANCELLED')
 		ORDER BY r.created_at DESC
 		LIMIT 1
 	`, driverUserID)
-	return scanRide(row)
+	return scanRideWithCustomer(row)
 }
 
 func (repo *Repository) GetRideRequestPayload(ctx context.Context, rideID string) (*RideRequestPayload, error) {

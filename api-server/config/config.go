@@ -89,13 +89,15 @@ type RideConfig struct {
 }
 
 type GPSConfig struct {
-	MaxSpeedKMH float64
+	MaxSpeedKMH           float64
+	StaleThresholdSeconds float64 // skip plausibility check if previous entry is older than this
 }
 
 type DriverConfig struct {
 	OfflineCooldownMinutes      int
 	DeclinePriorityThreshold    int
 	DeclineAutoOfflineThreshold int
+	DevAutoApprove              bool // DEV ONLY: skip admin approval on driver registration
 }
 
 type CustomerConfig struct {
@@ -153,10 +155,12 @@ func Load() (*Config, error) {
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
 
 	cfg.GPS.MaxSpeedKMH = getEnvFloat("GPS_MAX_SPEED_KMH", 200.0)
+	cfg.GPS.StaleThresholdSeconds = getEnvFloat("GPS_STALE_THRESHOLD_SECONDS", 300.0)
 
 	cfg.Driver.OfflineCooldownMinutes = getEnvInt("DRIVER_OFFLINE_COOLDOWN_MINUTES", 10)
 	cfg.Driver.DeclinePriorityThreshold = getEnvInt("DRIVER_DECLINE_PRIORITY_THRESHOLD", 10)
 	cfg.Driver.DeclineAutoOfflineThreshold = getEnvInt("DRIVER_DECLINE_AUTO_OFFLINE_THRESHOLD", 15)
+	cfg.Driver.DevAutoApprove = getEnvBool("DEV_AUTO_APPROVE_DRIVERS", false)
 
 	cfg.Customer.CancelWarnThreshold = getEnvInt("CUSTOMER_CANCEL_WARN_THRESHOLD", 5)
 	cfg.Customer.CancelSuspendThreshold = getEnvInt("CUSTOMER_CANCEL_SUSPEND_THRESHOLD", 8)
@@ -198,4 +202,16 @@ func getEnvFloat(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }

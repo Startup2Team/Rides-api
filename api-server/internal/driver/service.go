@@ -61,9 +61,25 @@ func NewService(repo *Repository, rdb *goredis.Client, ana *analytics.Service, c
 }
 
 // Apply submits a driver application.
+// In dev mode (DEV_AUTO_APPROVE_DRIVERS=true) the profile is immediately
+// approved and the user's role_state is promoted to DRIVER_ACTIVE so
+// they can go online without waiting for an admin action.
 func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
-	_, err := s.repo.FindProfileByUserID(ctx, in.UserID)
+	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
 	if err == nil {
+		// Profile already exists.
+		if s.cfg.Driver.DevAutoApprove && existing.ApprovalStatus != "APPROVED" {
+			// Dev shortcut: approve the pending profile so the caller can proceed.
+			if aerr := s.repo.SetApprovalStatus(ctx, existing.ID, "APPROVED", "", nil); aerr != nil {
+				return nil, fmt.Errorf("dev auto-approve existing profile: %w", aerr)
+			}
+			if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); aerr != nil {
+				return nil, fmt.Errorf("update role state: %w", aerr)
+			}
+			existing.ApprovalStatus = "APPROVED"
+			s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: existing pending profile approved")
+			return existing, nil
+		}
 		return nil, apperrors.ErrDriverAlreadyApplied
 	}
 
@@ -75,8 +91,20 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 		return nil, err
 	}
 
-	if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_PENDING"); err != nil {
-		return nil, fmt.Errorf("update role state: %w", err)
+	if s.cfg.Driver.DevAutoApprove {
+		// Skip admin queue — approve immediately for dev/testing.
+		if err := s.repo.SetApprovalStatus(ctx, profile.ID, "APPROVED", "dev-auto-approve", nil); err != nil {
+			return nil, fmt.Errorf("dev auto-approve: %w", err)
+		}
+		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); err != nil {
+			return nil, fmt.Errorf("update role state: %w", err)
+		}
+		profile.ApprovalStatus = "APPROVED"
+		s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: driver approved instantly — disable in production")
+	} else {
+		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_PENDING"); err != nil {
+			return nil, fmt.Errorf("update role state: %w", err)
+		}
 	}
 
 	return profile, nil
@@ -131,6 +159,18 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 		if redisErr == nil {
 			s.log.Info().Str("driver_id", profile.ID).Msg("driver came online within cooldown — penalties preserved")
 		}
+		// Clear location history from the previous session so the first GPS
+		// update in this session is accepted as baseline (not compared against
+		// a stale position that could trigger false anomaly detection).
+		// Also reset the anomaly counter so a clean session starts at zero.
+		s.redis.Del(ctx, rkeys.K.DriverLocationHistory(profile.ID))
+		s.redis.Del(ctx, rkeys.K.GPSAnomalyCount(profile.ID))
+		// 60-second grace period: the mobile app sends the app-default position
+		// (KIGALI_CENTER) immediately when going online, before device GPS
+		// resolves. When real GPS arrives (typically 2-10 s later), the jump
+		// from the placeholder would be flagged as an impossible-speed anomaly.
+		// The grace period suppresses plausibility checks during this window.
+		s.redis.Set(ctx, rkeys.K.DriverGracePeriod(profile.ID), "1", 60*time.Second)
 		// Set driver state + add to GEO index
 		s.redis.Set(ctx, rkeys.K.DriverState(profile.ID), "AVAILABLE", 0)
 		s.analytics.Publish(ctx, "driver.went_online", "DRIVER", userID, nil, map[string]interface{}{"driver_id": profile.ID})
@@ -222,6 +262,14 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 }
 
 func (s *Service) checkGPSPlausibility(ctx context.Context, driverProfileID string, newPoint geo.Point) (bool, float64) {
+	// Skip the check entirely during the go-online grace period (first ~60 s).
+	// The mobile app sends the placeholder KIGALI_CENTER position before real
+	// device GPS resolves; comparing that to the actual GPS coordinates would
+	// compute a physically impossible speed and trigger a false anomaly.
+	if _, err := s.redis.Get(ctx, rkeys.K.DriverGracePeriod(driverProfileID)).Result(); err == nil {
+		return false, 0
+	}
+
 	entries, err := s.redis.LRange(ctx, rkeys.K.DriverLocationHistory(driverProfileID), 0, 0).Result()
 	if err != nil || len(entries) == 0 {
 		return false, 0
@@ -241,6 +289,9 @@ func (s *Service) checkGPSPlausibility(ctx context.Context, driverProfileID stri
 	}
 	elapsed := time.Since(prevTime).Seconds()
 	if elapsed <= 0 {
+		return false, 0
+	}
+	if s.cfg.GPS.StaleThresholdSeconds > 0 && elapsed > s.cfg.GPS.StaleThresholdSeconds {
 		return false, 0
 	}
 	speed := geo.SpeedKMH(prevPoint, newPoint, elapsed)
@@ -377,6 +428,11 @@ func endOfDay() time.Time {
 	return time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
 }
 
+// jitter adds a small random offset to driver coordinates before sending them
+// to customers. This prevents customers from pinpointing a driver's exact location
+// before a ride is booked (privacy), while keeping the map marker believable.
+// ±0.0015° ≈ ±165 m per axis — large enough for privacy, small enough to stay
+// within the same city block so the marker looks correct on the map.
 func jitter() float64 {
-	return (rand.Float64() - 0.5) * 0.006
+	return (rand.Float64() - 0.5) * 0.003
 }

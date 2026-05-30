@@ -271,7 +271,7 @@ func main() {
 			r.Get("/credits", pkgH.GetCredits)
 
 			r.Get("/rides/active", rideH.GetActiveRideForDriver)
-			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc))
+			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
 			r.Get("/rides/{ride_id}", rideH.GetRideForDriver)
 			r.Post("/rides/{ride_id}/cancel", driverCancelAfterPickupExpiryHandler(rideSvc))
@@ -523,11 +523,13 @@ func main() {
 	adminSvc.SetPackagesService(pkgSvc)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
+	// WriteTimeout must be 0 when serving WebSockets — a global write timeout
+	// closes long-lived /ws/driver and /ws/customer connections mid-ride.
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -579,9 +581,10 @@ func runMigrations(databaseURL string) error {
 // creditChecker is the subset of packages.Service the accept handler needs.
 type creditChecker interface {
 	HasCredits(ctx context.Context, driverUserID, vehicleType string) (bool, error)
+	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
 }
 
-func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, driverSvc *driver.Service, credits creditChecker) http.HandlerFunc {
+func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, driverSvc *driver.Service, credits creditChecker, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
@@ -596,6 +599,11 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 		profile, err := driverSvc.GetProfile(r.Context(), claims.UserID)
 		if err == nil {
 			hasCredits, credErr := credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+			if credErr == nil && !hasCredits && cfg.Env != "production" {
+				// Dev/local: auto-grant free trial (same as admin approval flow).
+				_ = credits.GrantFreeTrialIfEligible(r.Context(), claims.UserID, profile.TransportType)
+				hasCredits, _ = credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+			}
 			if credErr == nil && !hasCredits {
 				respond.Error(w, apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding."))
 				return
