@@ -174,6 +174,13 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 	if err != nil {
 		return err
 	}
+	// Already in a terminal state — treat cancel as idempotent success.
+	// This handles the common case where the matching engine or a timeout
+	// cancelled the ride between when the customer tapped "Cancel" and when
+	// the request reached the server.
+	if IsTerminal(r.Status) {
+		return nil
+	}
 	if !CancellableStatuses[r.Status] {
 		return apperrors.ErrInvalidTransition
 	}
