@@ -89,7 +89,8 @@ type RideConfig struct {
 }
 
 type GPSConfig struct {
-	MaxSpeedKMH float64
+	MaxSpeedKMH           float64
+	StaleThresholdSeconds float64 // skip plausibility check if previous entry is older than this
 }
 
 type DriverConfig struct {
@@ -154,6 +155,7 @@ func Load() (*Config, error) {
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
 
 	cfg.GPS.MaxSpeedKMH = getEnvFloat("GPS_MAX_SPEED_KMH", 200.0)
+	cfg.GPS.StaleThresholdSeconds = getEnvFloat("GPS_STALE_THRESHOLD_SECONDS", 300.0)
 
 	cfg.Driver.OfflineCooldownMinutes = getEnvInt("DRIVER_OFFLINE_COOLDOWN_MINUTES", 10)
 	cfg.Driver.DeclinePriorityThreshold = getEnvInt("DRIVER_DECLINE_PRIORITY_THRESHOLD", 10)
