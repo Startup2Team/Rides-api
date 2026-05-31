@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"time"
 
@@ -159,21 +160,23 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 		if redisErr == nil {
 			s.log.Info().Str("driver_id", profile.ID).Msg("driver came online within cooldown — penalties preserved")
 		}
-		// Clear location history from the previous session so the first GPS
-		// update in this session is accepted as baseline (not compared against
-		// a stale position that could trigger false anomaly detection).
-		// Also reset the anomaly counter so a clean session starts at zero.
+		// Always clear stale location history and reset the plausibility window,
+		// even on an app-restart session-restore (driverProfile.isOnline=true path).
+		// Without this the first HTTP location update after restart compares against
+		// an old session's position and gets rejected as GPS_PLAUSIBILITY.
 		s.redis.Del(ctx, rkeys.K.DriverLocationHistory(profile.ID))
 		s.redis.Del(ctx, rkeys.K.GPSAnomalyCount(profile.ID))
-		// 60-second grace period: the mobile app sends the app-default position
-		// (KIGALI_CENTER) immediately when going online, before device GPS
-		// resolves. When real GPS arrives (typically 2-10 s later), the jump
-		// from the placeholder would be flagged as an impossible-speed anomaly.
-		// The grace period suppresses plausibility checks during this window.
 		s.redis.Set(ctx, rkeys.K.DriverGracePeriod(profile.ID), "1", 60*time.Second)
-		// Set driver state + add to GEO index
-		s.redis.Set(ctx, rkeys.K.DriverState(profile.ID), "AVAILABLE", 0)
-		s.analytics.Publish(ctx, "driver.went_online", "DRIVER", userID, nil, map[string]interface{}{"driver_id": profile.ID})
+
+		// If the driver has an active ride (e.g. app restarted mid-trip), preserve
+		// the ON_TRIP Redis state so the matching engine doesn't re-pool them.
+		// We still refresh the grace period above so location updates don't fail.
+		activeRide, _ := s.redis.Get(ctx, rkeys.K.DriverActiveRide(profile.ID)).Result()
+		if activeRide == "" {
+			// No active ride — full online transition.
+			s.redis.Set(ctx, rkeys.K.DriverState(profile.ID), "AVAILABLE", 0)
+			s.analytics.Publish(ctx, "driver.went_online", "DRIVER", userID, nil, map[string]interface{}{"driver_id": profile.ID})
+		}
 	} else {
 		// Verify no active ride before going offline
 		activeRide, _ := s.redis.Get(ctx, rkeys.K.DriverActiveRide(profile.ID)).Result()
@@ -384,23 +387,115 @@ func (s *Service) GetStats(ctx context.Context, driverUserID string) (map[string
 	}, nil
 }
 
+// allVehicleTypes lists every vehicle type the platform supports.
+var allVehicleTypes = []string{"MOTO_BIKE", "CAB_TAXI", "HEAVY_FUSO", "LIGHT_HILUX"}
+
+const (
+	driverStateAvailable = "AVAILABLE"
+	nearbySearchRadiusKM = 5.0
+	nearbySearchRadiusM  = 5000
+	nearbyMaxPerType     = 6
+	// Kigali city-average speed used for ETA estimation without a routing call.
+	citySpeedKMH = 25.0
+)
+
 // GetNearbyDrivers returns anonymised nearby drivers for a customer location.
+// If transportType is empty, all vehicle types are queried in a single call.
+//
+// Primary source: Redis GEO (real-time, sub-millisecond per type).
+// Fallback:       PostGIS driver_locations (cold-start, Redis flush).
+//
+// Each result includes an estimated ETA computed from straight-line distance
+// at city-average speed — no routing API call needed.
 func (s *Service) GetNearbyDrivers(ctx context.Context, loc geo.Point, transportType string) ([]*NearbyDriver, error) {
-	candidates, err := s.repo.FindNearby(ctx, loc, 5000, transportType, nil)
-	if err != nil {
-		return nil, err
+	types := allVehicleTypes
+	if transportType != "" {
+		types = []string{transportType}
 	}
 
 	var result []*NearbyDriver
+	for _, tt := range types {
+		drivers := s.nearbyForType(ctx, loc, tt)
+		result = append(result, drivers...)
+	}
+	return result, nil
+}
+
+// nearbyForType queries one vehicle type: Redis GEO first, PostGIS fallback.
+func (s *Service) nearbyForType(ctx context.Context, loc geo.Point, transportType string) []*NearbyDriver {
+	// ── 1. Redis GEO — real-time, O(log N + k) ───────────────────────────────
+	geoKey := rkeys.K.DriverGeoIndex(transportType)
+	geoResults, err := s.redis.GeoSearchLocation(ctx, geoKey, &goredis.GeoSearchLocationQuery{
+		GeoSearchQuery: goredis.GeoSearchQuery{
+			Longitude:  loc.Lng,
+			Latitude:   loc.Lat,
+			Radius:     nearbySearchRadiusKM,
+			RadiusUnit: "km",
+			Sort:       "ASC",
+			Count:      nearbyMaxPerType + 4, // fetch extra to allow for state filtering
+		},
+		WithCoord: true,
+		WithDist:  true,
+	}).Result()
+
+	if err == nil && len(geoResults) > 0 {
+		var drivers []*NearbyDriver
+		for _, r := range geoResults {
+			if len(drivers) >= nearbyMaxPerType {
+				break
+			}
+			// Skip drivers not in AVAILABLE state (ON_TRIP, OFFLINE, matching-locked).
+			state, _ := s.redis.Get(ctx, rkeys.K.DriverState(r.Name)).Result()
+			if state != driverStateAvailable {
+				continue
+			}
+			distM := r.Dist * 1000
+			drivers = append(drivers, &NearbyDriver{
+				TransportType: transportType,
+				DistanceM:     distM,
+				ApproxLat:     r.Latitude + jitter(),
+				ApproxLng:     r.Longitude + jitter(),
+				ETAMinutes:    etaMinutes(distM),
+			})
+		}
+		if len(drivers) > 0 {
+			return drivers
+		}
+	}
+
+	// ── 2. PostGIS fallback — handles cold-start / Redis flush ────────────────
+	candidates, err := s.repo.FindNearby(ctx, loc, nearbySearchRadiusM, transportType, nil)
+	if err != nil || len(candidates) == 0 {
+		return nil
+	}
+	var fallback []*NearbyDriver
 	for _, c := range candidates {
-		result = append(result, &NearbyDriver{
-			TransportType: c.TransportType,
+		if len(fallback) >= nearbyMaxPerType {
+			break
+		}
+		fallback = append(fallback, &NearbyDriver{
+			TransportType: transportType,
 			DistanceM:     c.DistanceM,
 			ApproxLat:     c.Lat + jitter(),
 			ApproxLng:     c.Lng + jitter(),
+			ETAMinutes:    etaMinutes(c.DistanceM),
 		})
 	}
-	return result, nil
+	return fallback
+}
+
+// etaMinutes estimates arrival time from straight-line distance at city speed.
+// Good enough for the pre-booking map view; avoids a routing API call per driver.
+func etaMinutes(distanceM float64) int {
+	if distanceM <= 0 {
+		return 1
+	}
+	minutes := (distanceM / 1000.0) / citySpeedKMH * 60.0
+	eta := int(math.Ceil(minutes))
+	if eta < 1 {
+		return 1
+	}
+	return eta
 }
 
 func isUniqueViolation(err error) bool {

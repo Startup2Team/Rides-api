@@ -267,6 +267,7 @@ func (s *Service) SetEnRoute(ctx context.Context, rideID, driverUserID string) e
 	s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusDriverEnRoute), 0)
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.driver_en_route", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.driver_en_route", "DRIVER", driverUserID, &rideID, map[string]interface{}{"ride_id": rideID})
+	s.hub.SendToCustomer(rideID, tracking.Message{Type: "driver_en_route", RideID: rideID})
 	return nil
 }
 
@@ -287,15 +288,30 @@ func (s *Service) MarkDriverArrived(ctx context.Context, rideID, driverProfileID
 }
 
 // SetDriverArrived transitions DRIVER_EN_ROUTE -> DRIVER_ARRIVED from the driver app.
+// If the ride is still CONFIRMED (en-route call was in-flight or skipped), it
+// automatically advances through DRIVER_EN_ROUTE first so the driver is never
+// blocked by a stale state on their device.
 func (s *Service) SetDriverArrived(ctx context.Context, rideID, driverUserID string) error {
 	r, err := s.repo.FindByIDAndDriver(ctx, rideID, driverUserID)
 	if err != nil {
 		return err
 	}
+
+	// Auto-advance through CONFIRMED → DRIVER_EN_ROUTE if needed.
+	if r.Status == StatusConfirmed {
+		if err := s.repo.Transition(ctx, rideID, StatusConfirmed, StatusDriverEnRoute); err != nil {
+			return err
+		}
+		s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusDriverEnRoute), 0)
+		_ = s.repo.AppendEvent(ctx, rideID, "ride.driver_en_route", "DRIVER", driverUserID, nil)
+		s.hub.SendToCustomer(rideID, tracking.Message{Type: "driver_en_route", RideID: rideID})
+		r.Status = StatusDriverEnRoute
+	}
+
 	if err := ValidateTransition(r.Status, StatusDriverArrived); err != nil {
 		return err
 	}
-	within, err := s.repo.DriverWithinRadius(ctx, driverUserID, r.PickupPoint, s.cfg.Ride.StartRadiusM)
+	within, err := s.withinRadius(ctx, driverUserID, r.DriverID, r.PickupPoint, s.cfg.Ride.StartRadiusM)
 	if err != nil {
 		return fmt.Errorf("geo-gate check: %w", err)
 	}
@@ -373,7 +389,7 @@ func (s *Service) StartRide(ctx context.Context, rideID, driverUserID string) er
 	if err := ValidateTransition(r.Status, StatusInProgress); err != nil {
 		return err
 	}
-	within, err := s.repo.DriverWithinRadius(ctx, driverUserID, r.PickupPoint, s.cfg.Ride.StartRadiusM)
+	within, err := s.withinRadius(ctx, driverUserID, r.DriverID, r.PickupPoint, s.cfg.Ride.StartRadiusM)
 	if err != nil {
 		return fmt.Errorf("geo-gate check: %w", err)
 	}
@@ -416,7 +432,7 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 		}
 	}
 
-	within, err := s.repo.DriverWithinRadius(ctx, driverUserID, destination, s.cfg.Ride.CompleteRadiusM)
+	within, err := s.withinRadius(ctx, driverUserID, r.DriverID, destination, s.cfg.Ride.CompleteRadiusM)
 	if err != nil {
 		return fmt.Errorf("geo-gate check: %w", err)
 	}
@@ -543,4 +559,42 @@ func (s *Service) releaseDriverRedisState(ctx context.Context, driverProfileID, 
 func endOfDay() time.Time {
 	now := time.Now().UTC()
 	return time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
+}
+
+// withinRadius checks whether a driver is within radiusM of target.
+//
+// It is used for the three geofence gates:
+//   - /arrive  — driver must be near the pickup
+//   - /start   — driver must still be near the pickup
+//   - /complete — driver must be near the destination
+//
+// Source priority (most accurate first):
+//  1. DEV_SKIP_GEOFENCE=true → always pass (dev testing without physical proximity)
+//  2. Redis driver:location:<profileID> key — updated every 5 s during a trip,
+//     always fresher than the DB write that follows it.
+//  3. PostGIS driver_locations — authoritative fallback when Redis key is absent
+//     (e.g. cold start, Redis flush).
+func (s *Service) withinRadius(ctx context.Context, driverUserID string, driverProfileID *string, target geo.Point, radiusM int) (bool, error) {
+	// Dev bypass — mirror of DEV_AUTO_APPROVE_DRIVERS; never true in production.
+	if s.cfg.Ride.DevSkipGeofence {
+		return true, nil
+	}
+
+	// Redis check: freshest location, already stored by UpdateLocation.
+	if driverProfileID != nil {
+		raw, err := s.redis.Get(ctx, rkeys.K.DriverLocation(*driverProfileID)).Result()
+		if err == nil {
+			var loc struct {
+				Lat float64 `json:"lat"`
+				Lng float64 `json:"lng"`
+			}
+			if json.Unmarshal([]byte(raw), &loc) == nil && (loc.Lat != 0 || loc.Lng != 0) {
+				distM := geo.DistanceKM(geo.Point{Lat: loc.Lat, Lng: loc.Lng}, target) * 1000
+				return distM <= float64(radiusM), nil
+			}
+		}
+	}
+
+	// PostGIS fallback.
+	return s.repo.DriverWithinRadius(ctx, driverUserID, target, radiusM)
 }

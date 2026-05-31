@@ -252,12 +252,13 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/customer/location (nearby drivers for customer)
+// transport_type is optional — omit or send "" to get all vehicle types.
 func NearbyDriversHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Lat           float64 `json:"lat"            validate:"required"`
 			Lng           float64 `json:"lng"            validate:"required"`
-			TransportType string  `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+			TransportType string  `json:"transport_type" validate:"omitempty,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			respond.Error(w, apperrors.ErrBadRequest)

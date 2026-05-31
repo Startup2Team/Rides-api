@@ -158,3 +158,16 @@ func (h *Handler) GetActiveRideForDriver(w http.ResponseWriter, r *http.Request)
 	}
 	respond.OK(w, ride.ToResponse())
 }
+
+// GET /api/v1/customer/rides/active
+// Returns the customer's current non-terminal ride for app-restart recovery.
+// 404 when the customer has no active ride.
+func (h *Handler) GetActiveRideForCustomer(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	ride, err := h.svc.GetActiveRide(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, ride.ToResponse())
+}

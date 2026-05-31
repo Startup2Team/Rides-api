@@ -155,6 +155,13 @@ func (Keys) AnalyticsStream() string {
 	return "analytics:events"
 }
 
+// RideDriverLocation caches the driver's last GPS update for a specific ride.
+// Written on every location relay while a trip is active; TTL 30 minutes.
+// Used to replay the driver's position to a customer who reconnects their WS.
+func (Keys) RideDriverLocation(rideID string) string {
+	return fmt.Sprintf("ride:%s:driver_location", rideID)
+}
+
 // ── Admin dashboard ────────────────────────────────────────────────────────
 
 func (Keys) DashboardCache() string {

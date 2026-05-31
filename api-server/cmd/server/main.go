@@ -146,7 +146,7 @@ func main() {
 	negH := negotiation.NewHandler(negSvc)
 	adminH := admin.NewHandler(adminSvc)
 	anaH := analytics.NewHandler(anaRepo)
-	trackH := tracking.NewHandler(hub, driverSvc, cfg, log)
+	trackH := tracking.NewHandler(hub, driverSvc, rdb, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
 	pkgH := packages.NewHandler(pkgSvc)
@@ -237,6 +237,7 @@ func main() {
 
 		r.Post("/rides", rideH.CreateRide)
 		r.Get("/rides", rideH.ListRides)
+		r.Get("/rides/active", rideH.GetActiveRideForCustomer)
 		r.Get("/rides/{ride_id}", rideH.GetRide)
 		r.Delete("/rides/{ride_id}", rideH.CancelRide)
 

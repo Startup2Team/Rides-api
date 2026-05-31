@@ -60,6 +60,7 @@ type NearbyDriver struct {
 	DistanceM     float64 `json:"distance_m"`
 	ApproxLat     float64 `json:"approx_lat"`
 	ApproxLng     float64 `json:"approx_lng"`
+	ETAMinutes    int     `json:"eta_minutes"`
 }
 
 // NearbyCandidate is used internally by the matching engine.

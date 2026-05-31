@@ -86,6 +86,9 @@ type MatchingConfig struct {
 type RideConfig struct {
 	StartRadiusM    int
 	CompleteRadiusM int
+	// DevSkipGeofence bypasses arrival/start/complete radius checks.
+	// NEVER set true in production.
+	DevSkipGeofence bool
 }
 
 type GPSConfig struct {
@@ -153,6 +156,7 @@ func Load() (*Config, error) {
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
+	cfg.Ride.DevSkipGeofence = getEnvBool("DEV_SKIP_GEOFENCE", false)
 
 	cfg.GPS.MaxSpeedKMH = getEnvFloat("GPS_MAX_SPEED_KMH", 200.0)
 	cfg.GPS.StaleThresholdSeconds = getEnvFloat("GPS_STALE_THRESHOLD_SECONDS", 300.0)

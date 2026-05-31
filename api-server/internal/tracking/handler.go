@@ -6,12 +6,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/internal/middleware"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
+	rkeys "github.com/workspace/ride-platform/pkg/redis"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
@@ -36,12 +38,13 @@ const (
 type Handler struct {
 	hub       *Hub
 	driverSvc *driver.Service
+	redis     *goredis.Client
 	cfg       *config.Config
 	log       zerolog.Logger
 }
 
-func NewHandler(hub *Hub, driverSvc *driver.Service, cfg *config.Config, log zerolog.Logger) *Handler {
-	return &Handler{hub: hub, driverSvc: driverSvc, cfg: cfg, log: log}
+func NewHandler(hub *Hub, driverSvc *driver.Service, rdb *goredis.Client, cfg *config.Config, log zerolog.Logger) *Handler {
+	return &Handler{hub: hub, driverSvc: driverSvc, redis: rdb, cfg: cfg, log: log}
 }
 
 // WS /ws/driver
@@ -80,6 +83,30 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 
 	h.hub.RegisterDriver(driverProfile.ID, client)
 	defer h.hub.UnregisterDriver(driverProfile.ID)
+
+	// ── State replay on reconnect ─────────────────────────────────────────
+	// After a kill/background/signal-drop the driver reconnects here.
+	// We push the current ride state immediately so the app can jump back to
+	// the correct screen (navigate → arrived → in_progress) without needing
+	// a separate REST call or waiting for the next WS event.
+	{
+		ctx := r.Context()
+		if rideID, rerr := h.redis.Get(ctx, rkeys.K.DriverActiveRide(driverProfile.ID)).Result(); rerr == nil && rideID != "" {
+			if state, serr := h.redis.Get(ctx, rkeys.K.RideState(rideID)).Result(); serr == nil && state != "" {
+				select {
+				case client.Send <- Message{
+					Type:   "ride_state",
+					RideID: rideID,
+					Payload: map[string]interface{}{
+						"status":  state,
+						"ride_id": rideID,
+					},
+				}:
+				default:
+				}
+			}
+		}
+	}
 
 	// Write pump — sends messages from hub to driver
 	go func() {
@@ -145,6 +172,25 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 			if err := h.driverSvc.UpdateLocation(r.Context(), claims.UserID, update); err != nil {
 				h.log.Warn().Err(err).Str("user_id", claims.UserID).Msg("ws: location update rejected")
 				client.Send <- Message{Type: "error", Payload: map[string]interface{}{"message": err.Error()}}
+				continue
+			}
+			// Forward real-time position to the customer watching this driver's active ride.
+			// Also persist it under ride:<rideID>:driver_location so a reconnecting
+			// customer immediately receives the driver's last known position.
+			if rideID, rerr := h.redis.Get(r.Context(), rkeys.K.DriverActiveRide(driverProfile.ID)).Result(); rerr == nil && rideID != "" {
+				locJSON, _ := json.Marshal(map[string]interface{}{
+					"lat": incoming.Lat,
+					"lng": incoming.Lng,
+				})
+				h.redis.Set(r.Context(), rkeys.K.RideDriverLocation(rideID), string(locJSON), 30*time.Minute)
+				h.hub.SendToCustomer(rideID, Message{
+					Type:   "driver_location",
+					RideID: rideID,
+					Payload: map[string]interface{}{
+						"lat": incoming.Lat,
+						"lng": incoming.Lng,
+					},
+				})
 			}
 		}
 	}
@@ -183,6 +229,32 @@ func (h *Handler) CustomerWS(w http.ResponseWriter, r *http.Request) {
 
 	h.hub.RegisterCustomer(rideID, claims.UserID, client)
 	defer h.hub.UnregisterCustomer(rideID)
+
+	// ── State replay on reconnect ─────────────────────────────────────────
+	// On every connect (first connect or reconnect after background/kill) we
+	// push the current ride state so the customer app can navigate to the
+	// right screen instantly — no polling required.
+	// We also include the driver's last known GPS so the map isn't blank.
+	{
+		ctx := r.Context()
+		if state, serr := h.redis.Get(ctx, rkeys.K.RideState(rideID)).Result(); serr == nil && state != "" {
+			payload := map[string]interface{}{"status": state}
+			if locJSON, lerr := h.redis.Get(ctx, rkeys.K.RideDriverLocation(rideID)).Result(); lerr == nil {
+				var loc struct {
+					Lat float64 `json:"lat"`
+					Lng float64 `json:"lng"`
+				}
+				if json.Unmarshal([]byte(locJSON), &loc) == nil {
+					payload["driver_lat"] = loc.Lat
+					payload["driver_lng"] = loc.Lng
+				}
+			}
+			select {
+			case client.Send <- Message{Type: "ride_state", RideID: rideID, Payload: payload}:
+			default:
+			}
+		}
+	}
 
 	// Write pump only — customers don't send location data
 	ticker := time.NewTicker(pingPeriod)
