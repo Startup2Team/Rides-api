@@ -129,7 +129,7 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 			}
 			// Skip seeded/offline drivers with no live socket — otherwise each offer waits
 			// for the full match timeout before trying the next candidate.
-			if !e.hub.IsDriverConnected(c.userID) {
+			if !e.hub.IsDriverConnected(c.profileID) {
 				continue
 			}
 			tried[c.profileID] = true
@@ -300,7 +300,7 @@ func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate)
 		payload["customer_name"] = ridePayload.CustomerName
 		payload["customer_phone"] = ridePayload.CustomerPhone
 	}
-	e.hub.SendToDriver(c.userID, tracking.Message{
+	e.hub.SendToDriver(c.profileID, tracking.Message{
 		Type:    "ride_request",
 		RideID:  rideID,
 		Payload: payload,

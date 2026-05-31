@@ -53,6 +53,17 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the driver profile so the hub is keyed by profile_id.
+	// rides.driver_id stores the profile_id (set by AssignDriver), so all
+	// SendToDriver calls in ride/service and negotiation/service use that same
+	// profile_id.  Without this lookup the hub key is the user_id and messages
+	// from those services are silently dropped.
+	driverProfile, err := h.driverSvc.GetProfile(r.Context(), claims.UserID)
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusForbidden, "DRIVER_PROFILE_REQUIRED", "active driver profile required")
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error().Err(err).Msg("ws: driver upgrade failed")
@@ -61,14 +72,14 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	client := &Client{
-		UserID: claims.UserID,
+		UserID: driverProfile.ID, // profile_id — consistent with rides.driver_id
 		Role:   "DRIVER",
 		Send:   make(chan Message, 32),
 		done:   make(chan struct{}),
 	}
 
-	h.hub.RegisterDriver(claims.UserID, client)
-	defer h.hub.UnregisterDriver(claims.UserID)
+	h.hub.RegisterDriver(driverProfile.ID, client)
+	defer h.hub.UnregisterDriver(driverProfile.ID)
 
 	// Write pump — sends messages from hub to driver
 	go func() {
