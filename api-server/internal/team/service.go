@@ -36,12 +36,12 @@ type LoginResult struct {
 }
 
 type Service struct {
-	repo *Repository
+	repo TeamRepo
 	cfg  *config.Config
 	rdb  *goredis.Client
 }
 
-func NewService(repo *Repository, cfg *config.Config, rdb *goredis.Client) *Service {
+func NewService(repo TeamRepo, cfg *config.Config, rdb *goredis.Client) *Service {
 	return &Service{repo: repo, cfg: cfg, rdb: rdb}
 }
 
