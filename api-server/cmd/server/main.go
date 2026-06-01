@@ -275,7 +275,7 @@ func main() {
 			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
 			r.Get("/rides/{ride_id}", rideH.GetRideForDriver)
-			r.Post("/rides/{ride_id}/cancel", driverCancelAfterPickupExpiryHandler(rideSvc))
+			r.Post("/rides/{ride_id}/cancel", driverCancelHandler(rideSvc))
 			r.Post("/rides/{ride_id}/en-route", driverEnRouteHandler(rideSvc))
 			r.Post("/rides/{ride_id}/arrive", driverArriveHandler(rideSvc))
 			r.Post("/rides/{ride_id}/start", driverStartHandler(rideSvc))
@@ -626,6 +626,31 @@ func driverDeclineHandler(engine *matching.Engine, driverSvc *driver.Service) ht
 	}
 }
 
+// driverCancelHandler handles POST /driver/rides/:id/cancel.
+// Replaces the old pickup-expiry-only handler. Drivers may now cancel from
+// CONFIRMED, DRIVER_EN_ROUTE, or DRIVER_ARRIVED (before or after expiry).
+// The customer is notified via WebSocket immediately.
+func driverCancelHandler(rideSvc *ride.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := mw.GetClaims(r)
+		rideID := chi.URLParam(r, "ride_id")
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Reason == "" {
+			body.Reason = "driver cancelled"
+		}
+		if err := rideSvc.DriverCancelRide(r.Context(), rideID, claims.UserID, body.Reason); err != nil {
+			respond.Error(w, err)
+			return
+		}
+		respond.NoContent(w)
+	}
+}
+
+// driverCancelAfterPickupExpiryHandler remains for backward-compatibility
+// admin/ops tooling. Mobile apps use /cancel instead.
 func driverCancelAfterPickupExpiryHandler(rideSvc *ride.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := mw.GetClaims(r)

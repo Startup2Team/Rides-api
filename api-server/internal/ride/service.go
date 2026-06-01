@@ -218,6 +218,14 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 		Type: "ride_cancelled", RideID: rideID,
 		Payload: map[string]interface{}{"reason": reason},
 	})
+	// Notify the assigned driver so they stop navigating to a cancelled pickup.
+	if r.DriverID != nil {
+		s.hub.SendToDriver(*r.DriverID, tracking.Message{
+			Type:    "ride_cancelled",
+			RideID:  rideID,
+			Payload: map[string]interface{}{"reason": "Customer cancelled the ride."},
+		})
+	}
 	return nil
 }
 
@@ -405,6 +413,10 @@ func (s *Service) StartRide(ctx context.Context, rideID, driverUserID string) er
 	s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusInProgress), 0)
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.started", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.started", "DRIVER", driverUserID, &rideID, map[string]interface{}{"ride_id": rideID})
+	// Notify the customer that the journey has started so they transition to
+	// in_progress immediately — without this the customer is stuck on the
+	// "arrived" screen until the 30-second polling fallback fires.
+	s.hub.SendToCustomer(rideID, tracking.Message{Type: "ride_started", RideID: rideID})
 	return nil
 }
 
@@ -505,7 +517,11 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 		s.releaseDriverRedisState(ctx, profile.ID, profile.TransportType)
 	}
 	s.redis.Del(ctx, rkeys.K.CustomerActiveRide(r.CustomerID))
-	s.redis.Del(ctx, rkeys.K.RideState(rideID))
+	// Keep RideState alive as COMPLETED for 5 minutes so a customer WS
+	// reconnect (e.g. brief signal drop at ride end) still receives the
+	// state-replay message and auto-navigates to the rating screen.
+	// The key expires automatically — no manual cleanup required.
+	s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusCompleted), 5*time.Minute)
 
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.completed", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.completed", "DRIVER", driverUserID, &rideID, map[string]interface{}{
@@ -554,6 +570,49 @@ func (s *Service) releaseDriverRedisState(ctx context.Context, driverProfileID, 
 			})
 		}
 	}
+}
+
+// DriverCancelRide lets a driver cancel a ride they have accepted.
+// Valid from CONFIRMED, DRIVER_EN_ROUTE, or DRIVER_ARRIVED (with or without
+// pickup expiry). The customer is notified via WS immediately.
+// Cancelling after confirming is tracked in analytics for driver-penalty scoring.
+func (s *Service) DriverCancelRide(ctx context.Context, rideID, driverUserID, reason string) error {
+	r, err := s.repo.FindByIDAndDriver(ctx, rideID, driverUserID)
+	if err != nil {
+		return err
+	}
+	// Idempotent: if already terminal, treat as success.
+	if IsTerminal(r.Status) {
+		return nil
+	}
+	// Only cancellable from these states — IN_PROGRESS cannot be cancelled
+	// (the driver must complete the ride once the customer is aboard).
+	validFrom := map[Status]bool{
+		StatusConfirmed:     true,
+		StatusDriverEnRoute: true,
+		StatusDriverArrived: true,
+	}
+	if !validFrom[r.Status] {
+		return apperrors.ErrInvalidTransition
+	}
+	if err := s.repo.Cancel(ctx, rideID, reason, "DRIVER"); err != nil {
+		return err
+	}
+	s.releaseRideRedisState(ctx, rideID, r.CustomerID, r.DriverID, r.TransportType)
+	_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", "DRIVER", driverUserID, map[string]interface{}{
+		"reason": reason, "status_at_cancel": string(r.Status),
+	})
+	s.analytics.Publish(ctx, "ride.cancelled", "DRIVER", driverUserID, &rideID, map[string]interface{}{
+		"ride_id": rideID, "reason": reason,
+		"cancelled_by_role": "DRIVER", "status_at_cancel": string(r.Status),
+	})
+	// Push to customer immediately so their screen updates without waiting for a poll.
+	s.hub.SendToCustomer(rideID, tracking.Message{
+		Type:    "ride_cancelled",
+		RideID:  rideID,
+		Payload: map[string]interface{}{"reason": "Your driver has cancelled the ride."},
+	})
+	return nil
 }
 
 func endOfDay() time.Time {
