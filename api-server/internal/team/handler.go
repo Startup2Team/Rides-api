@@ -330,10 +330,7 @@ func (h *Handler) ResetTOTP(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
-		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "code is required")
-		return
-	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
 	secret, qr, backupCodes, err := h.svc.ResetTOTP(r.Context(), claims.UserID, body.Code)
 	if err != nil {
 		respond.Error(w, err)

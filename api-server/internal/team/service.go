@@ -301,15 +301,19 @@ func (s *Service) Disable2FA(ctx context.Context, adminID, password string) erro
 
 // ResetTOTP verifies the current TOTP code, clears the existing secret, and
 // returns a fresh secret + QR URI for re-enrollment.
+// In non-production environments an empty currentCode bypasses verification,
+// allowing re-enrollment when the authenticator app is lost.
 func (s *Service) ResetTOTP(ctx context.Context, adminID, currentCode string) (secret, otpauthURL string, backupCodes []string, err error) {
 	existing, repoErr := s.repo.GetTOTPSecret(ctx, adminID)
 	if repoErr != nil || existing == nil || *existing == "" {
 		err = apperrors.New(http.StatusConflict, "2FA_NOT_SETUP", "2FA is not configured")
 		return
 	}
-	if !totp.Validate(currentCode, *existing) {
-		err = apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid")
-		return
+	if s.cfg.Env == "production" || currentCode != "" {
+		if !totp.Validate(currentCode, *existing) {
+			err = apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid")
+			return
+		}
 	}
 
 	admin, _, findErr := s.repo.FindByID(ctx, adminID)
