@@ -342,6 +342,13 @@ func main() {
 
 		// Dashboard
 		r.Get("/dashboard", dashH.Get)
+		r.Get("/dashboard/revenue-series", dashH.RevenueSeries)
+		r.Get("/dashboard/rides-series", dashH.RidesSeries)
+		r.Get("/dashboard/driver-status", dashH.DriverStatusSnapshot)
+		r.Get("/dashboard/top-drivers", dashH.TopDrivers)
+		r.Get("/dashboard/recent-activity", dashH.RecentActivity)
+		r.Get("/dashboard/alerts", dashH.Alerts)
+		r.Get("/dashboard/live-map", dashH.LiveMap)
 
 		// Account (self)
 		r.Get("/account", teamH.GetAccount)
