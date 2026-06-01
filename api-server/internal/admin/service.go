@@ -241,21 +241,25 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 }
 
 // DriverOverview returns aggregate driver status counts.
-func (s *Service) DriverOverview(ctx context.Context) (map[string]interface{}, error) {
-	var total, active, online, onTrip, pending, suspended int
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles`).Scan(&total)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='ACTIVE'`).Scan(&active)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE is_online=TRUE AND approval_status='ACTIVE'`).Scan(&online)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='PENDING_REVIEW'`).Scan(&pending)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='SUSPENDED'`).Scan(&suspended)
+func (s *Service) DriverOverview(ctx context.Context, vehicleType string) (map[string]interface{}, error) {
+	var total, online, onTrip, pending, suspended int
+
+	vt := ""
+	if vehicleType != "" {
+		vt = " AND transport_type = '" + vehicleType + "'"
+	}
+
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE 1=1`+vt).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE is_online=TRUE AND approval_status IN ('APPROVED','ACTIVE')`+vt).Scan(&online)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='PENDING_REVIEW'`+vt).Scan(&pending)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='SUSPENDED'`+vt).Scan(&suspended)
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT dp.id) FROM driver_profiles dp
 		JOIN rides r ON r.driver_id = dp.id
-		WHERE r.status = 'IN_PROGRESS'
-	`).Scan(&onTrip)
+		WHERE r.status = 'IN_PROGRESS'`+vt).Scan(&onTrip)
 
 	return map[string]interface{}{
-		"total": total, "active": active, "online": online,
+		"total": total, "online": online,
 		"on_trip": onTrip, "pending": pending, "suspended": suspended,
 	}, nil
 }
@@ -886,6 +890,92 @@ func (s *Service) UpdateDriver(ctx context.Context, profileID string, fields map
 func (s *Service) DeleteDriver(ctx context.Context, profileID string) error {
 	_, err := s.db.Exec(ctx,
 		`DELETE FROM driver_profiles WHERE id = $1`, profileID)
+	return err
+}
+
+// AdminCreateDriverInput holds the payload for admin-registered drivers.
+type AdminCreateDriverInput struct {
+	FullName       string
+	Phone          string
+	TransportType  string
+	VehiclePlate   string
+	LicenseNumber  string
+	DateOfBirth    string
+	Province       string
+	District       string
+	Sector         string
+	Cell           string
+	Village        string
+	City           string
+	MomoProvider   string
+	MomoPayCode    string
+	PassengerSeats *int
+	LoadCapacityKg *int
+}
+
+// CreateDriverFromAdmin registers a new driver (user + profile) from the admin panel.
+// If a user with the phone already exists, reuse their account.
+func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDriverInput) (map[string]interface{}, error) {
+	// 1. Find or create the user record
+	var userID string
+	err := s.db.QueryRow(ctx,
+		`SELECT id FROM users WHERE phone_number = $1`, in.Phone).Scan(&userID)
+	if err != nil {
+		// User not found — create one
+		err = s.db.QueryRow(ctx, `
+			INSERT INTO users (phone_number, full_name, role_state)
+			VALUES ($1, $2, 'DRIVER_PENDING')
+			RETURNING id`,
+			in.Phone, in.FullName,
+		).Scan(&userID)
+		if err != nil {
+			return nil, fmt.Errorf("create user: %w", err)
+		}
+	}
+
+	dob := in.DateOfBirth
+	if dob == "" {
+		dob = "1990-01-01"
+	}
+	city := in.City
+	if city == "" {
+		city = "Kigali"
+	}
+
+	// 2. Create the driver profile
+	var profileID string
+	err = s.db.QueryRow(ctx, `
+		INSERT INTO driver_profiles (
+			user_id, transport_type, vehicle_plate, license_number,
+			date_of_birth, city, momo_provider, momo_pay_code,
+			approval_status, province, district, sector, cell, village,
+			passenger_seats, load_capacity_kg
+		) VALUES (
+			$1,$2,$3,$4,$5,$6,$7,$8,'PENDING_REVIEW',$9,$10,$11,$12,$13,$14,$15
+		) RETURNING id`,
+		userID, in.TransportType, in.VehiclePlate, in.LicenseNumber,
+		dob, city, in.MomoProvider, in.MomoPayCode,
+		in.Province, in.District, in.Sector, in.Cell, in.Village,
+		in.PassengerSeats, in.LoadCapacityKg,
+	).Scan(&profileID)
+	if err != nil {
+		return nil, fmt.Errorf("create driver profile: %w", err)
+	}
+
+	return map[string]interface{}{
+		"id":             profileID,
+		"user_id":        userID,
+		"transport_type": in.TransportType,
+		"vehicle_plate":  in.VehiclePlate,
+		"approval_status": "PENDING_REVIEW",
+		"message":        "Driver registered. Pending KYC verification.",
+	}, nil
+}
+
+// ForceDriverOffline sets is_online=false for a driver.
+func (s *Service) ForceDriverOffline(ctx context.Context, profileID string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE driver_profiles SET is_online = FALSE, updated_at = NOW() WHERE id = $1`, profileID)
 	return err
 }
 

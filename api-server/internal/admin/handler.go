@@ -39,7 +39,8 @@ func (h *Handler) ListDrivers(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/admin/drivers/overview
 func (h *Handler) DriverOverview(w http.ResponseWriter, r *http.Request) {
-	data, err := h.svc.DriverOverview(r.Context())
+	vehicleType := r.URL.Query().Get("vehicle_type")
+	data, err := h.svc.DriverOverview(r.Context(), vehicleType)
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -254,6 +255,61 @@ func (h *Handler) DeviceCollisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, data)
+}
+
+// GET /api/v1/admin/drivers/:id
+// POST /api/v1/admin/drivers
+func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		FullName       string `json:"full_name"`
+		Phone          string `json:"phone"`
+		TransportType  string `json:"transport_type"`
+		VehiclePlate   string `json:"vehicle_plate"`
+		LicenseNumber  string `json:"license_number"`
+		DateOfBirth    string `json:"date_of_birth"`
+		Province       string `json:"province"`
+		District       string `json:"district"`
+		Sector         string `json:"sector"`
+		Cell           string `json:"cell"`
+		Village        string `json:"village"`
+		City           string `json:"city"`
+		MomoProvider   string `json:"momo_provider"`
+		MomoPayCode    string `json:"momo_pay_code"`
+		PassengerSeats *int   `json:"passenger_seats"`
+		LoadCapacityKg *int   `json:"load_capacity_kg"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
+		return
+	}
+	if body.Phone == "" || body.TransportType == "" || body.VehiclePlate == "" || body.LicenseNumber == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone, transport_type, vehicle_plate, and license_number are required")
+		return
+	}
+	out, err := h.svc.CreateDriverFromAdmin(r.Context(), AdminCreateDriverInput{
+		FullName: body.FullName, Phone: body.Phone,
+		TransportType: body.TransportType, VehiclePlate: body.VehiclePlate,
+		LicenseNumber: body.LicenseNumber, DateOfBirth: body.DateOfBirth,
+		Province: body.Province, District: body.District, Sector: body.Sector,
+		Cell: body.Cell, Village: body.Village, City: body.City,
+		MomoProvider: body.MomoProvider, MomoPayCode: body.MomoPayCode,
+		PassengerSeats: body.PassengerSeats, LoadCapacityKg: body.LoadCapacityKg,
+	})
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.Created(w, out)
+}
+
+// POST /api/v1/admin/drivers/:id/force-offline
+func (h *Handler) ForceDriverOffline(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	if err := h.svc.ForceDriverOffline(r.Context(), profileID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "driver forced offline"})
 }
 
 // GET /api/v1/admin/drivers/:id
