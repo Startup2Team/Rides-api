@@ -10,8 +10,9 @@ import (
 )
 
 type Config struct {
-	Port string
-	Env  string
+	Port        string
+	Env         string
+	AdminOrigin string // CORS allowed origin for admin frontend (production URL)
 
 	Database DatabaseConfig
 	Redis    RedisConfig
@@ -20,6 +21,7 @@ type Config struct {
 	Firebase FirebaseConfig
 	GMaps    GoogleMapsConfig
 	MoMo     MoMoConfig
+	Storage  StorageConfig
 	Matching MatchingConfig
 	Ride     RideConfig
 	GPS      GPSConfig
@@ -65,6 +67,15 @@ type MoMoConfig struct {
 	Environment     string
 }
 
+type StorageConfig struct {
+	Provider string
+	Bucket   string
+	Region   string
+	KeyID    string
+	Secret   string
+	CDNURL   string
+}
+
 type MatchingConfig struct {
 	PrimaryRadiusM  int
 	ExpandedRadiusM int
@@ -78,13 +89,15 @@ type RideConfig struct {
 }
 
 type GPSConfig struct {
-	MaxSpeedKMH float64
+	MaxSpeedKMH           float64
+	StaleThresholdSeconds float64 // skip plausibility check if previous entry is older than this
 }
 
 type DriverConfig struct {
 	OfflineCooldownMinutes      int
 	DeclinePriorityThreshold    int
 	DeclineAutoOfflineThreshold int
+	DevAutoApprove              bool // DEV ONLY: skip admin approval on driver registration
 }
 
 type CustomerConfig struct {
@@ -101,6 +114,7 @@ func Load() (*Config, error) {
 
 	cfg.Port = getEnv("PORT", "8080")
 	cfg.Env = getEnv("ENV", "development")
+	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")
@@ -125,6 +139,13 @@ func Load() (*Config, error) {
 	cfg.MoMo.SubscriptionKey = getEnv("MOMO_SUBSCRIPTION_KEY", "")
 	cfg.MoMo.Environment = getEnv("MOMO_ENVIRONMENT", "sandbox")
 
+	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
+	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
+	cfg.Storage.Region = getEnv("STORAGE_REGION", "auto")
+	cfg.Storage.KeyID = getEnv("STORAGE_KEY_ID", "")
+	cfg.Storage.Secret = getEnv("STORAGE_SECRET", "")
+	cfg.Storage.CDNURL = getEnv("STORAGE_CDN_URL", "")
+
 	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 5000)
 	cfg.Matching.ExpandedRadiusM = getEnvInt("MATCH_RADIUS_EXPANDED_M", 10000)
 	cfg.Matching.TimeoutSeconds = getEnvInt("MATCH_TIMEOUT_SECONDS", 15)
@@ -134,10 +155,12 @@ func Load() (*Config, error) {
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
 
 	cfg.GPS.MaxSpeedKMH = getEnvFloat("GPS_MAX_SPEED_KMH", 200.0)
+	cfg.GPS.StaleThresholdSeconds = getEnvFloat("GPS_STALE_THRESHOLD_SECONDS", 300.0)
 
 	cfg.Driver.OfflineCooldownMinutes = getEnvInt("DRIVER_OFFLINE_COOLDOWN_MINUTES", 10)
 	cfg.Driver.DeclinePriorityThreshold = getEnvInt("DRIVER_DECLINE_PRIORITY_THRESHOLD", 10)
 	cfg.Driver.DeclineAutoOfflineThreshold = getEnvInt("DRIVER_DECLINE_AUTO_OFFLINE_THRESHOLD", 15)
+	cfg.Driver.DevAutoApprove = getEnvBool("DEV_AUTO_APPROVE_DRIVERS", false)
 
 	cfg.Customer.CancelWarnThreshold = getEnvInt("CUSTOMER_CANCEL_WARN_THRESHOLD", 5)
 	cfg.Customer.CancelSuspendThreshold = getEnvInt("CUSTOMER_CANCEL_SUSPEND_THRESHOLD", 8)
@@ -179,4 +202,16 @@ func getEnvFloat(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }

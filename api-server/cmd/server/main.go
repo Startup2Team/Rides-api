@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	chiCors "github.com/go-chi/cors"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -22,7 +23,11 @@ import (
 	"github.com/workspace/ride-platform/internal/analytics"
 	"github.com/workspace/ride-platform/internal/auth"
 	"github.com/workspace/ride-platform/internal/customer"
+	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
+	"github.com/workspace/ride-platform/internal/fare"
+	"github.com/workspace/ride-platform/internal/inbox"
+	"github.com/workspace/ride-platform/internal/incidents"
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
 	mw "github.com/workspace/ride-platform/internal/middleware"
@@ -30,9 +35,14 @@ import (
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
+	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
+	"github.com/workspace/ride-platform/internal/settings"
+	"github.com/workspace/ride-platform/internal/team"
 	"github.com/workspace/ride-platform/internal/telephony"
+	"github.com/workspace/ride-platform/internal/tickets"
 	"github.com/workspace/ride-platform/internal/tracking"
+	"github.com/workspace/ride-platform/internal/upload"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	"github.com/workspace/ride-platform/pkg/logger"
@@ -89,7 +99,16 @@ func main() {
 	driverRepo := driver.NewRepository(db)
 	rideRepo := ride.NewRepository(db)
 	negRepo := negotiation.NewRepository(db)
+	fareRepo := fare.NewRepository(db)
 	pkgRepo := packages.NewRepository(db)
+
+	// ── New module repositories ───────────────────────────────────────────────
+	incidentRepo := incidents.NewRepository(db)
+	ticketRepo := tickets.NewRepository(db)
+	inboxRepo := inbox.NewRepository(db)
+	reportRepo := reports.NewRepository(db)
+	settingsRepo := settings.NewRepository(db)
+	teamRepo := team.NewRepository(db)
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
 	hub := tracking.NewHub(log)
@@ -103,13 +122,24 @@ func main() {
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
 	engine := matching.NewEngine(rideRepo, driverRepo, rdb, notifySvc, anaSvc, hub, cfg, log, rideSvc)
 	negSvc := negotiation.NewService(negRepo, rideRepo, rdb, hub, telSvc, anaSvc, cfg, log)
+	rideSvc.SetFareRepository(fareRepo)
+	negSvc.SetFareRepository(fareRepo)
 	adminSvc := admin.NewService(db, log)
 	locSvc := location.NewService(db, rdb, cfg, log)
+
+	// ── New module services ───────────────────────────────────────────────────
+	incidentSvc := incidents.NewService(incidentRepo)
+	ticketSvc := tickets.NewService(ticketRepo)
+	inboxSvc := inbox.NewService(inboxRepo)
+	reportSvc := reports.NewService(reportRepo)
+	settingsSvc := settings.NewService(settingsRepo)
+	teamSvc := team.NewService(teamRepo, cfg, rdb)
+	dashSvc := dashboard.NewService(db, rdb, log)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	custSvc := customer.NewService(custRepo)
 
-	authH := auth.NewHandler(authSvc)
+	authH := auth.NewHandler(authSvc, cfg.Env)
 	custH := customer.NewHandler(custSvc)
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
@@ -118,7 +148,23 @@ func main() {
 	anaH := analytics.NewHandler(anaRepo)
 	trackH := tracking.NewHandler(hub, driverSvc, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
+	fareH := fare.NewHandler(fareRepo, locSvc)
 	pkgH := packages.NewHandler(pkgSvc)
+	var uploadH *upload.Handler
+	if uh, err := upload.NewHandler(cfg); err != nil {
+		log.Warn().Err(err).Msg("upload: storage not configured, presign endpoint disabled")
+	} else {
+		uploadH = uh
+	}
+
+	// New module handlers
+	incidentH := incidents.NewHandler(incidentSvc)
+	ticketH := tickets.NewHandler(ticketSvc)
+	inboxH := inbox.NewHandler(inboxSvc)
+	reportH := reports.NewHandler(reportSvc)
+	settingsH := settings.NewHandler(settingsSvc)
+	teamH := team.NewHandler(teamSvc)
+	dashH := dashboard.NewHandler(dashSvc)
 
 	// ── Background goroutines ─────────────────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -130,12 +176,33 @@ func main() {
 	// Pre-warm landmark route cache
 	locSvc.WarmLandmarkRoutes(bgCtx)
 
+	// Pre-warm dashboard cache and start background refresh
+	dashSvc.WarmCache(bgCtx)
+	go dashSvc.PollLoop(bgCtx)
+
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
+
+	// ── CORS ──────────────────────────────────────────────────────────────────
+	// Allow the admin Next.js dev server and any configured production origin.
+	allowedOrigins := []string{"http://localhost:3000", "http://localhost:3001"}
+	if origin := cfg.AdminOrigin; origin != "" {
+		allowedOrigins = append(allowedOrigins, origin)
+	}
+	r.Use(chiCors.Handler(chiCors.Options{
+		AllowedOrigins:   allowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID"},
+		ExposedHeaders:   []string{"X-Request-ID"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
 	r.Use(mw.WithLogger(log))
+	r.Use(mw.HTTPLogger(log))
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		respond.OK(w, map[string]string{"status": "ok"})
@@ -148,6 +215,7 @@ func main() {
 	r.Get("/swagger/openapi.json", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "config/openapi.json")
 	})
+	r.Get(apiV1Prefix+"/pricing", fareH.ListPublicPricing)
 
 	// ── Public auth ───────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/auth", func(r chi.Router) {
@@ -165,6 +233,7 @@ func main() {
 		r.Get("/profile", custH.GetProfile)
 		r.Put("/profile", custH.UpdateProfile)
 		r.Post("/location", driver.NearbyDriversHandler(driverSvc))
+		r.Get("/fare-estimate", fareH.FareEstimate)
 
 		r.Post("/rides", rideH.CreateRide)
 		r.Get("/rides", rideH.ListRides)
@@ -201,13 +270,15 @@ func main() {
 			r.Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/credits", pkgH.GetCredits)
 
-			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc))
+			r.Get("/rides/active", rideH.GetActiveRideForDriver)
+			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
+			r.Get("/rides/{ride_id}", rideH.GetRideForDriver)
 			r.Post("/rides/{ride_id}/cancel", driverCancelAfterPickupExpiryHandler(rideSvc))
 			r.Post("/rides/{ride_id}/en-route", driverEnRouteHandler(rideSvc))
 			r.Post("/rides/{ride_id}/arrive", driverArriveHandler(rideSvc))
 			r.Post("/rides/{ride_id}/start", driverStartHandler(rideSvc))
-			r.Post("/rides/{ride_id}/complete", driverCompleteHandler(rideSvc, hub))
+			r.Post("/rides/{ride_id}/complete", driverCompleteHandler(rideSvc))
 
 			r.Post("/rides/{ride_id}/negotiation/propose", negH.Propose("DRIVER"))
 			r.Post("/rides/{ride_id}/negotiation/accept", negH.Accept("DRIVER"))
@@ -233,6 +304,13 @@ func main() {
 		r.Delete("/me/saved-locations/{id}", locH.DeleteSavedLocation)
 	})
 
+	r.Route(apiV1Prefix+"/uploads", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		if uploadH != nil {
+			r.Post("/presigned-url", uploadH.PresignedURL)
+		}
+	})
+
 	// ── Locations (route cache, landmarks, suggestions) ───────────────────────
 	r.Route(apiV1Prefix+"/locations", func(r chi.Router) {
 		r.Get("/landmarks", locH.GetLandmarks) // public — no auth needed
@@ -248,24 +326,95 @@ func main() {
 	// ── Active ride (reconnect recovery) ─────────────────────────────────────
 	r.With(mw.Authenticate(cfg, rdb)).Get(apiV1Prefix+"/rides/active", locH.GetActiveRide)
 
-	// ── Admin ─────────────────────────────────────────────────────────────────
+	// ── Admin auth (public — no admin JWT required) ───────────────────────────
+	r.Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
+	r.Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
+	r.Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+
+	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
 		r.Use(mw.RequireRole(mw.RoleAdmin))
 
+		// Auth (protected actions)
+		r.Post("/auth/logout", teamH.Logout)
+		r.Post("/auth/totp/reset", teamH.ResetTOTP)
+
+		// Dashboard
+		r.Get("/dashboard", dashH.Get)
+
+		// Account (self)
+		r.Get("/account", teamH.GetAccount)
+		r.Get("/account/me", teamH.GetAccount)
+		r.Put("/account", teamH.UpdateAccount)
+		r.Patch("/account/me", teamH.UpdateAccount)
+		r.Post("/account/password", teamH.ChangePassword)
+		r.Post("/account/change-password", teamH.ChangePassword)
+		r.Get("/account/sessions", teamH.GetSessions)
+		r.Delete("/account/sessions/{sessionId}", teamH.RevokeSession)
+		r.Get("/account/2fa/setup", teamH.Setup2FA)
+		r.Post("/account/2fa/enable", teamH.Enable2FA)
+		r.Post("/account/2fa/disable", teamH.Disable2FA)
+
+		// Drivers
 		r.Get("/drivers", adminH.ListDrivers)
+		r.Get("/drivers/overview", adminH.DriverOverview)
+		r.Get("/drivers/{id}", adminH.GetDriver)
+		r.Patch("/drivers/{id}", adminH.UpdateDriver)
+		r.Delete("/drivers/{id}", adminH.DeleteDriver)
 		r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 		r.Post("/drivers/{id}/reject", adminH.RejectDriver)
 		r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
+		r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
+		r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
+		r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 
+		// Customers
+		r.Get("/customers", adminH.ListCustomers)
+		r.Get("/customers/{id}", adminH.GetCustomer)
+		r.Patch("/customers/{id}", adminH.UpdateCustomer)
+		r.Patch("/customers/{id}/ban", adminH.BanCustomer)
+		r.Post("/customers/{id}/suspend", adminH.SuspendUser)
+		r.Post("/customers/{id}/reinstate", adminH.ReinstateUser)
+
+		// Users (backwards compat)
 		r.Get("/users", adminH.ListUsers)
 		r.Post("/users/{id}/suspend", adminH.SuspendUser)
 
+		// Safety flags
 		r.Get("/flags/gps-anomalies", adminH.GPSAnomalies)
 		r.Get("/flags/device-collisions", adminH.DeviceCollisions)
 
-		r.Get("/rides", adminH.ListRides)
+		// Live rides
+		r.Get("/rides/live", adminH.ListLiveRides)
+		r.Get("/rides/live/{id}", adminH.GetLiveRide)
+		r.Post("/rides/live/{id}/intervene", adminH.InterveneRide)
 
+		// All rides (history)
+		r.Get("/rides", adminH.ListRides)
+		r.Get("/rides/{id}", adminH.GetRide)
+		r.Get("/pricing", fareH.ListActivePricing)
+		r.Get("/pricing/{vehicle_type_code}", fareH.GetActivePricingByType)
+		r.Get("/pricing/{vehicle_type_code}/history", fareH.GetPricingHistory)
+		r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
+
+		// Pricing
+		r.Get("/pricing", fareH.ListActivePricing)
+		r.Get("/pricing/{vehicle_type_code}", fareH.GetActivePricingByType)
+		r.Get("/pricing/{vehicle_type_code}/history", fareH.GetPricingHistory)
+		r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
+
+		// Negotiations
+		r.Get("/negotiations", adminH.ListNegotiations)
+		r.Get("/negotiations/{id}", adminH.GetNegotiation)
+
+		// Revenue
+		r.Get("/revenue", adminH.Revenue)
+		r.Get("/revenue/kpis", adminH.RevenueKPIs)
+		r.Get("/revenue/transactions", adminH.ListTransactions)
+		r.Post("/revenue/payouts/disburse", adminH.DisbursePayouts)
+
+		// Analytics
 		r.Get("/analytics/overview", anaH.Overview)
 		r.Get("/analytics/rides/daily", anaH.DailyRides)
 		r.Get("/analytics/rides/weekly", anaH.WeeklyRides)
@@ -273,11 +422,95 @@ func main() {
 		r.Get("/analytics/drivers/performance", anaH.DriverPerformance)
 		r.Get("/analytics/negotiation/stats", anaH.NegotiationStats)
 		r.Get("/analytics/heatmap", anaH.Heatmap)
+		r.Get("/analytics/heatmap/zones", anaH.HeatmapZones)
 		r.Get("/analytics/cancellations", anaH.Cancellations)
+		r.Get("/analytics/funnel", anaH.Funnel)
+		r.Get("/analytics/vehicle-mix", anaH.VehicleMix)
+		r.Get("/analytics/activity-heatmap", anaH.ActivityHeatmap)
+		r.Get("/analytics/satisfaction", anaH.Satisfaction)
+
+		// Safety incidents
+		r.Get("/incidents", incidentH.List)
+		r.Post("/incidents", incidentH.Create)
+		r.Get("/incidents/{id}", incidentH.Get)
+		r.Patch("/incidents/{id}/status", incidentH.UpdateStatus)
+		r.Post("/incidents/{id}/acknowledge", incidentH.Acknowledge)
+		r.Post("/incidents/{id}/escalate", incidentH.Escalate)
+		r.Post("/incidents/{id}/resolve", incidentH.Resolve)
+		r.Post("/incidents/{id}/message", incidentH.Message)
+
+		// Support tickets
+		r.Get("/support/tickets", ticketH.List)
+		r.Post("/support/tickets", ticketH.Create)
+		r.Get("/support/tickets/{id}", ticketH.Get)
+		r.Post("/support/tickets/{id}/reply", ticketH.Reply)
+		r.Post("/support/tickets/{id}/assign", ticketH.Assign)
+		r.Post("/support/tickets/{id}/resolve", ticketH.Resolve)
+		r.Patch("/support/tickets/{id}", ticketH.Patch)
+		// Keep old paths for compatibility
+		r.Get("/tickets", ticketH.List)
+		r.Post("/tickets", ticketH.Create)
+		r.Get("/tickets/{id}", ticketH.Get)
+		r.Post("/tickets/{id}/reply", ticketH.Reply)
+		r.Post("/tickets/{id}/assign", ticketH.Assign)
+		r.Post("/tickets/{id}/resolve", ticketH.Resolve)
+
+		// Inbox
+		r.Get("/inbox", inboxH.List)
+		r.Get("/inbox/{id}", inboxH.Get)
+		r.Post("/inbox/{id}/reply", inboxH.Reply)
+		r.Patch("/inbox/{id}", inboxH.UpdateStatus)
+		r.Delete("/inbox/{id}", inboxH.Delete)
+		r.Post("/inbox/{id}/archive", inboxH.Archive)
+		r.Post("/inbox/{id}/spam", inboxH.Spam)
+
+		// Reports
+		r.Get("/reports", reportH.List)
+		r.Post("/reports", reportH.Generate)
+		r.Post("/reports/generate", reportH.Generate)
+		r.Get("/reports/scheduled", reportH.ListScheduled)
+		r.Post("/reports/scheduled", reportH.CreateScheduled)
+		r.Post("/reports/scheduled/{id}/toggle", reportH.ToggleScheduled)
+		r.Get("/reports/{id}", reportH.Get)
+		r.Get("/reports/{id}/download", reportH.Download)
+		r.Delete("/reports/{id}", reportH.Delete)
+
+		// Settings
+		r.Get("/settings", settingsH.GetAll)
+		r.Put("/settings/commission", settingsH.UpdateCommission)
+		r.Put("/settings/negotiation", settingsH.UpdateNegotiation)
+		r.Put("/settings/fares", settingsH.UpdateFares)
+		r.Put("/settings/integrations", settingsH.UpdateIntegrations)
+		r.Put("/settings/notifications", settingsH.UpdateNotifications)
+		r.Post("/settings/regions", settingsH.CreateRegion)
+		r.Put("/settings/regions/{id}", settingsH.UpdateRegion)
+		r.Patch("/settings/regions/{id}", settingsH.UpdateRegion)
+		r.Delete("/settings/regions/{id}", settingsH.DeleteRegion)
+
+		// Team / admin accounts
+		r.Get("/team", teamH.List)
+		r.Post("/team/invite", teamH.Invite)
+		r.Get("/team/roles", teamH.ListRoles)
+		r.Post("/team/roles", teamH.CreateRole)
+		r.Patch("/team/roles/{roleId}", teamH.UpdateRoleByID)
+		r.Delete("/team/roles/{roleId}", teamH.DeleteRoleByID)
+		r.Post("/team/members/{id}/role", teamH.UpdateRole)
+		r.Post("/team/members/{id}/suspend", teamH.Suspend)
+		r.Post("/team/members/{id}/reinstate", teamH.Reinstate)
+		r.Post("/team/members/{id}/remove", teamH.Remove)
+		r.Post("/team/members/{id}/set-password", teamH.SetPassword)
 	})
 
+	// ── Dev-only endpoints (never registered in production) ──────────────────
+	if cfg.Env != "production" {
+		seedH := admin.NewSeedHandler(db, rdb, log)
+		r.Post(apiV1Prefix+"/admin/dev/seed-drivers", seedH.SeedDrivers)
+	}
+
 	// ── WebSocket ─────────────────────────────────────────────────────────────
-	r.Route("/ws", func(r chi.Router) {
+	// Mobile uses EXPO_PUBLIC_WS_BASE_URL = ws://host/api/v1, so paths must be
+	// /api/v1/ws/driver and /api/v1/ws/customer.
+	r.Route(apiV1Prefix+"/ws", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
 		r.Get("/driver", trackH.DriverWS)
 		r.Get("/customer", trackH.CustomerWS)
@@ -290,11 +523,13 @@ func main() {
 	adminSvc.SetPackagesService(pkgSvc)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
+	// WriteTimeout must be 0 when serving WebSockets — a global write timeout
+	// closes long-lived /ws/driver and /ws/customer connections mid-ride.
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -346,9 +581,10 @@ func runMigrations(databaseURL string) error {
 // creditChecker is the subset of packages.Service the accept handler needs.
 type creditChecker interface {
 	HasCredits(ctx context.Context, driverUserID, vehicleType string) (bool, error)
+	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
 }
 
-func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, driverSvc *driver.Service, credits creditChecker) http.HandlerFunc {
+func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, driverSvc *driver.Service, credits creditChecker, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
@@ -363,6 +599,11 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 		profile, err := driverSvc.GetProfile(r.Context(), claims.UserID)
 		if err == nil {
 			hasCredits, credErr := credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+			if credErr == nil && !hasCredits && cfg.Env != "production" {
+				// Dev/local: auto-grant free trial (same as admin approval flow).
+				_ = credits.GrantFreeTrialIfEligible(r.Context(), claims.UserID, profile.TransportType)
+				hasCredits, _ = credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+			}
 			if credErr == nil && !hasCredits {
 				respond.Error(w, apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding."))
 				return
@@ -432,7 +673,7 @@ func driverStartHandler(rideSvc *ride.Service) http.HandlerFunc {
 	}
 }
 
-func driverCompleteHandler(rideSvc *ride.Service, hub *tracking.Hub) http.HandlerFunc {
+func driverCompleteHandler(rideSvc *ride.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
@@ -457,7 +698,6 @@ func driverCompleteHandler(rideSvc *ride.Service, hub *tracking.Hub) http.Handle
 			respond.Error(w, err)
 			return
 		}
-		hub.SendToCustomer(rideID, tracking.Message{Type: "ride_completed", RideID: rideID})
 		respond.NoContent(w)
 	}
 }

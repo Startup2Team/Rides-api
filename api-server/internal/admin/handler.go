@@ -21,24 +21,36 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// ── Drivers ───────────────────────────────────────────────────────────────
+
 // GET /api/v1/admin/drivers
 func (h *Handler) ListDrivers(w http.ResponseWriter, r *http.Request) {
-	status := r.URL.Query().Get("status")
+	q := r.URL.Query()
 	limit, offset := paginate(r)
-
-	drivers, err := h.svc.ListDrivers(r.Context(), status, limit, offset)
+	drivers, total, err := h.svc.ListDrivers(r.Context(),
+		q.Get("status"), q.Get("vehicle_type"), q.Get("search"), q.Get("sort"),
+		limit, offset)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]interface{}{"drivers": drivers, "limit": limit, "offset": offset})
+	respond.OK(w, map[string]interface{}{"drivers": drivers, "total": total, "limit": limit, "offset": offset})
+}
+
+// GET /api/v1/admin/drivers/overview
+func (h *Handler) DriverOverview(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.DriverOverview(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
 }
 
 // POST /api/v1/admin/drivers/:id/approve
 func (h *Handler) ApproveDriver(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 	profileID := chi.URLParam(r, "id")
-
 	if err := h.svc.ApproveDriver(r.Context(), profileID, claims.UserID); err != nil {
 		respond.Error(w, err)
 		return
@@ -50,12 +62,10 @@ func (h *Handler) ApproveDriver(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) RejectDriver(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 	profileID := chi.URLParam(r, "id")
-
 	var body struct {
 		Reason string `json:"reason"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-
 	if err := h.svc.RejectDriver(r.Context(), profileID, claims.UserID, body.Reason); err != nil {
 		respond.Error(w, err)
 		return
@@ -67,7 +77,6 @@ func (h *Handler) RejectDriver(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) SuspendDriver(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 	profileID := chi.URLParam(r, "id")
-
 	var body struct {
 		Reason        string `json:"reason"`
 		DurationHours int    `json:"duration_hours"`
@@ -76,7 +85,6 @@ func (h *Handler) SuspendDriver(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-
 	if err := h.svc.SuspendDriver(r.Context(), profileID, claims.UserID, body.Reason, body.DurationHours); err != nil {
 		respond.Error(w, err)
 		return
@@ -84,21 +92,51 @@ func (h *Handler) SuspendDriver(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
-// GET /api/v1/admin/users
-func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
+// POST /api/v1/admin/drivers/:id/reinstate
+func (h *Handler) ReinstateDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	if err := h.svc.ReinstateDriver(r.Context(), profileID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// ── Customers ─────────────────────────────────────────────────────────────
+
+// GET /api/v1/admin/customers
+func (h *Handler) ListCustomers(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	limit, offset := paginate(r)
-	users, err := h.svc.ListUsers(r.Context(), limit, offset)
+	customers, total, err := h.svc.ListCustomers(r.Context(),
+		q.Get("status"), q.Get("search"), q.Get("sort"),
+		limit, offset)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]interface{}{"users": users, "limit": limit, "offset": offset})
+	respond.OK(w, map[string]interface{}{"customers": customers, "total": total, "limit": limit, "offset": offset})
+}
+
+// GET /api/v1/admin/customers/:id
+func (h *Handler) GetCustomer(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	customer, err := h.svc.GetCustomer(r.Context(), userID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, customer)
+}
+
+// GET /api/v1/admin/users  (kept for backwards compat — delegates to ListCustomers)
+func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
+	h.ListCustomers(w, r)
 }
 
 // POST /api/v1/admin/users/:id/suspend
 func (h *Handler) SuspendUser(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "id")
-
 	var body struct {
 		DurationHours int `json:"duration_hours"`
 	}
@@ -106,13 +144,97 @@ func (h *Handler) SuspendUser(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-
 	if err := h.svc.SuspendUser(r.Context(), userID, body.DurationHours); err != nil {
 		respond.Error(w, err)
 		return
 	}
 	respond.NoContent(w)
 }
+
+// POST /api/v1/admin/customers/:id/reinstate
+func (h *Handler) ReinstateUser(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	if err := h.svc.ReinstateUser(r.Context(), userID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// ── Rides ─────────────────────────────────────────────────────────────────
+
+// GET /api/v1/admin/rides
+func (h *Handler) ListRides(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, offset := paginate(r)
+	rides, total, err := h.svc.ListRides(r.Context(),
+		q.Get("status"), q.Get("transport_type"), q.Get("search"),
+		limit, offset)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"rides": rides, "total": total, "limit": limit, "offset": offset})
+}
+
+// GET /api/v1/admin/rides/:id
+func (h *Handler) GetRide(w http.ResponseWriter, r *http.Request) {
+	rideID := chi.URLParam(r, "id")
+	ride, err := h.svc.GetRide(r.Context(), rideID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, ride)
+}
+
+// ── Negotiations ──────────────────────────────────────────────────────────
+
+// GET /api/v1/admin/negotiations
+func (h *Handler) ListNegotiations(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, offset := paginate(r)
+	negs, total, err := h.svc.ListNegotiations(r.Context(),
+		q.Get("status"), q.Get("search"),
+		limit, offset)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"negotiations": negs, "total": total, "limit": limit, "offset": offset})
+}
+
+// ── Revenue / transactions ────────────────────────────────────────────────
+
+// GET /api/v1/admin/revenue/kpis
+func (h *Handler) RevenueKPIs(w http.ResponseWriter, r *http.Request) {
+	period := r.URL.Query().Get("period")
+	if period == "" {
+		period = "today"
+	}
+	data, err := h.svc.RevenueKPIs(r.Context(), period)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
+// GET /api/v1/admin/revenue/transactions
+func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, offset := paginate(r)
+	txns, total, err := h.svc.ListTransactions(r.Context(),
+		q.Get("status"), q.Get("sort"),
+		limit, offset)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"transactions": txns, "total": total, "limit": limit, "offset": offset})
+}
+
+// ── Safety flags ──────────────────────────────────────────────────────────
 
 // GET /api/v1/admin/flags/gps-anomalies
 func (h *Handler) GPSAnomalies(w http.ResponseWriter, r *http.Request) {
@@ -134,16 +256,231 @@ func (h *Handler) DeviceCollisions(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, data)
 }
 
-// GET /api/v1/admin/rides
-func (h *Handler) ListRides(w http.ResponseWriter, r *http.Request) {
-	limit, offset := paginate(r)
-	rides, err := h.svc.ListRides(r.Context(), limit, offset)
+// GET /api/v1/admin/drivers/:id
+func (h *Handler) GetDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	driver, err := h.svc.GetDriver(r.Context(), profileID)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]interface{}{"rides": rides, "limit": limit, "offset": offset})
+	respond.OK(w, driver)
 }
+
+// PATCH /api/v1/admin/drivers/:id
+func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	var fields map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil || len(fields) == 0 {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.UpdateDriver(r.Context(), profileID, fields); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// DELETE /api/v1/admin/drivers/:id
+func (h *Handler) DeleteDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	if err := h.svc.DeleteDriver(r.Context(), profileID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "deleted"})
+}
+
+// PATCH /api/v1/admin/drivers/:id/verify  (unified approve/reject)
+func (h *Handler) VerifyDriver(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	profileID := chi.URLParam(r, "id")
+	var body struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Action == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	switch body.Action {
+	case "approve":
+		if err := h.svc.ApproveDriver(r.Context(), profileID, claims.UserID); err != nil {
+			respond.Error(w, err)
+			return
+		}
+		respond.OK(w, map[string]string{"message": "driver approved"})
+	case "reject":
+		if body.Reason == "" {
+			respond.ErrorMsg(w, http.StatusBadRequest, "REASON_REQUIRED", "reason is required for rejection")
+			return
+		}
+		if err := h.svc.RejectDriver(r.Context(), profileID, claims.UserID, body.Reason); err != nil {
+			respond.Error(w, err)
+			return
+		}
+		respond.OK(w, map[string]string{"message": "driver rejected"})
+	default:
+		respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_ACTION", "action must be approve or reject")
+	}
+}
+
+// PATCH /api/v1/admin/drivers/:id/status  (unified suspend/reinstate)
+func (h *Handler) UpdateDriverStatus(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	profileID := chi.URLParam(r, "id")
+	var body struct {
+		Status        string `json:"status"`
+		Reason        string `json:"reason"`
+		DurationHours int    `json:"duration_hours"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Status == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	switch body.Status {
+	case "Suspended":
+		if body.DurationHours <= 0 {
+			body.DurationHours = 24
+		}
+		if err := h.svc.SuspendDriver(r.Context(), profileID, claims.UserID, body.Reason, body.DurationHours); err != nil {
+			respond.Error(w, err)
+			return
+		}
+	case "Active":
+		if err := h.svc.ReinstateDriver(r.Context(), profileID); err != nil {
+			respond.Error(w, err)
+			return
+		}
+	default:
+		respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_STATUS", "status must be Active or Suspended")
+		return
+	}
+	respond.OK(w, map[string]string{"status": body.Status})
+}
+
+// PATCH /api/v1/admin/customers/:id
+func (h *Handler) UpdateCustomer(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	var body struct {
+		Status string `json:"status"`
+		Notes  string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.UpdateCustomer(r.Context(), userID, body.Status, body.Notes); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// PATCH /api/v1/admin/customers/:id/ban
+func (h *Handler) BanCustomer(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Reason == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.BanCustomer(r.Context(), userID, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"status": "Banned"})
+}
+
+// GET /api/v1/admin/rides/live
+func (h *Handler) ListLiveRides(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, offset := paginate(r)
+	rides, total, err := h.svc.ListLiveRides(r.Context(),
+		q.Get("status"), q.Get("district"), q.Get("search"),
+		limit, offset)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"rides": rides, "total": total})
+}
+
+// GET /api/v1/admin/rides/live/:id
+func (h *Handler) GetLiveRide(w http.ResponseWriter, r *http.Request) {
+	rideID := chi.URLParam(r, "id")
+	ride, err := h.svc.GetLiveRide(r.Context(), rideID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, ride)
+}
+
+// POST /api/v1/admin/rides/live/:id/intervene
+func (h *Handler) InterveneRide(w http.ResponseWriter, r *http.Request) {
+	rideID := chi.URLParam(r, "id")
+	var body struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Action == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := h.svc.InterveneRide(r.Context(), rideID, body.Action, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "action applied"})
+}
+
+// GET /api/v1/admin/negotiations/:id
+func (h *Handler) GetNegotiation(w http.ResponseWriter, r *http.Request) {
+	rideID := chi.URLParam(r, "id")
+	neg, err := h.svc.GetNegotiation(r.Context(), rideID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, neg)
+}
+
+// GET /api/v1/admin/revenue  (unified)
+func (h *Handler) Revenue(w http.ResponseWriter, r *http.Request) {
+	period := r.URL.Query().Get("period")
+	if period == "" {
+		period = "month"
+	}
+	data, err := h.svc.Revenue(r.Context(), period)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
+// POST /api/v1/admin/revenue/payouts/disburse
+func (h *Handler) DisbursePayouts(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TransactionIDs []string `json:"transactionIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TransactionIDs) == 0 {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	count, total, err := h.svc.DisbursePayouts(r.Context(), body.TransactionIDs)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"disbursed": count, "totalAmount": total})
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
 
 func paginate(r *http.Request) (int, int) {
 	limit := 20

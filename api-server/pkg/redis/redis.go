@@ -141,8 +141,26 @@ func (Keys) GPSAnomalyCount(driverID string) string {
 	return fmt.Sprintf("driver:gps_anomalies:%s:session_count", driverID)
 }
 
+// DriverGracePeriod is set for 60 s when a driver goes online.
+// During this window the GPS plausibility check is skipped so that the app's
+// initial KIGALI_CENTER placeholder position (sent before device GPS resolves)
+// does not create a false anomaly when the real GPS position arrives.
+func (Keys) DriverGracePeriod(driverID string) string {
+	return fmt.Sprintf("driver:%s:gps_grace", driverID)
+}
+
 // ── Analytics ─────────────────────────────────────────────────────────────
 
 func (Keys) AnalyticsStream() string {
 	return "analytics:events"
+}
+
+// ── Admin dashboard ────────────────────────────────────────────────────────
+
+func (Keys) DashboardCache() string {
+	return "admin:dashboard:cache"
+}
+
+func (Keys) RevenueTodayCache() string {
+	return "admin:revenue:today"
 }

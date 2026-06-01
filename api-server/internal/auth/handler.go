@@ -2,7 +2,9 @@ package auth
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 
@@ -16,10 +18,11 @@ var validate = validator.New()
 // Handler exposes auth HTTP endpoints.
 type Handler struct {
 	svc *Service
+	env string // "development" | "production"
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, env string) *Handler {
+	return &Handler{svc: svc, env: env}
 }
 
 // POST /api/v1/auth/register
@@ -27,7 +30,7 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PhoneNumber string  `json:"phone_number" validate:"required,e164"`
-		FullName    string  `json:"full_name"    validate:"required,min=2"`
+		FullName    string  `json:"full_name"    validate:"omitempty,min=2"`
 		Email       *string `json:"email"`
 		DeviceID    string  `json:"device_id"    validate:"required"`
 		Platform    string  `json:"platform"     validate:"required,oneof=ios android"`
@@ -44,8 +47,17 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	r.Header.Set("X-Phone-Number", body.PhoneNumber)
 
-	if err := h.svc.InitiateOTP(r.Context(), body.PhoneNumber, PurposeRegistration, body.DeviceID, body.Platform, body.FullName, body.Email); err != nil {
+	devOTP, err := h.svc.InitiateOTP(r.Context(), body.PhoneNumber, PurposeRegistration, body.DeviceID, body.Platform, body.FullName, body.Email)
+	if err != nil {
 		respond.Error(w, err)
+		return
+	}
+
+	// In development, echo the OTP back so the mobile app can auto-fill the input
+	// without requiring developers to read Docker logs.
+	// NEVER do this in production.
+	if h.env != "production" && devOTP != "" {
+		respond.OK(w, map[string]string{"dev_otp": devOTP})
 		return
 	}
 
@@ -133,7 +145,16 @@ func realIP(r *http.Request) string {
 		return ip
 	}
 	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		return ip
+		// X-Forwarded-For can be a comma-separated list; take the first.
+		if idx := strings.Index(ip, ","); idx != -1 {
+			ip = ip[:idx]
+		}
+		return strings.TrimSpace(ip)
 	}
-	return r.RemoteAddr
+	// r.RemoteAddr is "host:port" — strip the port for a valid INET value.
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }

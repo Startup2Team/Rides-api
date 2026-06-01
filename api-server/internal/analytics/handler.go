@@ -102,3 +102,65 @@ func (h *Handler) Cancellations(w http.ResponseWriter, r *http.Request) {
 	}
 	respond.OK(w, data)
 }
+
+// GET /api/v1/admin/analytics/funnel
+func (h *Handler) Funnel(w http.ResponseWriter, r *http.Request) {
+	days := 30
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil && n > 0 {
+			days = n
+		}
+	}
+	data, err := h.repo.Funnel(r.Context(), days)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
+// GET /api/v1/admin/analytics/vehicle-mix
+func (h *Handler) VehicleMix(w http.ResponseWriter, r *http.Request) {
+	days := 30
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil && n > 0 {
+			days = n
+		}
+	}
+	data, err := h.repo.VehicleMix(r.Context(), days)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
+// GET /api/v1/admin/analytics/activity-heatmap
+func (h *Handler) ActivityHeatmap(w http.ResponseWriter, r *http.Request) {
+	data, err := h.repo.ActivityHeatmap(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
+// GET /api/v1/admin/analytics/satisfaction
+func (h *Handler) Satisfaction(w http.ResponseWriter, r *http.Request) {
+	data, err := h.repo.Satisfaction(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
+// GET /api/v1/admin/analytics/heatmap/zones
+func (h *Handler) HeatmapZones(w http.ResponseWriter, r *http.Request) {
+	data, err := h.repo.HeatmapZones(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"zones": data})
+}

@@ -43,20 +43,22 @@ func NewService(repo *Repository, rdb *goredis.Client, tel *telephony.Service, c
 
 // InitiateOTP generates a 6-digit OTP, stores a bcrypt hash, and sends via SMS.
 // fullName and email are stashed in Redis so VerifyOTP can use them on first registration.
-func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email *string) error {
+// In non-production the plaintext OTP is returned so the handler can echo it back to the
+// client — eliminates the need to read Docker logs during development.
+func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email *string) (devOTP string, err error) {
 	otp, err := generateOTP()
 	if err != nil {
-		return fmt.Errorf("generate otp: %w", err)
+		return "", fmt.Errorf("generate otp: %w", err)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(otp), bcrypt.DefaultCost)
 	if err != nil {
-		return fmt.Errorf("hash otp: %w", err)
+		return "", fmt.Errorf("hash otp: %w", err)
 	}
 
 	expiresAt := time.Now().Add(otpExpiryMinutes * time.Minute)
 	if err := s.repo.CreateOTP(ctx, phone, string(hash), purpose, expiresAt); err != nil {
-		return fmt.Errorf("store otp: %w", err)
+		return "", fmt.Errorf("store otp: %w", err)
 	}
 
 	// Stash registration metadata in Redis (TTL matches OTP expiry).
@@ -69,15 +71,25 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 		s.redis.Expire(ctx, metaKey, otpExpiryMinutes*time.Minute)
 	}
 
-	if err := s.telephony.SendOTP(ctx, phone, otp); err != nil {
-		s.log.Error().Err(err).Str("phone", phone).Msg("otp sms send failed")
-		if s.cfg.Env == "production" {
-			return fmt.Errorf("sms send: %w", err)
-		}
-		s.log.Warn().Str("phone", phone).Str("otp", otp).Msg("DEV MODE — OTP printed to log (not sent via SMS)")
+	// In non-production always print the OTP immediately so dev/test flows
+	// are never blocked waiting for real SMS delivery.
+	if s.cfg.Env != "production" {
+		s.log.Warn().
+			Str("phone", phone).
+			Str("otp", otp).
+			Msg("⚠️  DEV MODE — OTP (not sent via SMS)")
+		devOTP = otp
 	}
 
-	return nil
+	if err := s.telephony.SendOTP(ctx, phone, otp); err != nil {
+		s.log.Error().Err(err).Str("phone", phone).Msg("otp: sms send failed")
+		if s.cfg.Env == "production" {
+			return "", fmt.Errorf("sms send: %w", err)
+		}
+		// Non-production: log the failure but continue — OTP already printed above.
+	}
+
+	return devOTP, nil
 }
 
 // VerifyOTP validates the submitted OTP code and returns JWT tokens.
@@ -228,9 +240,17 @@ func (s *Service) issueTokenPair(ctx context.Context, user *User) (*TokenPair, e
 		return nil, fmt.Errorf("sign refresh token: %w", err)
 	}
 
-	sessionKey := rkeys.K.Session(user.ID, refreshJTI)
-	if err := s.redis.Set(ctx, sessionKey, "valid", s.cfg.JWT.RefreshExpiry).Err(); err != nil {
-		return nil, fmt.Errorf("persist session: %w", err)
+	// Refresh-token session — checked by RefreshTokens to validate the refresh token.
+	refreshSessionKey := rkeys.K.Session(user.ID, refreshJTI)
+	if err := s.redis.Set(ctx, refreshSessionKey, "valid", s.cfg.JWT.RefreshExpiry).Err(); err != nil {
+		return nil, fmt.Errorf("persist refresh session: %w", err)
+	}
+
+	// Access-token session — checked by the Authenticate middleware on every API call.
+	// TTL matches the access token's lifetime so the key expires naturally.
+	accessSessionKey := rkeys.K.Session(user.ID, accessJTI)
+	if err := s.redis.Set(ctx, accessSessionKey, "valid", s.cfg.JWT.AccessExpiry).Err(); err != nil {
+		return nil, fmt.Errorf("persist access session: %w", err)
 	}
 
 	return &TokenPair{
