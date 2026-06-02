@@ -416,6 +416,7 @@ func main() {
 		r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
 
 		// Negotiations
+		r.Get("/negotiations/stats", adminH.NegotiationsStats)
 		r.Get("/negotiations", adminH.ListNegotiations)
 		r.Get("/negotiations/{id}", adminH.GetNegotiation)
 

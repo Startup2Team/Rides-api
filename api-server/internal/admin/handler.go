@@ -201,6 +201,16 @@ func (h *Handler) GetRide(w http.ResponseWriter, r *http.Request) {
 
 // ── Negotiations ──────────────────────────────────────────────────────────
 
+// GET /api/v1/admin/negotiations/stats
+func (h *Handler) NegotiationsStats(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.NegotiationsStats(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/negotiations
 func (h *Handler) ListNegotiations(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
