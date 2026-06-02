@@ -23,6 +23,7 @@ import (
 type mockSvc struct {
 	loginFn            func(ctx context.Context, email, password string) (*team.LoginResult, error)
 	verify2FAFn        func(ctx context.Context, preAuthToken, code string) (*team.LoginResult, error)
+	reissue2FAFn       func(ctx context.Context, adminID string) (string, error)
 	verifyBackupFn     func(ctx context.Context, preAuthToken, backupCode string) (*team.LoginResult, error)
 	logoutFn           func(ctx context.Context, adminID, jti string) error
 	setup2FAFn         func(ctx context.Context, adminID string) (string, string, error)
@@ -49,6 +50,12 @@ func (m *mockSvc) Login(ctx context.Context, email, password string) (*team.Logi
 }
 func (m *mockSvc) Verify2FA(ctx context.Context, pre, code string) (*team.LoginResult, error) {
 	return m.verify2FAFn(ctx, pre, code)
+}
+func (m *mockSvc) Reissue2FAChallenge(ctx context.Context, adminID string) (string, error) {
+	if m.reissue2FAFn != nil {
+		return m.reissue2FAFn(ctx, adminID)
+	}
+	return "", nil
 }
 func (m *mockSvc) VerifyBackupCode(ctx context.Context, pre, code string) (*team.LoginResult, error) {
 	return m.verifyBackupFn(ctx, pre, code)

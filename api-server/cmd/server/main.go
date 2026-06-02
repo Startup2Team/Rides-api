@@ -338,6 +338,7 @@ func main() {
 
 		// Auth (protected actions)
 		r.Post("/auth/logout", teamH.Logout)
+		r.Post("/auth/2fa/reissue", teamH.Reissue2FAChallenge)
 		r.Post("/auth/totp/reset", teamH.ResetTOTP)
 
 		// Dashboard
@@ -442,6 +443,7 @@ func main() {
 		r.Get("/analytics/satisfaction", anaH.Satisfaction)
 
 		// Safety incidents
+		r.Get("/incidents/stats", incidentH.Stats)
 		r.Get("/incidents", incidentH.List)
 		r.Post("/incidents", incidentH.Create)
 		r.Get("/incidents/{id}", incidentH.Get)
@@ -452,6 +454,7 @@ func main() {
 		r.Post("/incidents/{id}/message", incidentH.Message)
 
 		// Support tickets
+		r.Get("/support/tickets/stats", ticketH.Stats)
 		r.Get("/support/tickets", ticketH.List)
 		r.Post("/support/tickets", ticketH.Create)
 		r.Get("/support/tickets/{id}", ticketH.Get)
@@ -468,6 +471,7 @@ func main() {
 		r.Post("/tickets/{id}/resolve", ticketH.Resolve)
 
 		// Inbox
+		r.Get("/inbox/stats", inboxH.Stats)
 		r.Get("/inbox", inboxH.List)
 		r.Get("/inbox/{id}", inboxH.Get)
 		r.Post("/inbox/{id}/reply", inboxH.Reply)

@@ -8,6 +8,7 @@ type TeamService interface {
 	Login(ctx context.Context, email, password string) (*LoginResult, error)
 	Verify2FA(ctx context.Context, preAuthToken, code string) (*LoginResult, error)
 	VerifyBackupCode(ctx context.Context, preAuthToken, backupCode string) (*LoginResult, error)
+	Reissue2FAChallenge(ctx context.Context, adminID string) (string, error)
 	Logout(ctx context.Context, adminID, jti string) error
 	Generate2FASetup(ctx context.Context, adminID string) (secret, otpauthURL string, err error)
 	Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error)

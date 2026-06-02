@@ -40,6 +40,29 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, result)
 }
 
+// POST /api/v1/admin/auth/2fa/reissue
+// Returns a pre_auth_token when 2FA is already enabled (recovery for setup UI mismatch).
+func (h *Handler) Reissue2FAChallenge(w http.ResponseWriter, r *http.Request) {
+	claims := mw.GetClaims(r)
+	if claims == nil || claims.UserID == "" {
+		respond.ErrorMsg(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	if claims.TokenType == preAuthTokenType {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "use your sign-in access token, not a pre-auth token")
+		return
+	}
+	preAuth, err := h.svc.Reissue2FAChallenge(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{
+		"pre_auth_token":      preAuth,
+		"two_factor_required": true,
+	})
+}
+
 // POST /api/v1/admin/auth/2fa/verify
 // Step 2a: complete login with a TOTP authenticator code.
 // Body: { "pre_auth_token": "...", "code": "123456" }
