@@ -60,3 +60,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	}
 	return s.repo.Delete(ctx, id)
 }
+
+func (s *Service) Stats(ctx context.Context) (map[string]interface{}, error) {
+	return s.repo.Stats(ctx)
+}

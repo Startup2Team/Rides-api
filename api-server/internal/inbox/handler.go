@@ -18,6 +18,16 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// GET /api/v1/admin/inbox/stats
+func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.Stats(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/inbox
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	f := ListFilter{

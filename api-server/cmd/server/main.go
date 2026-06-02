@@ -330,6 +330,7 @@ func main() {
 	r.Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
 	r.Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
 	r.Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+	r.Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
 
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
@@ -338,10 +339,18 @@ func main() {
 
 		// Auth (protected actions)
 		r.Post("/auth/logout", teamH.Logout)
+		r.Post("/auth/2fa/reissue", teamH.Reissue2FAChallenge)
 		r.Post("/auth/totp/reset", teamH.ResetTOTP)
 
 		// Dashboard
 		r.Get("/dashboard", dashH.Get)
+		r.Get("/dashboard/revenue-series", dashH.RevenueSeries)
+		r.Get("/dashboard/rides-series", dashH.RidesSeries)
+		r.Get("/dashboard/driver-status", dashH.DriverStatusSnapshot)
+		r.Get("/dashboard/top-drivers", dashH.TopDrivers)
+		r.Get("/dashboard/recent-activity", dashH.RecentActivity)
+		r.Get("/dashboard/alerts", dashH.Alerts)
+		r.Get("/dashboard/live-map", dashH.LiveMap)
 
 		// Account (self)
 		r.Get("/account", teamH.GetAccount)
@@ -358,8 +367,10 @@ func main() {
 
 		// Drivers
 		r.Get("/drivers", adminH.ListDrivers)
+		r.Post("/drivers", adminH.CreateDriver)
 		r.Get("/drivers/overview", adminH.DriverOverview)
 		r.Get("/drivers/{id}", adminH.GetDriver)
+		r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
 		r.Patch("/drivers/{id}", adminH.UpdateDriver)
 		r.Delete("/drivers/{id}", adminH.DeleteDriver)
 		r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
@@ -371,6 +382,7 @@ func main() {
 
 		// Customers
 		r.Get("/customers", adminH.ListCustomers)
+		r.Get("/customers/overview", adminH.CustomerOverview)
 		r.Get("/customers/{id}", adminH.GetCustomer)
 		r.Patch("/customers/{id}", adminH.UpdateCustomer)
 		r.Patch("/customers/{id}/ban", adminH.BanCustomer)
@@ -386,6 +398,7 @@ func main() {
 		r.Get("/flags/device-collisions", adminH.DeviceCollisions)
 
 		// Live rides
+		r.Get("/rides/live/stats", adminH.LiveRidesStats)
 		r.Get("/rides/live", adminH.ListLiveRides)
 		r.Get("/rides/live/{id}", adminH.GetLiveRide)
 		r.Post("/rides/live/{id}/intervene", adminH.InterveneRide)
@@ -405,6 +418,7 @@ func main() {
 		r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
 
 		// Negotiations
+		r.Get("/negotiations/stats", adminH.NegotiationsStats)
 		r.Get("/negotiations", adminH.ListNegotiations)
 		r.Get("/negotiations/{id}", adminH.GetNegotiation)
 
@@ -430,6 +444,7 @@ func main() {
 		r.Get("/analytics/satisfaction", anaH.Satisfaction)
 
 		// Safety incidents
+		r.Get("/incidents/stats", incidentH.Stats)
 		r.Get("/incidents", incidentH.List)
 		r.Post("/incidents", incidentH.Create)
 		r.Get("/incidents/{id}", incidentH.Get)
@@ -440,6 +455,7 @@ func main() {
 		r.Post("/incidents/{id}/message", incidentH.Message)
 
 		// Support tickets
+		r.Get("/support/tickets/stats", ticketH.Stats)
 		r.Get("/support/tickets", ticketH.List)
 		r.Post("/support/tickets", ticketH.Create)
 		r.Get("/support/tickets/{id}", ticketH.Get)
@@ -456,6 +472,7 @@ func main() {
 		r.Post("/tickets/{id}/resolve", ticketH.Resolve)
 
 		// Inbox
+		r.Get("/inbox/stats", inboxH.Stats)
 		r.Get("/inbox", inboxH.List)
 		r.Get("/inbox/{id}", inboxH.Get)
 		r.Post("/inbox/{id}/reply", inboxH.Reply)
@@ -465,6 +482,7 @@ func main() {
 		r.Post("/inbox/{id}/spam", inboxH.Spam)
 
 		// Reports
+		r.Get("/reports/stats", reportH.Stats)
 		r.Get("/reports", reportH.List)
 		r.Post("/reports", reportH.Generate)
 		r.Post("/reports/generate", reportH.Generate)
@@ -473,6 +491,7 @@ func main() {
 		r.Post("/reports/scheduled/{id}/toggle", reportH.ToggleScheduled)
 		r.Get("/reports/{id}", reportH.Get)
 		r.Get("/reports/{id}/download", reportH.Download)
+		r.Delete("/reports/{id}", reportH.Delete)
 		r.Delete("/reports/{id}", reportH.Delete)
 
 		// Settings

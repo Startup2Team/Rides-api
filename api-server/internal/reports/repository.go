@@ -143,6 +143,20 @@ func itoa(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
+func (r *Repository) Stats(ctx context.Context) (map[string]interface{}, error) {
+	var totalMonth, readyWeek, scheduled, pending int
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM reports WHERE created_at >= DATE_TRUNC('month', NOW())`).Scan(&totalMonth)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM reports WHERE status = 'READY' AND created_at >= NOW() - INTERVAL '7 days'`).Scan(&readyWeek)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM scheduled_reports WHERE is_active = TRUE`).Scan(&scheduled)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM reports WHERE status = 'PENDING'`).Scan(&pending)
+	return map[string]interface{}{
+		"total_this_month": totalMonth,
+		"ready_this_week":  readyWeek,
+		"scheduled":        scheduled,
+		"pending":          pending,
+	}, nil
+}
+
 func (r *Repository) Delete(ctx context.Context, id string) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM reports WHERE id = $1`, id)
 	return err
