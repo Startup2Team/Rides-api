@@ -637,7 +637,7 @@ func TestDriverOverview_AllZero(t *testing.T) {
 			return scanRow(0)
 		},
 	})
-	data, err := svc.DriverOverview(context.Background())
+	data, err := svc.DriverOverview(context.Background(), "")
 	require.NoError(t, err)
 	assert.NotNil(t, data)
 }

@@ -6,7 +6,12 @@ import "context"
 // *Service satisfies this interface automatically via Go structural typing.
 type AdminService interface {
 	ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	DriverOverview(ctx context.Context) (map[string]interface{}, error)
+	DriverOverview(ctx context.Context, vehicleType string) (map[string]interface{}, error)
+	CustomerOverview(ctx context.Context) (map[string]interface{}, error)
+	NegotiationsStats(ctx context.Context) (map[string]interface{}, error)
+	CreateDriverFromAdmin(ctx context.Context, in AdminCreateDriverInput) (map[string]interface{}, error)
+	ForceDriverOffline(ctx context.Context, profileID string) error
+	LiveRidesStats(ctx context.Context) (map[string]interface{}, error)
 	ApproveDriver(ctx context.Context, profileID, adminUserID string) error
 	RejectDriver(ctx context.Context, profileID, adminUserID, reason string) error
 	SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error

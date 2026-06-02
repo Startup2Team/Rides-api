@@ -20,41 +20,76 @@ import (
 // ── Mock ──────────────────────────────────────────────────────────────────
 
 type mockSvc struct {
-	listDriversFn      func(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	driverOverviewFn   func(ctx context.Context) (map[string]interface{}, error)
-	approveDriverFn    func(ctx context.Context, profileID, adminUserID string) error
-	rejectDriverFn     func(ctx context.Context, profileID, adminUserID, reason string) error
-	suspendDriverFn    func(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
-	reinstateDriverFn  func(ctx context.Context, profileID string) error
-	getDriverFn        func(ctx context.Context, profileID string) (map[string]interface{}, error)
-	updateDriverFn     func(ctx context.Context, profileID string, fields map[string]interface{}) error
-	deleteDriverFn     func(ctx context.Context, profileID string) error
-	listCustomersFn    func(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	getCustomerFn      func(ctx context.Context, userID string) (map[string]interface{}, error)
-	suspendUserFn      func(ctx context.Context, userID string, durationHours int) error
-	reinstateUserFn    func(ctx context.Context, userID string) error
-	updateCustomerFn   func(ctx context.Context, userID, status, notes string) error
-	banCustomerFn      func(ctx context.Context, userID, reason string) error
-	listRidesFn        func(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error)
-	getRideFn          func(ctx context.Context, rideID string) (map[string]interface{}, error)
-	listNegotiationsFn func(ctx context.Context, status, search string, limit, offset int) ([]map[string]interface{}, int, error)
-	getNegotiationFn   func(ctx context.Context, rideID string) (map[string]interface{}, error)
-	revenueKPIsFn      func(ctx context.Context, period string) (map[string]interface{}, error)
-	listTransactionsFn func(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	revenueFn          func(ctx context.Context, period string) (map[string]interface{}, error)
-	disbursePayoutsFn  func(ctx context.Context, transactionIDs []string) (int, float64, error)
-	gpsAnomaliesFn     func(ctx context.Context, limit int) ([]map[string]interface{}, error)
-	deviceCollisionsFn func(ctx context.Context) ([]map[string]interface{}, error)
-	listLiveRidesFn    func(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error)
-	getLiveRideFn      func(ctx context.Context, rideID string) (map[string]interface{}, error)
-	interveneRideFn    func(ctx context.Context, rideID, action, reason string) error
+	listDriversFn           func(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
+	driverOverviewFn        func(ctx context.Context, vehicleType string) (map[string]interface{}, error)
+	customerOverviewFn      func(ctx context.Context) (map[string]interface{}, error)
+	negotiationsStatsFn     func(ctx context.Context) (map[string]interface{}, error)
+	createDriverFromAdminFn func(ctx context.Context, in admin.AdminCreateDriverInput) (map[string]interface{}, error)
+	forceDriverOfflineFn    func(ctx context.Context, profileID string) error
+	liveRidesStatsFn        func(ctx context.Context) (map[string]interface{}, error)
+	approveDriverFn         func(ctx context.Context, profileID, adminUserID string) error
+	rejectDriverFn          func(ctx context.Context, profileID, adminUserID, reason string) error
+	suspendDriverFn         func(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
+	reinstateDriverFn       func(ctx context.Context, profileID string) error
+	getDriverFn             func(ctx context.Context, profileID string) (map[string]interface{}, error)
+	updateDriverFn          func(ctx context.Context, profileID string, fields map[string]interface{}) error
+	deleteDriverFn          func(ctx context.Context, profileID string) error
+	listCustomersFn         func(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
+	getCustomerFn           func(ctx context.Context, userID string) (map[string]interface{}, error)
+	suspendUserFn           func(ctx context.Context, userID string, durationHours int) error
+	reinstateUserFn         func(ctx context.Context, userID string) error
+	updateCustomerFn        func(ctx context.Context, userID, status, notes string) error
+	banCustomerFn           func(ctx context.Context, userID, reason string) error
+	listRidesFn             func(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error)
+	getRideFn               func(ctx context.Context, rideID string) (map[string]interface{}, error)
+	listNegotiationsFn      func(ctx context.Context, status, search string, limit, offset int) ([]map[string]interface{}, int, error)
+	getNegotiationFn        func(ctx context.Context, rideID string) (map[string]interface{}, error)
+	revenueKPIsFn           func(ctx context.Context, period string) (map[string]interface{}, error)
+	listTransactionsFn      func(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error)
+	revenueFn               func(ctx context.Context, period string) (map[string]interface{}, error)
+	disbursePayoutsFn       func(ctx context.Context, transactionIDs []string) (int, float64, error)
+	gpsAnomaliesFn          func(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	deviceCollisionsFn      func(ctx context.Context) ([]map[string]interface{}, error)
+	listLiveRidesFn         func(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error)
+	getLiveRideFn           func(ctx context.Context, rideID string) (map[string]interface{}, error)
+	interveneRideFn         func(ctx context.Context, rideID, action, reason string) error
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
 	return m.listDriversFn(ctx, status, vehicleType, search, sort, limit, offset)
 }
-func (m *mockSvc) DriverOverview(ctx context.Context) (map[string]interface{}, error) {
-	return m.driverOverviewFn(ctx)
+func (m *mockSvc) DriverOverview(ctx context.Context, vehicleType string) (map[string]interface{}, error) {
+	return m.driverOverviewFn(ctx, vehicleType)
+}
+func (m *mockSvc) CustomerOverview(ctx context.Context) (map[string]interface{}, error) {
+	if m.customerOverviewFn != nil {
+		return m.customerOverviewFn(ctx)
+	}
+	return map[string]interface{}{}, nil
+}
+func (m *mockSvc) NegotiationsStats(ctx context.Context) (map[string]interface{}, error) {
+	if m.negotiationsStatsFn != nil {
+		return m.negotiationsStatsFn(ctx)
+	}
+	return map[string]interface{}{}, nil
+}
+func (m *mockSvc) CreateDriverFromAdmin(ctx context.Context, in admin.AdminCreateDriverInput) (map[string]interface{}, error) {
+	if m.createDriverFromAdminFn != nil {
+		return m.createDriverFromAdminFn(ctx, in)
+	}
+	return map[string]interface{}{}, nil
+}
+func (m *mockSvc) ForceDriverOffline(ctx context.Context, profileID string) error {
+	if m.forceDriverOfflineFn != nil {
+		return m.forceDriverOfflineFn(ctx, profileID)
+	}
+	return nil
+}
+func (m *mockSvc) LiveRidesStats(ctx context.Context) (map[string]interface{}, error) {
+	if m.liveRidesStatsFn != nil {
+		return m.liveRidesStatsFn(ctx)
+	}
+	return map[string]interface{}{}, nil
 }
 func (m *mockSvc) ApproveDriver(ctx context.Context, profileID, adminUserID string) error {
 	return m.approveDriverFn(ctx, profileID, adminUserID)
@@ -294,7 +329,7 @@ func TestListDrivers_StatusFilter(t *testing.T) {
 
 func TestDriverOverview_HappyPath(t *testing.T) {
 	mock := &mockSvc{
-		driverOverviewFn: func(_ context.Context) (map[string]interface{}, error) {
+		driverOverviewFn: func(_ context.Context, _ string) (map[string]interface{}, error) {
 			return map[string]interface{}{"total": 50, "active": 30}, nil
 		},
 	}
@@ -1074,7 +1109,7 @@ func TestGetLiveRide_NotFound(t *testing.T) {
 
 func TestDriverOverview_ServiceError(t *testing.T) {
 	mock := &mockSvc{
-		driverOverviewFn: func(_ context.Context) (map[string]interface{}, error) {
+		driverOverviewFn: func(_ context.Context, _ string) (map[string]interface{}, error) {
 			return nil, apperrors.ErrInternal
 		},
 	}

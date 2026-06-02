@@ -39,7 +39,7 @@ func (h *Handler) ListDrivers(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/admin/drivers/overview
 func (h *Handler) DriverOverview(w http.ResponseWriter, r *http.Request) {
-	data, err := h.svc.DriverOverview(r.Context())
+	data, err := h.svc.DriverOverview(r.Context(), r.URL.Query().Get("vehicle_type"))
 	if err != nil {
 		respond.Error(w, err)
 		return

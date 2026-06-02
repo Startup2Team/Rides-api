@@ -249,14 +249,18 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 	return result, total, nil
 }
 
-// DriverOverview returns aggregate driver status counts.
-func (s *Service) DriverOverview(ctx context.Context) (map[string]interface{}, error) {
+// DriverOverview returns aggregate driver status counts, optionally filtered by vehicle type.
+func (s *Service) DriverOverview(ctx context.Context, vehicleType string) (map[string]interface{}, error) {
 	var total, active, online, onTrip, pending, suspended int
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles`).Scan(&total)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='ACTIVE'`).Scan(&active)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE is_online=TRUE AND approval_status='ACTIVE'`).Scan(&online)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='PENDING_REVIEW'`).Scan(&pending)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='SUSPENDED'`).Scan(&suspended)
+	filter := ""
+	if vehicleType != "" {
+		filter = " AND transport_type='" + vehicleType + "'"
+	}
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE 1=1`+filter).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='ACTIVE'`+filter).Scan(&active)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE is_online=TRUE AND approval_status='ACTIVE'`+filter).Scan(&online)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='PENDING_REVIEW'`+filter).Scan(&pending)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='SUSPENDED'`+filter).Scan(&suspended)
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT dp.id) FROM driver_profiles dp
 		JOIN rides r ON r.driver_id = dp.id
@@ -267,6 +271,26 @@ func (s *Service) DriverOverview(ctx context.Context) (map[string]interface{}, e
 		"total": total, "active": active, "online": online,
 		"on_trip": onTrip, "pending": pending, "suspended": suspended,
 	}, nil
+}
+
+// AdminCreateDriverInput holds the fields for admin-created driver accounts.
+type AdminCreateDriverInput struct {
+	FullName       string
+	Phone          string
+	TransportType  string
+	VehiclePlate   string
+	LicenseNumber  string
+	DateOfBirth    string
+	Province       string
+	District       string
+	Sector         string
+	Cell           string
+	Village        string
+	City           string
+	MomoProvider   string
+	MomoPayCode    string
+	PassengerSeats *int
+	LoadCapacityKg *int
 }
 
 // ── Customer management ───────────────────────────────────────────────────
@@ -1117,4 +1141,51 @@ func (s *Service) DisbursePayouts(ctx context.Context, transactionIDs []string) 
 	`, strings.Join(placeholders, ",")), args...).Scan(&total)
 
 	return len(transactionIDs), total * 0.85, nil
+}
+
+// ── Stubs for methods added in origin/dev — satisfy AdminService interface ──
+
+func (s *Service) CustomerOverview(ctx context.Context) (map[string]interface{}, error) {
+	var total, active, suspended, activeThisWeek int
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role_state='CUSTOMER'`).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role_state='CUSTOMER' AND suspended_until IS NULL`).Scan(&active)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role_state='CUSTOMER' AND suspended_until > NOW()`).Scan(&suspended)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(DISTINCT customer_id) FROM rides WHERE created_at >= NOW() - INTERVAL '7 days'`).Scan(&activeThisWeek)
+	return map[string]interface{}{
+		"total": total, "active": active, "suspended": suspended, "active_this_week": activeThisWeek,
+	}, nil
+}
+
+func (s *Service) NegotiationsStats(ctx context.Context) (map[string]interface{}, error) {
+	var total, agreed, failed int
+	var avgRounds float64
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status IN ('NEGOTIATING','CONFIRMED','DRIVER_EN_ROUTE','DRIVER_ARRIVED','IN_PROGRESS','COMPLETED') AND DATE(created_at)=CURRENT_DATE`).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE agreed_fare IS NOT NULL AND DATE(created_at)=CURRENT_DATE`).Scan(&agreed)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status='CANCELLED' AND agreed_fare IS NULL AND DATE(created_at)=CURRENT_DATE`).Scan(&failed)
+	_ = s.db.QueryRow(ctx, `SELECT COALESCE(AVG(round_count),0) FROM (SELECT ride_id, COUNT(*) AS round_count FROM negotiation_rounds GROUP BY ride_id) t`).Scan(&avgRounds)
+	return map[string]interface{}{
+		"total_today": total, "agreed_today": agreed, "failed_today": failed, "avg_rounds": avgRounds,
+	}, nil
+}
+
+func (s *Service) LiveRidesStats(ctx context.Context) (map[string]interface{}, error) {
+	var total, searching, negotiating, enRoute, onTrip int
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status NOT IN ('COMPLETED','CANCELLED')`).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status='SEARCHING'`).Scan(&searching)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status='NEGOTIATING'`).Scan(&negotiating)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status='DRIVER_EN_ROUTE'`).Scan(&enRoute)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status='IN_PROGRESS'`).Scan(&onTrip)
+	return map[string]interface{}{
+		"total": total, "searching": searching, "negotiating": negotiating,
+		"driver_en_route": enRoute, "on_trip": onTrip,
+	}, nil
+}
+
+func (s *Service) ForceDriverOffline(ctx context.Context, profileID string) error {
+	_, err := s.db.Exec(ctx, `UPDATE driver_profiles SET is_online=FALSE WHERE id=$1`, profileID)
+	return err
+}
+
+func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDriverInput) (map[string]interface{}, error) {
+	return nil, errors.New("not implemented on this branch — available in origin/dev")
 }
