@@ -121,14 +121,14 @@ func (r *Repository) RevenueBreakdown(ctx context.Context) ([]map[string]interfa
 // DriverPerformance returns top driver metrics.
 func (r *Repository) DriverPerformance(ctx context.Context, limit int) ([]map[string]interface{}, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT dp.id, u.phone_number, dp.transport_type, dp.total_rides,
+		SELECT dp.id, u.phone_number, u.full_name, dp.transport_type, dp.total_rides,
 		       dp.acceptance_rate, dp.priority_tier,
-		       COALESCE(SUM(r.agreed_fare) FILTER (WHERE r.status='COMPLETED'), 0) AS earnings_30d
+		       COALESCE(SUM(ri.agreed_fare) FILTER (WHERE ri.status='COMPLETED'), 0) AS earnings_30d
 		FROM driver_profiles dp
 		JOIN users u ON u.id = dp.user_id
-		LEFT JOIN rides r ON r.driver_id = dp.id AND r.completed_at >= NOW() - INTERVAL '30 days'
+		LEFT JOIN rides ri ON ri.driver_id = dp.id AND ri.completed_at >= NOW() - INTERVAL '30 days'
 		WHERE dp.approval_status = 'ACTIVE'
-		GROUP BY dp.id, u.phone_number, dp.transport_type, dp.total_rides, dp.acceptance_rate, dp.priority_tier
+		GROUP BY dp.id, u.phone_number, u.full_name, dp.transport_type, dp.total_rides, dp.acceptance_rate, dp.priority_tier
 		ORDER BY earnings_30d DESC
 		LIMIT $1
 	`, limit)
@@ -140,15 +140,17 @@ func (r *Repository) DriverPerformance(ctx context.Context, limit int) ([]map[st
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, phone, transportType string
+		var fullName *string
 		var totalRides, priorityTier int
 		var acceptanceRate, earnings float64
-		if err := rows.Scan(&id, &phone, &transportType, &totalRides, &acceptanceRate, &priorityTier, &earnings); err != nil {
+		if err := rows.Scan(&id, &phone, &fullName, &transportType, &totalRides, &acceptanceRate, &priorityTier, &earnings); err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]interface{}{
-			"driver_id": id, "phone": phone, "transport_type": transportType,
-			"total_rides": totalRides, "acceptance_rate": acceptanceRate,
-			"priority_tier": priorityTier, "earnings_30d": earnings,
+			"driver_id": id, "phone": phone, "full_name": fullName,
+			"transport_type": transportType,
+			"total_rides":    totalRides, "acceptance_rate": acceptanceRate,
+			"priority_tier":  priorityTier, "earnings_30d": earnings,
 		})
 	}
 	return result, nil

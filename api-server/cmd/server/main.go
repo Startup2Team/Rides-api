@@ -477,6 +477,7 @@ func main() {
 		r.Post("/inbox/{id}/spam", inboxH.Spam)
 
 		// Reports
+		r.Get("/reports/stats", reportH.Stats)
 		r.Get("/reports", reportH.List)
 		r.Post("/reports", reportH.Generate)
 		r.Post("/reports/generate", reportH.Generate)
@@ -485,6 +486,7 @@ func main() {
 		r.Post("/reports/scheduled/{id}/toggle", reportH.ToggleScheduled)
 		r.Get("/reports/{id}", reportH.Get)
 		r.Get("/reports/{id}/download", reportH.Download)
+		r.Delete("/reports/{id}", reportH.Delete)
 		r.Delete("/reports/{id}", reportH.Delete)
 
 		// Settings
