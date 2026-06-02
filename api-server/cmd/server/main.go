@@ -396,6 +396,7 @@ func main() {
 		r.Get("/flags/device-collisions", adminH.DeviceCollisions)
 
 		// Live rides
+		r.Get("/rides/live/stats", adminH.LiveRidesStats)
 		r.Get("/rides/live", adminH.ListLiveRides)
 		r.Get("/rides/live/{id}", adminH.GetLiveRide)
 		r.Post("/rides/live/{id}/intervene", adminH.InterveneRide)

@@ -505,7 +505,7 @@ func (s *Service) ListRides(ctx context.Context, status, transportType, search s
 
 func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interface{}, error) {
 	var id, status, tType, custID, custPhone, pickupAddr, destAddr string
-	var custName, driverID, driverPhone, driverName *string
+	var custName, driverID, driverPhone, driverName, plate *string
 	var agreedFare, initialFare, distKm *float64
 	var createdAt time.Time
 	var completedAt *time.Time
@@ -513,7 +513,7 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 	err := s.db.QueryRow(ctx, `
 		SELECT r.id, r.status, r.transport_type,
 		       r.customer_id, cu.phone_number, cu.full_name,
-		       r.driver_id, du.phone_number, du.full_name,
+		       r.driver_id, du.phone_number, du.full_name, dp.vehicle_plate,
 		       r.pickup_address, r.destination_address,
 		       r.agreed_fare, r.customer_initial_fare,
 		       r.estimated_distance_km, r.created_at, r.completed_at
@@ -524,7 +524,7 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 		WHERE r.id = $1
 	`, rideID).Scan(&id, &status, &tType,
 		&custID, &custPhone, &custName,
-		&driverID, &driverPhone, &driverName,
+		&driverID, &driverPhone, &driverName, &plate,
 		&pickupAddr, &destAddr,
 		&agreedFare, &initialFare, &distKm,
 		&createdAt, &completedAt)
@@ -535,20 +535,20 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 		return nil, err
 	}
 
-	rows, _ := s.db.Query(ctx, `
+	negRows, _ := s.db.Query(ctx, `
 		SELECT round_number, proposed_by, proposed_amount, response, created_at
 		FROM negotiation_rounds WHERE ride_id = $1 ORDER BY round_number ASC
 	`, rideID)
 	var negotiations []map[string]interface{}
-	if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
+	if negRows != nil {
+		defer negRows.Close()
+		for negRows.Next() {
 			var rn int
 			var proposedBy string
 			var response *string
 			var amount float64
 			var rAt time.Time
-			if err := rows.Scan(&rn, &proposedBy, &amount, &response, &rAt); err == nil {
+			if err := negRows.Scan(&rn, &proposedBy, &amount, &response, &rAt); err == nil {
 				negotiations = append(negotiations, map[string]interface{}{
 					"round": rn, "proposed_by": proposedBy,
 					"amount": amount, "response": response, "at": rAt,
@@ -557,14 +557,46 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 		}
 	}
 
+	evtRows, _ := s.db.Query(ctx, `
+		SELECT event_type, actor_role, occurred_at FROM ride_events
+		WHERE ride_id = $1 ORDER BY occurred_at ASC
+	`, rideID)
+	var events []map[string]interface{}
+	if evtRows != nil {
+		defer evtRows.Close()
+		for evtRows.Next() {
+			var eType, aRole string
+			var eAt time.Time
+			if err := evtRows.Scan(&eType, &aRole, &eAt); err == nil {
+				events = append(events, map[string]interface{}{
+					"type": eType, "actor_role": aRole, "at": eAt,
+				})
+			}
+		}
+	}
+
 	return map[string]interface{}{
 		"id": id, "status": status, "transport_type": tType,
-		"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-		"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
+		"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+		"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate},
 		"pickup_address": pickupAddr, "destination_address": destAddr,
 		"agreed_fare": agreedFare, "initial_fare": initialFare, "distance_km": distKm,
 		"created_at": createdAt, "completed_at": completedAt,
-		"negotiation_rounds": negotiations,
+		"negotiation_rounds": negotiations, "events": events,
+	}, nil
+}
+
+func (s *Service) LiveRidesStats(ctx context.Context) (map[string]interface{}, error) {
+	type row struct{ label string; val *int }
+	var total, searching, negotiating, driverEnRoute, onTrip int
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status IN ('SEARCHING','DRIVER_FOUND','DRIVER_EN_ROUTE','DRIVER_ARRIVED','NEGOTIATING','ON_TRIP')`).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'SEARCHING'`).Scan(&searching)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'NEGOTIATING'`).Scan(&negotiating)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status IN ('DRIVER_EN_ROUTE','DRIVER_ARRIVED')`).Scan(&driverEnRoute)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'ON_TRIP'`).Scan(&onTrip)
+	return map[string]interface{}{
+		"total": total, "searching": searching,
+		"negotiating": negotiating, "driver_en_route": driverEnRoute, "on_trip": onTrip,
 	}, nil
 }
 

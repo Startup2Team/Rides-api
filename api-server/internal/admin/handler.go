@@ -461,6 +461,16 @@ func (h *Handler) BanCustomer(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, map[string]string{"status": "Banned"})
 }
 
+// GET /api/v1/admin/rides/live/stats
+func (h *Handler) LiveRidesStats(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.LiveRidesStats(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/rides/live
 func (h *Handler) ListLiveRides(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
