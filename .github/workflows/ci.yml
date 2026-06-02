@@ -1,19 +1,17 @@
 name: CI
 
-# Runs on every PR targeting dev or main.
-# These are the status checks that branch protection requires to pass before merge.
+# Runs on every PR targeting dev or main, and on direct pushes to dev/main
+# (push is path-filtered to avoid noise from docs-only changes).
 
 on:
   pull_request:
     branches: [dev, main]
-    paths:
-      - "api-server/**"
-      - ".github/workflows/ci.yml"
   push:
     branches: [dev, main]
     paths:
       - "api-server/**"
       - ".github/workflows/ci.yml"
+  workflow_dispatch:
 
 defaults:
   run:
