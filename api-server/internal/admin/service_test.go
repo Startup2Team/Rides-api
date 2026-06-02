@@ -81,28 +81,28 @@ func scanRow(values ...any) pgx.Row {
 // emptyRows returns a pgx.Rows that has no rows.
 type emptyRows struct{}
 
-func (r *emptyRows) Close()                                           {}
-func (r *emptyRows) Err() error                                       { return nil }
-func (r *emptyRows) CommandTag() pgconn.CommandTag                    { return pgconn.CommandTag{} }
-func (r *emptyRows) FieldDescriptions() []pgconn.FieldDescription     { return nil }
-func (r *emptyRows) Next() bool                                       { return false }
-func (r *emptyRows) Scan(...any) error                                 { return nil }
-func (r *emptyRows) Values() ([]any, error)                           { return nil, nil }
-func (r *emptyRows) RawValues() [][]byte                              { return nil }
-func (r *emptyRows) Conn() *pgx.Conn                                  { return nil }
+func (r *emptyRows) Close()                                       {}
+func (r *emptyRows) Err() error                                   { return nil }
+func (r *emptyRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *emptyRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *emptyRows) Next() bool                                   { return false }
+func (r *emptyRows) Scan(...any) error                            { return nil }
+func (r *emptyRows) Values() ([]any, error)                       { return nil, nil }
+func (r *emptyRows) RawValues() [][]byte                          { return nil }
+func (r *emptyRows) Conn() *pgx.Conn                              { return nil }
 
 // errRows returns a pgx.Rows that immediately errors on Query.
 type errRows struct{ err error }
 
-func (r *errRows) Close()                                          {}
-func (r *errRows) Err() error                                      { return r.err }
-func (r *errRows) CommandTag() pgconn.CommandTag                   { return pgconn.CommandTag{} }
-func (r *errRows) FieldDescriptions() []pgconn.FieldDescription    { return nil }
-func (r *errRows) Next() bool                                      { return false }
-func (r *errRows) Scan(...any) error                                { return r.err }
-func (r *errRows) Values() ([]any, error)                          { return nil, nil }
-func (r *errRows) RawValues() [][]byte                             { return nil }
-func (r *errRows) Conn() *pgx.Conn                                 { return nil }
+func (r *errRows) Close()                                       {}
+func (r *errRows) Err() error                                   { return r.err }
+func (r *errRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *errRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *errRows) Next() bool                                   { return false }
+func (r *errRows) Scan(...any) error                            { return r.err }
+func (r *errRows) Values() ([]any, error)                       { return nil, nil }
+func (r *errRows) RawValues() [][]byte                          { return nil }
+func (r *errRows) Conn() *pgx.Conn                              { return nil }
 
 // mockTx implements pgx.Tx for testing SuspendDriver / ReinstateDriver.
 type mockTx struct {
@@ -110,9 +110,9 @@ type mockTx struct {
 	committed bool
 }
 
-func (t *mockTx) Begin(ctx context.Context) (pgx.Tx, error)    { return nil, nil }
-func (t *mockTx) Commit(ctx context.Context) error             { t.committed = true; return nil }
-func (t *mockTx) Rollback(ctx context.Context) error           { return nil }
+func (t *mockTx) Begin(ctx context.Context) (pgx.Tx, error) { return nil, nil }
+func (t *mockTx) Commit(ctx context.Context) error          { t.committed = true; return nil }
+func (t *mockTx) Rollback(ctx context.Context) error        { return nil }
 func (t *mockTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	return pgconn.CommandTag{}, t.execErr
 }
@@ -126,7 +126,7 @@ func (t *mockTx) CopyFrom(_ context.Context, _ pgx.Identifier, _ []string, _ pgx
 	return 0, nil
 }
 func (t *mockTx) SendBatch(_ context.Context, _ *pgx.Batch) pgx.BatchResults { return nil }
-func (t *mockTx) LargeObjects() pgx.LargeObjects                              { return pgx.LargeObjects{} }
+func (t *mockTx) LargeObjects() pgx.LargeObjects                             { return pgx.LargeObjects{} }
 func (t *mockTx) Prepare(_ context.Context, _, _ string) (*pgconn.StatementDescription, error) {
 	return nil, nil
 }
@@ -672,15 +672,15 @@ type funcRows struct {
 	idx     int
 }
 
-func (r *funcRows) Close()                                          {}
-func (r *funcRows) Err() error                                      { return nil }
-func (r *funcRows) CommandTag() pgconn.CommandTag                   { return pgconn.CommandTag{} }
-func (r *funcRows) FieldDescriptions() []pgconn.FieldDescription    { return nil }
-func (r *funcRows) Next() bool                                      { r.idx++; return r.idx <= len(r.scanFns) }
-func (r *funcRows) Scan(dest ...any) error                          { return r.scanFns[r.idx-1](dest...) }
-func (r *funcRows) Values() ([]any, error)                          { return nil, nil }
-func (r *funcRows) RawValues() [][]byte                             { return nil }
-func (r *funcRows) Conn() *pgx.Conn                                 { return nil }
+func (r *funcRows) Close()                                       {}
+func (r *funcRows) Err() error                                   { return nil }
+func (r *funcRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *funcRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *funcRows) Next() bool                                   { r.idx++; return r.idx <= len(r.scanFns) }
+func (r *funcRows) Scan(dest ...any) error                       { return r.scanFns[r.idx-1](dest...) }
+func (r *funcRows) Values() ([]any, error)                       { return nil, nil }
+func (r *funcRows) RawValues() [][]byte                          { return nil }
+func (r *funcRows) Conn() *pgx.Conn                              { return nil }
 
 // ── NewService constructor ────────────────────────────────────────────────
 

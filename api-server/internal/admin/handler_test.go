@@ -20,34 +20,34 @@ import (
 // ── Mock ──────────────────────────────────────────────────────────────────
 
 type mockSvc struct {
-	listDriversFn    func(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	driverOverviewFn func(ctx context.Context) (map[string]interface{}, error)
-	approveDriverFn  func(ctx context.Context, profileID, adminUserID string) error
-	rejectDriverFn   func(ctx context.Context, profileID, adminUserID, reason string) error
-	suspendDriverFn  func(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
-	reinstateDriverFn func(ctx context.Context, profileID string) error
-	getDriverFn      func(ctx context.Context, profileID string) (map[string]interface{}, error)
-	updateDriverFn   func(ctx context.Context, profileID string, fields map[string]interface{}) error
-	deleteDriverFn   func(ctx context.Context, profileID string) error
-	listCustomersFn  func(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	getCustomerFn    func(ctx context.Context, userID string) (map[string]interface{}, error)
-	suspendUserFn    func(ctx context.Context, userID string, durationHours int) error
-	reinstateUserFn  func(ctx context.Context, userID string) error
-	updateCustomerFn func(ctx context.Context, userID, status, notes string) error
-	banCustomerFn    func(ctx context.Context, userID, reason string) error
-	listRidesFn      func(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error)
-	getRideFn        func(ctx context.Context, rideID string) (map[string]interface{}, error)
+	listDriversFn      func(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
+	driverOverviewFn   func(ctx context.Context) (map[string]interface{}, error)
+	approveDriverFn    func(ctx context.Context, profileID, adminUserID string) error
+	rejectDriverFn     func(ctx context.Context, profileID, adminUserID, reason string) error
+	suspendDriverFn    func(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
+	reinstateDriverFn  func(ctx context.Context, profileID string) error
+	getDriverFn        func(ctx context.Context, profileID string) (map[string]interface{}, error)
+	updateDriverFn     func(ctx context.Context, profileID string, fields map[string]interface{}) error
+	deleteDriverFn     func(ctx context.Context, profileID string) error
+	listCustomersFn    func(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
+	getCustomerFn      func(ctx context.Context, userID string) (map[string]interface{}, error)
+	suspendUserFn      func(ctx context.Context, userID string, durationHours int) error
+	reinstateUserFn    func(ctx context.Context, userID string) error
+	updateCustomerFn   func(ctx context.Context, userID, status, notes string) error
+	banCustomerFn      func(ctx context.Context, userID, reason string) error
+	listRidesFn        func(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error)
+	getRideFn          func(ctx context.Context, rideID string) (map[string]interface{}, error)
 	listNegotiationsFn func(ctx context.Context, status, search string, limit, offset int) ([]map[string]interface{}, int, error)
-	getNegotiationFn func(ctx context.Context, rideID string) (map[string]interface{}, error)
-	revenueKPIsFn    func(ctx context.Context, period string) (map[string]interface{}, error)
+	getNegotiationFn   func(ctx context.Context, rideID string) (map[string]interface{}, error)
+	revenueKPIsFn      func(ctx context.Context, period string) (map[string]interface{}, error)
 	listTransactionsFn func(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	revenueFn        func(ctx context.Context, period string) (map[string]interface{}, error)
-	disbursePayoutsFn func(ctx context.Context, transactionIDs []string) (int, float64, error)
-	gpsAnomaliesFn   func(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	revenueFn          func(ctx context.Context, period string) (map[string]interface{}, error)
+	disbursePayoutsFn  func(ctx context.Context, transactionIDs []string) (int, float64, error)
+	gpsAnomaliesFn     func(ctx context.Context, limit int) ([]map[string]interface{}, error)
 	deviceCollisionsFn func(ctx context.Context) ([]map[string]interface{}, error)
-	listLiveRidesFn  func(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error)
-	getLiveRideFn    func(ctx context.Context, rideID string) (map[string]interface{}, error)
-	interveneRideFn  func(ctx context.Context, rideID, action, reason string) error
+	listLiveRidesFn    func(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error)
+	getLiveRideFn      func(ctx context.Context, rideID string) (map[string]interface{}, error)
+	interveneRideFn    func(ctx context.Context, rideID, action, reason string) error
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
