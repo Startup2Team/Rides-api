@@ -76,7 +76,7 @@ func (h *Handler) GetRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respond.OK(w, ride)
+	respond.OK(w, ride.ToResponse())
 }
 
 // GET /api/v1/customer/rides
@@ -102,8 +102,13 @@ func (h *Handler) ListRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	responses := make([]*RideResponse, len(rides))
+	for i, ride := range rides {
+		responses[i] = ride.ToResponse()
+	}
+
 	respond.OK(w, map[string]interface{}{
-		"rides":  rides,
+		"rides":  responses,
 		"limit":  limit,
 		"offset": offset,
 	})
@@ -140,7 +145,7 @@ func (h *Handler) GetRideForDriver(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, ride)
+	respond.OK(w, ride.ToResponse())
 }
 
 // GET /api/v1/driver/rides/active
@@ -151,5 +156,5 @@ func (h *Handler) GetActiveRideForDriver(w http.ResponseWriter, r *http.Request)
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, ride)
+	respond.OK(w, ride.ToResponse())
 }

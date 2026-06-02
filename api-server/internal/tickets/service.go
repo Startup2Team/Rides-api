@@ -57,3 +57,7 @@ func (s *Service) Resolve(ctx context.Context, id string) error {
 func (s *Service) Create(ctx context.Context, subject, ticketType, priority, fromRole string, fromUserID, rideID *string) (*Ticket, error) {
 	return s.repo.Create(ctx, subject, ticketType, priority, fromRole, fromUserID, rideID)
 }
+
+func (s *Service) Stats(ctx context.Context) (map[string]interface{}, error) {
+	return s.repo.Stats(ctx)
+}

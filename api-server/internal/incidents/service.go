@@ -91,3 +91,7 @@ func (s *Service) UpdateStatus(ctx context.Context, id, status, event string) er
 		return apperrors.New(http.StatusBadRequest, "INVALID_STATUS", "status must be Acknowledged, Escalated, or Resolved")
 	}
 }
+
+func (s *Service) Stats(ctx context.Context) (map[string]interface{}, error) {
+	return s.repo.Stats(ctx)
+}

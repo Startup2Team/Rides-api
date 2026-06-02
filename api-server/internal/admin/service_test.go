@@ -800,12 +800,12 @@ func TestGetRide_Success(t *testing.T) {
 				*dest[2].(*string) = "MOTO_BIKE"
 				*dest[3].(*string) = "cust-id"
 				*dest[4].(*string) = "+250780000000"
-				// dest[5..8] are **string (nullable) — leave nil
-				*dest[9].(*string) = "Kigali CBD"
-				*dest[10].(*string) = "Kimironko"
-				// dest[11..13] are **float64 (nullable) — leave nil
-				*dest[14].(*time.Time) = now
-				// dest[15] is **time.Time (nullable) — leave nil
+				// dest[5..9] are **string (nullable: custName, driverID, driverPhone, driverName, plate) — leave nil
+				*dest[10].(*string) = "Kigali CBD"
+				*dest[11].(*string) = "Kimironko"
+				// dest[12..14] are **float64 (nullable: agreedFare, initialFare, distKm) — leave nil
+				*dest[15].(*time.Time) = now
+				// dest[16] is **time.Time (nullable: completedAt) — leave nil
 				return nil
 			}}
 		},
@@ -866,17 +866,21 @@ func TestListCustomers_WithOneRow(t *testing.T) {
 		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
 			return &funcRows{scanFns: []func(...any) error{
 				func(dest ...any) error {
-					// Scan order: id, phone, fullName(*string), roleState, isSuspended,
-					//             suspensionUntil(*time.Time), createdAt, totalRides, totalSpend
+					// Scan order: id, phone, email(**), fullName(**), roleState,
+					//   isSuspended, suspensionUntil(**), createdAt, lastSeenAt(**),
+					//   rating, totalRides, totalSpend
 					*dest[0].(*string) = "user-id"
 					*dest[1].(*string) = "+250780000000"
-					// dest[2] = **string (fullName, nullable) - leave nil
-					*dest[3].(*string) = "CUSTOMER_ONLY"
-					*dest[4].(*bool) = false
-					// dest[5] = **time.Time (suspensionUntil, nullable) - leave nil
-					*dest[6].(*time.Time) = now
-					*dest[7].(*int) = 5
-					*dest[8].(*float64) = 25000.0
+					// dest[2] = **string (email, nullable) - leave nil
+					// dest[3] = **string (fullName, nullable) - leave nil
+					*dest[4].(*string) = "CUSTOMER_ONLY"
+					*dest[5].(*bool) = false
+					// dest[6] = **time.Time (suspensionUntil, nullable) - leave nil
+					*dest[7].(*time.Time) = now
+					// dest[8] = **time.Time (lastSeenAt, nullable) - leave nil
+					*dest[9].(*float64) = 5.0
+					*dest[10].(*int) = 5
+					*dest[11].(*float64) = 25000.0
 					return nil
 				},
 			}}, nil
@@ -899,15 +903,19 @@ func TestGetCustomer_Success(t *testing.T) {
 		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
 			call++
 			if call == 1 {
-				// Main user row: id, phone, fullName(*str), roleState, isSuspended, suspensionUntil(*time.Time), createdAt
+				// Main user row: id, phone, email(**), fullName(**), roleState,
+				// isSuspended, suspensionUntil(**), createdAt, lastSeenAt(**), rating
 				return &closureRow{scanFn: func(dest ...any) error {
 					*dest[0].(*string) = "user-id"
 					*dest[1].(*string) = "+250780000000"
-					// dest[2] = **string (nullable)
-					*dest[3].(*string) = "CUSTOMER_ONLY"
-					*dest[4].(*bool) = false
-					// dest[5] = **time.Time (nullable)
-					*dest[6].(*time.Time) = now
+					// dest[2] = **string (email, nullable) - leave nil
+					// dest[3] = **string (fullName, nullable) - leave nil
+					*dest[4].(*string) = "CUSTOMER_ONLY"
+					*dest[5].(*bool) = false
+					// dest[6] = **time.Time (suspensionUntil, nullable) - leave nil
+					*dest[7].(*time.Time) = now
+					// dest[8] = **time.Time (lastSeenAt, nullable) - leave nil
+					*dest[9].(*float64) = 5.0
 					return nil
 				}}
 			}
@@ -986,17 +994,20 @@ func TestListNegotiations_WithOneRow(t *testing.T) {
 		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
 			return &funcRows{scanFns: []func(...any) error{
 				func(dest ...any) error {
-					// id, rStatus, rType, custPhone, custName(*str),
-					// driverPhone(*str), driverName(*str), driverType(*str),
-					// initialFare(*f64), agreedFare(*f64), createdAt, roundCount
+					// id, rStatus, rType, pickupAddr, destAddr,
+					// custPhone, custName(**), driverPhone(**), driverName(**),
+					// driverType(**), plate(**), initialFare(**), agreedFare(**),
+					// createdAt, roundCount
 					*dest[0].(*string) = "ride-id"
 					*dest[1].(*string) = "NEGOTIATING"
 					*dest[2].(*string) = "CAB_TAXI"
-					*dest[3].(*string) = "+250780000000"
-					// dest[4..7] = **string (nullable)
-					// dest[8..9] = **float64 (nullable)
-					*dest[10].(*time.Time) = now
-					*dest[11].(*int) = 2
+					*dest[3].(*string) = "Kigali CBD"
+					*dest[4].(*string) = "Kimironko"
+					*dest[5].(*string) = "+250780000000"
+					// dest[6..10] = **string (nullable)
+					// dest[11..12] = **float64 (nullable)
+					*dest[13].(*time.Time) = now
+					*dest[14].(*int) = 2
 					return nil
 				},
 			}}, nil

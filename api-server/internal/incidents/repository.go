@@ -174,3 +174,14 @@ func buildWhere(f ListFilter) (string, []interface{}) {
 	}
 	return "WHERE " + strings.Join(clauses, " AND "), args
 }
+
+func (r *Repository) Stats(ctx context.Context) (map[string]interface{}, error) {
+	var open, acknowledged, escalated, resolved7d int
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM safety_incidents WHERE status='OPEN'`).Scan(&open)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM safety_incidents WHERE status='ACKNOWLEDGED'`).Scan(&acknowledged)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM safety_incidents WHERE status='ESCALATED'`).Scan(&escalated)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM safety_incidents WHERE status='RESOLVED' AND updated_at >= NOW()-INTERVAL '7 days'`).Scan(&resolved7d)
+	return map[string]interface{}{
+		"open": open, "acknowledged": acknowledged, "escalated": escalated, "resolved_7d": resolved7d,
+	}, nil
+}

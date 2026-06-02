@@ -135,6 +135,46 @@ func (r *Repository) FindProfileByID(ctx context.Context, profileID string) (*Pr
 	return scanProfile(row)
 }
 
+// MatchNotificationInfo is sent to the customer when a driver accepts a ride request.
+type MatchNotificationInfo struct {
+	FullName      string
+	Phone         string
+	VehiclePlate  string
+	TransportType string
+	Lat           float64
+	Lng           float64
+}
+
+func (r *Repository) GetMatchNotificationInfo(ctx context.Context, profileID string) (*MatchNotificationInfo, error) {
+	info := &MatchNotificationInfo{}
+	err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(u.full_name, 'Driver'),
+		       COALESCE(u.phone_number, ''),
+		       COALESCE(dp.vehicle_plate, ''),
+		       dp.transport_type,
+		       COALESCE(ST_Y(dl.location::geometry), 0),
+		       COALESCE(ST_X(dl.location::geometry), 0)
+		FROM driver_profiles dp
+		JOIN users u ON u.id = dp.user_id
+		LEFT JOIN driver_locations dl ON dl.driver_id = dp.id
+		WHERE dp.id = $1
+	`, profileID).Scan(
+		&info.FullName,
+		&info.Phone,
+		&info.VehiclePlate,
+		&info.TransportType,
+		&info.Lat,
+		&info.Lng,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrNotFound
+		}
+		return nil, err
+	}
+	return info, nil
+}
+
 func (r *Repository) FindProfileByUserID(ctx context.Context, userID string) (*Profile, error) {
 	row := r.db.QueryRow(ctx, `
 		SELECT `+profileSelectCols+`
