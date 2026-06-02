@@ -4,6 +4,7 @@ import "context"
 
 // AdminService is the interface that Handler depends on.
 // *Service satisfies this interface automatically via Go structural typing.
+// Methods must stay in sync with service.go and origin/dev.
 type AdminService interface {
 	ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
 	DriverOverview(ctx context.Context, vehicleType string) (map[string]interface{}, error)
