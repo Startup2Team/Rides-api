@@ -330,6 +330,7 @@ func main() {
 	r.Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
 	r.Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
 	r.Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+	r.Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
 
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {

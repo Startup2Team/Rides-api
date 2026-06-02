@@ -30,6 +30,7 @@ type mockSvc struct {
 	enable2FAFn        func(ctx context.Context, adminID, secret, code string) ([]string, error)
 	disable2FAFn       func(ctx context.Context, adminID, password string) error
 	resetTOTPFn        func(ctx context.Context, adminID, currentCode string) (string, string, []string, error)
+	resetTOTPPreAuthFn func(ctx context.Context, preAuthToken, currentCode string) (string, string, []string, error)
 	listAdminsFn       func(ctx context.Context, status, roleID, search string) ([]*team.AdminAccount, error)
 	inviteFn           func(ctx context.Context, name, email, roleID string) (*team.AdminAccount, error)
 	listRolesFn        func(ctx context.Context) ([]*team.Role, error)
@@ -77,6 +78,12 @@ func (m *mockSvc) Disable2FA(ctx context.Context, adminID, password string) erro
 }
 func (m *mockSvc) ResetTOTP(ctx context.Context, adminID, code string) (string, string, []string, error) {
 	return m.resetTOTPFn(ctx, adminID, code)
+}
+func (m *mockSvc) ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, code string) (string, string, []string, error) {
+	if m.resetTOTPPreAuthFn != nil {
+		return m.resetTOTPPreAuthFn(ctx, preAuthToken, code)
+	}
+	return "", "", nil, nil
 }
 func (m *mockSvc) ListAdmins(ctx context.Context, status, roleID, search string) ([]*team.AdminAccount, error) {
 	return m.listAdminsFn(ctx, status, roleID, search)

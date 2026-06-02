@@ -23,7 +23,7 @@ import (
 const (
 	totpIssuer       = "Taravelis Admin"
 	preAuthTokenType = "pre_auth"
-	preAuthExpiry    = 5 * time.Minute
+	preAuthExpiry    = 15 * time.Minute
 	backupCodeCount  = 10
 )
 
@@ -370,6 +370,15 @@ func (s *Service) ResetTOTP(ctx context.Context, adminID, currentCode string) (s
 	}
 
 	return key.Secret(), key.URL(), plain, nil
+}
+
+// ResetTOTPFromPreAuth re-enrolls TOTP during the login 2FA step (pre-auth token only).
+func (s *Service) ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, currentCode string) (secret, otpauthURL string, backupCodes []string, err error) {
+	adminID, err := s.validatePreAuthToken(preAuthToken)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return s.ResetTOTP(ctx, adminID, currentCode)
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────

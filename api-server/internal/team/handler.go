@@ -347,6 +347,29 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, map[string]string{"message": "logged out"})
 }
 
+// POST /api/v1/admin/auth/totp/reset-login
+// Re-enroll TOTP during login using a pre_auth_token (no full admin session required).
+func (h *Handler) ResetTOTPLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PreAuthToken string `json:"pre_auth_token"`
+		Code         string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PreAuthToken == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "pre_auth_token is required")
+		return
+	}
+	secret, qr, backupCodes, err := h.svc.ResetTOTPFromPreAuth(r.Context(), body.PreAuthToken, body.Code)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{
+		"secret":       secret,
+		"qr_code_url":  qr,
+		"backup_codes": backupCodes,
+	})
+}
+
 // POST /api/v1/admin/auth/totp/reset
 func (h *Handler) ResetTOTP(w http.ResponseWriter, r *http.Request) {
 	claims := mw.GetClaims(r)

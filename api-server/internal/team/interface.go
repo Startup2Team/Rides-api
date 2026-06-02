@@ -14,6 +14,7 @@ type TeamService interface {
 	Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error)
 	Disable2FA(ctx context.Context, adminID, password string) error
 	ResetTOTP(ctx context.Context, adminID, currentCode string) (secret, qr string, backupCodes []string, err error)
+	ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, currentCode string) (secret, qr string, backupCodes []string, err error)
 	ListAdmins(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
 	Invite(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
 	ListRoles(ctx context.Context) ([]*Role, error)
