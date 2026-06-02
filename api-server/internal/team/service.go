@@ -26,10 +26,10 @@ const (
 // LoginResult is returned by Login. When TwoFactorRequired is true, the
 // caller must call Verify2FA or VerifyBackupCode using PreAuthToken.
 type LoginResult struct {
-	AccessToken      string       `json:"access_token,omitempty"`
-	PreAuthToken     string       `json:"pre_auth_token,omitempty"`
-	TwoFactorRequired bool        `json:"two_factor_required"`
-	Admin            *AdminAccount `json:"admin,omitempty"`
+	AccessToken       string        `json:"access_token,omitempty"`
+	PreAuthToken      string        `json:"pre_auth_token,omitempty"`
+	TwoFactorRequired bool          `json:"two_factor_required"`
+	Admin             *AdminAccount `json:"admin,omitempty"`
 }
 
 type Service struct {

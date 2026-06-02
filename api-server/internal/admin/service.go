@@ -460,8 +460,8 @@ func (s *Service) ListRides(ctx context.Context, status, transportType, search s
 		}
 		result = append(result, map[string]interface{}{
 			"id": id, "status": status2, "transport_type": tType,
-			"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-			"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
+			"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+			"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
 			"pickup_address": pickupAddr, "destination_address": destAddr,
 			"agreed_fare": agreedFare, "initial_fare": initialFare,
 			"distance_km": distKm, "created_at": createdAt, "completed_at": completedAt,
@@ -526,8 +526,8 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 
 	return map[string]interface{}{
 		"id": id, "status": status, "transport_type": tType,
-		"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-		"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
+		"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+		"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName},
 		"pickup_address": pickupAddr, "destination_address": destAddr,
 		"agreed_fare": agreedFare, "initial_fare": initialFare, "distance_km": distKm,
 		"created_at": createdAt, "completed_at": completedAt,
@@ -613,9 +613,9 @@ func (s *Service) ListNegotiations(ctx context.Context, status, search string, l
 		result = append(result, map[string]interface{}{
 			"id": id, "ride_id": id, "status": negStatus,
 			"transport_type": rType,
-			"customer": map[string]interface{}{"phone": custPhone, "name": custName},
-			"driver":   map[string]interface{}{"phone": driverPhone, "name": driverName, "vehicle_type": driverType},
-			"initial_fare": initialFare, "agreed_fare": agreedFare,
+			"customer":       map[string]interface{}{"phone": custPhone, "name": custName},
+			"driver":         map[string]interface{}{"phone": driverPhone, "name": driverName, "vehicle_type": driverType},
+			"initial_fare":   initialFare, "agreed_fare": agreedFare,
 			"uplift": uplift, "rounds": roundCount, "created_at": createdAt,
 		})
 	}
@@ -674,10 +674,10 @@ func (s *Service) ListTransactions(ctx context.Context, txStatus, sort string, l
 		result = append(result, map[string]interface{}{
 			"id": id, "transport_type": tType,
 			"fare": agreedFare, "commission": commission, "payout": payout,
-			"status": "Settled",
+			"status":         "Settled",
 			"pickup_address": pickupAddr, "destination_address": destAddr,
-			"customer": map[string]interface{}{"phone": custPhone, "name": custName},
-			"driver":   map[string]interface{}{"phone": driverPhone, "name": driverName, "plate": plate, "vehicle_type": tType},
+			"customer":     map[string]interface{}{"phone": custPhone, "name": custName},
+			"driver":       map[string]interface{}{"phone": driverPhone, "name": driverName, "plate": plate, "vehicle_type": tType},
 			"completed_at": completedAt,
 		})
 	}
