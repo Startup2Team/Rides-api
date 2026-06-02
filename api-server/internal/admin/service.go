@@ -279,12 +279,12 @@ func (s *Service) ListCustomers(ctx context.Context, status, search, sort string
 		wheres = append(wheres, "u.is_suspended = FALSE AND u.role_state = 'CUSTOMER_ONLY'")
 	}
 	if search != "" {
-		wheres = append(wheres, fmt.Sprintf("(u.phone_number ILIKE $%d OR u.full_name ILIKE $%d)", n, n))
+		wheres = append(wheres, fmt.Sprintf("(u.phone_number ILIKE $%d OR u.full_name ILIKE $%d OR u.email ILIKE $%d)", n, n, n))
 		args = append(args, "%"+search+"%")
 		n++
 	}
 
-	base := `FROM users u`
+	base := `FROM users u LEFT JOIN customer_profiles cp ON cp.user_id = u.id`
 	where := buildWhere(wheres)
 
 	var total int
@@ -298,8 +298,9 @@ func (s *Service) ListCustomers(ctx context.Context, status, search, sort string
 
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
-		SELECT u.id, u.phone_number, u.full_name, u.role_state,
-		       u.is_suspended, u.suspension_until, u.created_at,
+		SELECT u.id, u.phone_number, u.email, u.full_name, u.role_state,
+		       u.is_suspended, u.suspension_until, u.created_at, u.last_seen_at,
+		       COALESCE(cp.rating, 5.0) AS rating,
 		       (SELECT COUNT(*) FROM rides WHERE customer_id = u.id AND status = 'COMPLETED') AS total_rides,
 		       (SELECT COALESCE(SUM(agreed_fare),0) FROM rides WHERE customer_id = u.id AND status = 'COMPLETED') AS total_spend
 		%s %s ORDER BY %s LIMIT $%d OFFSET $%d
@@ -312,36 +313,60 @@ func (s *Service) ListCustomers(ctx context.Context, status, search, sort string
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, phone, roleState string
-		var fullName *string
+		var email, fullName *string
 		var isSuspended bool
-		var suspensionUntil *time.Time
+		var suspensionUntil, lastSeenAt *time.Time
 		var createdAt time.Time
+		var rating float64
 		var totalRides int
 		var totalSpend float64
-		if err := rows.Scan(&id, &phone, &fullName, &roleState, &isSuspended,
-			&suspensionUntil, &createdAt, &totalRides, &totalSpend); err != nil {
+		if err := rows.Scan(&id, &phone, &email, &fullName, &roleState, &isSuspended,
+			&suspensionUntil, &createdAt, &lastSeenAt, &rating, &totalRides, &totalSpend); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, map[string]interface{}{
-			"id": id, "phone": phone, "full_name": fullName,
+			"id": id, "phone": phone, "email": email, "full_name": fullName,
 			"role_state": roleState, "is_suspended": isSuspended,
 			"suspension_until": suspensionUntil, "created_at": createdAt,
+			"last_seen_at": lastSeenAt, "rating": rating,
 			"total_rides": totalRides, "total_spend": totalSpend,
 		})
 	}
 	return result, total, nil
 }
 
+func (s *Service) CustomerOverview(ctx context.Context) (map[string]interface{}, error) {
+	var total, suspended, activeThisWeek int
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role_state = 'CUSTOMER_ONLY'`).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role_state = 'CUSTOMER_ONLY' AND is_suspended = TRUE`).Scan(&suspended)
+	_ = s.db.QueryRow(ctx, `
+		SELECT COUNT(DISTINCT customer_id) FROM rides
+		WHERE created_at >= NOW() - INTERVAL '7 days'
+		  AND customer_id IN (SELECT id FROM users WHERE role_state = 'CUSTOMER_ONLY')
+	`).Scan(&activeThisWeek)
+	return map[string]interface{}{
+		"total":            total,
+		"suspended":        suspended,
+		"active":           total - suspended,
+		"active_this_week": activeThisWeek,
+	}, nil
+}
+
 func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]interface{}, error) {
 	var id, phone, roleState string
-	var fullName *string
+	var email, fullName *string
 	var isSuspended bool
-	var suspensionUntil *time.Time
+	var suspensionUntil, lastSeenAt *time.Time
 	var createdAt time.Time
+	var rating float64
 	err := s.db.QueryRow(ctx, `
-		SELECT id, phone_number, full_name, role_state, is_suspended, suspension_until, created_at
-		FROM users WHERE id = $1
-	`, userID).Scan(&id, &phone, &fullName, &roleState, &isSuspended, &suspensionUntil, &createdAt)
+		SELECT u.id, u.phone_number, u.email, u.full_name, u.role_state,
+		       u.is_suspended, u.suspension_until, u.created_at, u.last_seen_at,
+		       COALESCE(cp.rating, 5.0) AS rating
+		FROM users u
+		LEFT JOIN customer_profiles cp ON cp.user_id = u.id
+		WHERE u.id = $1
+	`, userID).Scan(&id, &phone, &email, &fullName, &roleState, &isSuspended, &suspensionUntil, &createdAt, &lastSeenAt, &rating)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperrors.ErrNotFound
@@ -356,29 +381,32 @@ func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]in
 		userID).Scan(&totalRides, &totalSpend)
 
 	rows, _ := s.db.Query(ctx, `
-		SELECT r.id, r.status, r.transport_type, r.agreed_fare, r.created_at
+		SELECT r.id, r.status, r.transport_type, r.agreed_fare,
+		       r.pickup_address, r.destination_address, r.created_at
 		FROM rides r WHERE r.customer_id=$1 ORDER BY r.created_at DESC LIMIT 10
 	`, userID)
 	var trips []map[string]interface{}
 	if rows != nil {
 		defer rows.Close()
 		for rows.Next() {
-			var rID, rStatus, rType string
+			var rID, rStatus, rType, pickupAddr, destAddr string
 			var fare *float64
 			var rAt time.Time
-			if err := rows.Scan(&rID, &rStatus, &rType, &fare, &rAt); err == nil {
+			if err := rows.Scan(&rID, &rStatus, &rType, &fare, &pickupAddr, &destAddr, &rAt); err == nil {
 				trips = append(trips, map[string]interface{}{
 					"id": rID, "status": rStatus, "transport_type": rType,
-					"agreed_fare": fare, "created_at": rAt,
+					"agreed_fare": fare, "pickup_address": pickupAddr,
+					"destination_address": destAddr, "created_at": rAt,
 				})
 			}
 		}
 	}
 
 	return map[string]interface{}{
-		"id": id, "phone": phone, "full_name": fullName,
+		"id": id, "phone": phone, "email": email, "full_name": fullName,
 		"role_state": roleState, "is_suspended": isSuspended,
 		"suspension_until": suspensionUntil, "created_at": createdAt,
+		"last_seen_at": lastSeenAt, "rating": rating,
 		"total_rides": totalRides, "total_spend": totalSpend,
 		"recent_trips": trips,
 	}, nil

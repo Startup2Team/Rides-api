@@ -105,6 +105,16 @@ func (h *Handler) ReinstateDriver(w http.ResponseWriter, r *http.Request) {
 
 // ── Customers ─────────────────────────────────────────────────────────────
 
+// GET /api/v1/admin/customers/overview
+func (h *Handler) CustomerOverview(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.CustomerOverview(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/customers
 func (h *Handler) ListCustomers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()

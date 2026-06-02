@@ -380,6 +380,7 @@ func main() {
 
 		// Customers
 		r.Get("/customers", adminH.ListCustomers)
+		r.Get("/customers/overview", adminH.CustomerOverview)
 		r.Get("/customers/{id}", adminH.GetCustomer)
 		r.Patch("/customers/{id}", adminH.UpdateCustomer)
 		r.Patch("/customers/{id}/ban", adminH.BanCustomer)
