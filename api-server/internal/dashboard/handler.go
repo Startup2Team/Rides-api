@@ -23,8 +23,8 @@ const maxRangeDays = 365
 //
 // Query params (period-aware fields only):
 //   - from, to  Exact range (YYYY-MM-DD). Both must be provided together.
-//                Window is half-open [from 00:00, to+1 00:00) so the "to" day
-//                is included.
+//     Window is half-open [from 00:00, to+1 00:00) so the "to" day
+//     is included.
 //   - days      Last N days (1..365). Default 1. Ignored if from/to are set.
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
