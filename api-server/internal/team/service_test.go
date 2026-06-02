@@ -19,25 +19,25 @@ import (
 // ── Mock repo ─────────────────────────────────────────────────────────────
 
 type mockRepo struct {
-	findByEmailFn    func(ctx context.Context, email string) (*AdminAccount, *string, error)
-	findByIDFn       func(ctx context.Context, id string) (*AdminAccount, *string, error)
+	findByEmailFn     func(ctx context.Context, email string) (*AdminAccount, *string, error)
+	findByIDFn        func(ctx context.Context, id string) (*AdminAccount, *string, error)
 	touchLastActiveFn func(ctx context.Context, id string)
-	listAdminsFn     func(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
-	inviteFn         func(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
-	updateRoleFn     func(ctx context.Context, id, roleID string) error
-	updateStatusFn   func(ctx context.Context, id, status string) error
-	deleteFn         func(ctx context.Context, id string) error
-	updateNameFn     func(ctx context.Context, id, name string) error
-	setPasswordFn    func(ctx context.Context, id, hash string) error
-	getTOTPSecretFn  func(ctx context.Context, id string) (*string, error)
-	saveTOTPFn       func(ctx context.Context, id, secret string) error
-	clearTOTPFn      func(ctx context.Context, id string) error
-	getBackupCodesFn func(ctx context.Context, id string) ([]BackupCode, error)
+	listAdminsFn      func(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
+	inviteFn          func(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
+	updateRoleFn      func(ctx context.Context, id, roleID string) error
+	updateStatusFn    func(ctx context.Context, id, status string) error
+	deleteFn          func(ctx context.Context, id string) error
+	updateNameFn      func(ctx context.Context, id, name string) error
+	setPasswordFn     func(ctx context.Context, id, hash string) error
+	getTOTPSecretFn   func(ctx context.Context, id string) (*string, error)
+	saveTOTPFn        func(ctx context.Context, id, secret string) error
+	clearTOTPFn       func(ctx context.Context, id string) error
+	getBackupCodesFn  func(ctx context.Context, id string) ([]BackupCode, error)
 	saveBackupCodesFn func(ctx context.Context, id string, codes []BackupCode) error
-	listRolesFn      func(ctx context.Context) ([]*Role, error)
-	createRoleFn     func(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
-	updateRoleByIDFn func(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
-	deleteRoleByIDFn func(ctx context.Context, roleID string) error
+	listRolesFn       func(ctx context.Context) ([]*Role, error)
+	createRoleFn      func(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
+	updateRoleByIDFn  func(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
+	deleteRoleByIDFn  func(ctx context.Context, roleID string) error
 }
 
 func (m *mockRepo) FindByEmail(ctx context.Context, email string) (*AdminAccount, *string, error) {
@@ -181,6 +181,12 @@ func testCfg() *config.Config {
 
 func newTestService(repo TeamRepo, rdb *goredis.Client) *Service {
 	return &Service{repo: repo, cfg: testCfg(), rdb: rdb}
+}
+
+func newTestServiceProduction(repo TeamRepo, rdb *goredis.Client) *Service {
+	cfg := testCfg()
+	cfg.Env = "production"
+	return &Service{repo: repo, cfg: cfg, rdb: rdb}
 }
 
 // ── Simple delegation methods ─────────────────────────────────────────────
@@ -446,7 +452,7 @@ func TestGenerate2FASetup_ReturnsSecretAndURL(t *testing.T) {
 // ── Enable2FA ─────────────────────────────────────────────────────────────
 
 func TestEnable2FA_InvalidTOTPCode(t *testing.T) {
-	svc := newTestService(&mockRepo{}, newTestRedis(t))
+	svc := newTestServiceProduction(&mockRepo{}, newTestRedis(t))
 	// "000000" will not match any valid TOTP for a fresh secret
 	_, err := svc.Enable2FA(context.Background(), "a1", "JBSWY3DPEHPK3PXP", "000000")
 	require.Error(t, err)

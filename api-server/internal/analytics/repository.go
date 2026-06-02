@@ -150,7 +150,7 @@ func (r *Repository) DriverPerformance(ctx context.Context, limit int) ([]map[st
 			"driver_id": id, "phone": phone, "full_name": fullName,
 			"transport_type": transportType,
 			"total_rides":    totalRides, "acceptance_rate": acceptanceRate,
-			"priority_tier":  priorityTier, "earnings_30d": earnings,
+			"priority_tier": priorityTier, "earnings_30d": earnings,
 		})
 	}
 	return result, nil

@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/workspace/ride-platform/internal/team"
 	mw "github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/internal/team"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -77,7 +77,10 @@ func (m *mockSvc) Disable2FA(ctx context.Context, adminID, password string) erro
 	return m.disable2FAFn(ctx, adminID, password)
 }
 func (m *mockSvc) ResetTOTP(ctx context.Context, adminID, code string) (string, string, []string, error) {
-	return m.resetTOTPFn(ctx, adminID, code)
+	if m.resetTOTPFn != nil {
+		return m.resetTOTPFn(ctx, adminID, code)
+	}
+	return "", "", nil, apperrors.New(http.StatusInternalServerError, "INTERNAL", "reset not configured")
 }
 func (m *mockSvc) ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, code string) (string, string, []string, error) {
 	if m.resetTOTPPreAuthFn != nil {
@@ -137,7 +140,7 @@ func jsonBody(t *testing.T, v interface{}) *bytes.Buffer {
 func decodeData(t *testing.T, rr *httptest.ResponseRecorder, target interface{}) {
 	t.Helper()
 	var env struct {
-		Data  json.RawMessage `json:"data"`
+		Data json.RawMessage `json:"data"`
 	}
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&env))
 	if target != nil && env.Data != nil {
@@ -842,7 +845,7 @@ func TestDeleteRoleByID_HappyPath(t *testing.T) {
 
 func TestUpdateAccount_HappyPath(t *testing.T) {
 	mock := &mockSvc{
-		updateNameFn:  func(_ context.Context, _, _ string) error { return nil },
+		updateNameFn: func(_ context.Context, _, _ string) error { return nil },
 		listAdminsFn: func(_ context.Context, _, _, _ string) ([]*team.AdminAccount, error) {
 			return []*team.AdminAccount{{ID: adminID, Name: "Old Name"}}, nil
 		},

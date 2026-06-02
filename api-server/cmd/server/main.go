@@ -368,10 +368,10 @@ func main() {
 		// Drivers
 		r.Get("/drivers", adminH.ListDrivers)
 		r.Post("/drivers", adminH.CreateDriver)
-			r.Get("/drivers/overview", adminH.DriverOverview)
+		r.Get("/drivers/overview", adminH.DriverOverview)
 		r.Get("/drivers/{id}", adminH.GetDriver)
 		r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
-			r.Patch("/drivers/{id}", adminH.UpdateDriver)
+		r.Patch("/drivers/{id}", adminH.UpdateDriver)
 		r.Delete("/drivers/{id}", adminH.DeleteDriver)
 		r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 		r.Post("/drivers/{id}/reject", adminH.RejectDriver)

@@ -577,8 +577,8 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 
 	return map[string]interface{}{
 		"id": id, "status": status, "transport_type": tType,
-		"customer": map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-		"driver":   map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate},
+		"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
+		"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate},
 		"pickup_address": pickupAddr, "destination_address": destAddr,
 		"agreed_fare": agreedFare, "initial_fare": initialFare, "distance_km": distKm,
 		"created_at": createdAt, "completed_at": completedAt,
@@ -587,7 +587,10 @@ func (s *Service) GetRide(ctx context.Context, rideID string) (map[string]interf
 }
 
 func (s *Service) LiveRidesStats(ctx context.Context) (map[string]interface{}, error) {
-	type row struct{ label string; val *int }
+	type row struct {
+		label string
+		val   *int
+	}
 	var total, searching, negotiating, driverEnRoute, onTrip int
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status IN ('SEARCHING','DRIVER_FOUND','DRIVER_EN_ROUTE','DRIVER_ARRIVED','NEGOTIATING','ON_TRIP')`).Scan(&total)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'SEARCHING'`).Scan(&searching)
@@ -678,12 +681,12 @@ func (s *Service) ListNegotiations(ctx context.Context, status, search string, l
 
 		result = append(result, map[string]interface{}{
 			"id": id, "ride_id": id, "status": negStatus,
-			"transport_type":       rType,
-			"pickup_address":       pickupAddr,
-			"destination_address":  destAddr,
-			"customer":             map[string]interface{}{"phone": custPhone, "name": custName},
-			"driver":               map[string]interface{}{"phone": driverPhone, "name": driverName, "vehicle_type": driverType, "plate": plate},
-			"initial_fare":         initialFare, "agreed_fare": agreedFare,
+			"transport_type":      rType,
+			"pickup_address":      pickupAddr,
+			"destination_address": destAddr,
+			"customer":            map[string]interface{}{"phone": custPhone, "name": custName},
+			"driver":              map[string]interface{}{"phone": driverPhone, "name": driverName, "vehicle_type": driverType, "plate": plate},
+			"initial_fare":        initialFare, "agreed_fare": agreedFare,
 			"uplift": uplift, "rounds": roundCount, "created_at": createdAt,
 		})
 	}
@@ -1057,12 +1060,12 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 	}
 
 	return map[string]interface{}{
-		"id":             profileID,
-		"user_id":        userID,
-		"transport_type": in.TransportType,
-		"vehicle_plate":  in.VehiclePlate,
+		"id":              profileID,
+		"user_id":         userID,
+		"transport_type":  in.TransportType,
+		"vehicle_plate":   in.VehiclePlate,
 		"approval_status": "PENDING_REVIEW",
-		"message":        "Driver registered. Pending KYC verification.",
+		"message":         "Driver registered. Pending KYC verification.",
 	}, nil
 }
 
