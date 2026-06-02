@@ -18,6 +18,16 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// GET /api/v1/admin/reports/stats
+func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.Stats(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/reports
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
@@ -108,6 +118,33 @@ func (h *Handler) ToggleScheduled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.NoContent(w)
+}
+
+// DELETE /api/v1/admin/reports/:id
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.Delete(r.Context(), id); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "deleted"})
+}
+
+// GET /api/v1/admin/reports/:id/download
+func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	rep, err := h.svc.GetByID(r.Context(), id)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	if rep.Status != "READY" {
+		respond.ErrorMsg(w, http.StatusConflict, "REPORT_NOT_READY", "report is not ready for download")
+		return
+	}
+	// In production this would redirect to a presigned S3 URL or stream the file.
+	// For now return the file path in JSON so the frontend can fetch it separately.
+	respond.OK(w, map[string]interface{}{"file_path": rep.FilePath, "format": rep.Format})
 }
 
 func parseIntDefault(s string, def int) int {

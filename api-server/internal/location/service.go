@@ -93,6 +93,43 @@ func (s *Service) GetRoute(ctx context.Context, pickupLat, pickupLng, destLat, d
 	return nil, nil
 }
 
+// GetRouteMetrics returns route distance/duration for fare calculations.
+// If no cached route exists for the given coordinate pair, it falls back to a
+// Haversine straight-line estimate (+20% road-factor) so the fare handler can
+// always return a result. The caller receives found=true in both cases; the
+// haversine path is flagged in the log for observability only.
+func (s *Service) GetRouteMetrics(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (float64, int, bool, error) {
+	result, err := s.GetRoute(ctx, pickupLat, pickupLng, destLat, destLng, vehicleType)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if result != nil {
+		return result.DistanceKM, result.DurationMinutes, true, nil
+	}
+
+	// No cached route — compute a Haversine estimate so the fare endpoint always
+	// responds. Apply a 1.25× road-factor (straight-line underestimates road
+	// distance by ~20–25% in Kigali's hilly terrain).
+	straightKM := geo.DistanceKM(
+		geo.Point{Lat: pickupLat, Lng: pickupLng},
+		geo.Point{Lat: destLat, Lng: destLng},
+	)
+	const roadFactor = 1.25
+	estimatedKM := straightKM * roadFactor
+	// Assume 30 km/h average speed in Kigali traffic + 3 min fixed overhead.
+	estimatedMin := int(estimatedKM/30*60) + 3
+	if estimatedMin < 1 {
+		estimatedMin = 1
+	}
+	s.log.Debug().
+		Float64("straight_km", straightKM).
+		Float64("estimated_km", estimatedKM).
+		Str("vehicle_type", vehicleType).
+		Msg("location: route cache miss — using haversine estimate")
+
+	return estimatedKM, estimatedMin, true, nil
+}
+
 // UpsertRoute stores a route result provided by the mobile app.
 func (s *Service) UpsertRoute(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string, distanceKM float64, durationMinutes int) (*RouteResult, error) {
 	originHash := Geohash6(pickupLat, pickupLng)
@@ -314,7 +351,7 @@ func (s *Service) SwitchMode(ctx context.Context, userID, mode string) error {
 		if err != nil {
 			return apperrors.New(403, "NO_DRIVER_PROFILE", "driver profile not found")
 		}
-		if status != "ACTIVE" {
+		if status != "APPROVED" {
 			return apperrors.New(403, "DRIVER_NOT_ACTIVE", "driver profile is not active")
 		}
 		if !policyAccepted {
@@ -350,7 +387,7 @@ func (s *Service) WarmLandmarkRoutes(ctx context.Context) {
 		if err != nil || len(landmarks) == 0 {
 			return
 		}
-		vehicleTypes := []string{"MOTO_BIKE", "CAB_TAXI", "LIGHT_HILUX", "HEAVY_FUSO"}
+		vehicleTypes := []string{"MOTO_BIKE", "CAB_TAXI", "LIGHT_HILUX", "HEAVY_FUSO", "TUK_TUK"}
 		limit := 5
 		if len(landmarks) < limit {
 			limit = len(landmarks)

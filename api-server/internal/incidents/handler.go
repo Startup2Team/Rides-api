@@ -18,6 +18,16 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// GET /api/v1/admin/incidents/stats
+func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.Stats(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/incidents
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	f := ListFilter{
@@ -120,6 +130,24 @@ func (h *Handler) Message(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.AddMessage(r.Context(), id, body.Message); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// PATCH /api/v1/admin/incidents/:id/status
+func (h *Handler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Status string `json:"status"`
+		Event  string `json:"event"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Status == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "status is required")
+		return
+	}
+	if err := h.svc.UpdateStatus(r.Context(), id, body.Status, body.Event); err != nil {
 		respond.Error(w, err)
 		return
 	}

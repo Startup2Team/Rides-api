@@ -81,6 +81,11 @@ func (r *Repository) UpdateStatus(ctx context.Context, id, status string) error 
 	return err
 }
 
+func (r *Repository) Delete(ctx context.Context, id string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM inbox_messages WHERE id = $1`, id)
+	return err
+}
+
 func buildWhere(f ListFilter) (string, []interface{}) {
 	var clauses []string
 	var args []interface{}
@@ -106,4 +111,14 @@ func buildWhere(f ListFilter) (string, []interface{}) {
 		return "", args
 	}
 	return "WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func (r *Repository) Stats(ctx context.Context) (map[string]interface{}, error) {
+	var newCount, replied7d, spam int
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM inbox_messages WHERE status='NEW'`).Scan(&newCount)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM inbox_messages WHERE status='REPLIED' AND updated_at>=NOW()-INTERVAL '7 days'`).Scan(&replied7d)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM inbox_messages WHERE status='SPAM'`).Scan(&spam)
+	return map[string]interface{}{
+		"new": newCount, "replied_7d": replied7d, "spam": spam,
+	}, nil
 }

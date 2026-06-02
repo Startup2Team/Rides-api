@@ -166,3 +166,13 @@ func buildWhere(f ListFilter) (string, []interface{}) {
 	}
 	return "WHERE " + strings.Join(clauses, " AND "), args
 }
+
+func (r *Repository) Stats(ctx context.Context) (map[string]interface{}, error) {
+	var open, pending, resolvedToday int
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM support_tickets WHERE status='OPEN'`).Scan(&open)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM support_tickets WHERE status='PENDING'`).Scan(&pending)
+	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM support_tickets WHERE status='RESOLVED' AND updated_at>=CURRENT_DATE`).Scan(&resolvedToday)
+	return map[string]interface{}{
+		"open": open, "pending": pending, "resolved_today": resolvedToday,
+	}, nil
+}

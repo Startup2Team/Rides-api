@@ -18,6 +18,16 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// GET /api/v1/admin/support/tickets/stats
+func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.Stats(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/tickets
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	f := ListFilter{
@@ -119,6 +129,32 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Resolve(r.Context(), id); err != nil {
 		respond.Error(w, err)
 		return
+	}
+	respond.NoContent(w)
+}
+
+// PATCH /api/v1/admin/support/tickets/:id  — partial update (status, priority, etc.)
+func (h *Handler) Patch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Status   string `json:"status"`
+		Priority string `json:"priority"`
+		AdminID  string `json:"admin_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
+		return
+	}
+	if body.Status == "RESOLVED" {
+		if err := h.svc.Resolve(r.Context(), id); err != nil {
+			respond.Error(w, err)
+			return
+		}
+	} else if body.AdminID != "" {
+		if err := h.svc.Assign(r.Context(), id, body.AdminID); err != nil {
+			respond.Error(w, err)
+			return
+		}
 	}
 	respond.NoContent(w)
 }

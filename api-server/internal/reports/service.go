@@ -63,3 +63,22 @@ func (s *Service) CreateScheduled(ctx context.Context, template, format, frequen
 func (s *Service) ToggleScheduled(ctx context.Context, id string) error {
 	return s.repo.ToggleScheduled(ctx, id)
 }
+
+func (s *Service) Delete(ctx context.Context, id string) error {
+	if _, err := s.repo.FindByID(ctx, id); err != nil {
+		return apperrors.ErrNotFound
+	}
+	return s.repo.Delete(ctx, id)
+}
+
+func (s *Service) Stats(ctx context.Context) (map[string]interface{}, error) {
+	return s.repo.Stats(ctx)
+}
+
+func (s *Service) GetFilePath(ctx context.Context, id string) (string, error) {
+	fp, err := s.repo.GetFilePath(ctx, id)
+	if err != nil {
+		return "", apperrors.ErrNotFound
+	}
+	return fp, nil
+}

@@ -127,6 +127,11 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 			if tried[c.profileID] {
 				continue
 			}
+			// Skip seeded/offline drivers with no live socket — otherwise each offer waits
+			// for the full match timeout before trying the next candidate.
+			if !e.hub.IsDriverConnected(c.userID) {
+				continue
+			}
 			tried[c.profileID] = true
 
 			accepted, ok := e.offerToDriver(ctx, rideID, c)
@@ -278,13 +283,27 @@ func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate)
 		_ = e.notify.SendRideRequest(ctx, *c.fcmToken, rideID, "", "", c.distanceM)
 	}
 
+	payload := map[string]interface{}{
+		"ride_id":    rideID,
+		"distance_m": c.distanceM,
+	}
+	if ridePayload, rpErr := e.rideRepo.GetRideRequestPayload(ctx, rideID); rpErr == nil && ridePayload != nil {
+		payload["transport_type"] = ridePayload.TransportType
+		payload["distance_km"] = ridePayload.DistanceKM
+		payload["pickup_lat"] = ridePayload.PickupLat
+		payload["pickup_lng"] = ridePayload.PickupLng
+		payload["pickup_address"] = ridePayload.PickupAddress
+		payload["dest_lat"] = ridePayload.DestinationLat
+		payload["dest_lng"] = ridePayload.DestinationLng
+		payload["dest_address"] = ridePayload.DestinationAddress
+		payload["suggested_fare"] = ridePayload.SuggestedFare
+		payload["customer_name"] = ridePayload.CustomerName
+		payload["customer_phone"] = ridePayload.CustomerPhone
+	}
 	e.hub.SendToDriver(c.userID, tracking.Message{
-		Type:   "ride_request",
-		RideID: rideID,
-		Payload: map[string]interface{}{
-			"ride_id":    rideID,
-			"distance_m": c.distanceM,
-		},
+		Type:    "ride_request",
+		RideID:  rideID,
+		Payload: payload,
 	})
 
 	_ = e.rideRepo.AppendEvent(ctx, rideID, "ride.request_sent", "SYSTEM", c.profileID, map[string]interface{}{
@@ -329,7 +348,31 @@ func (e *Engine) onAccepted(ctx context.Context, rideID string, c *candidate) {
 	// Start 5-minute negotiation timeout
 	e.rideSvc.StartNegotiationTimeout(rideID)
 
+	e.notifyCustomerDriverMatched(ctx, rideID, c)
+
 	e.log.Info().Str("ride_id", rideID).Str("driver_id", c.profileID).Msg("matching: driver accepted")
+}
+
+func (e *Engine) notifyCustomerDriverMatched(ctx context.Context, rideID string, c *candidate) {
+	payload := map[string]interface{}{
+		"driver_id":  c.profileID,
+		"distance_m": c.distanceM,
+	}
+	if info, err := e.driverRepo.GetMatchNotificationInfo(ctx, c.profileID); err == nil && info != nil {
+		payload["driver_name"] = info.FullName
+		payload["driver_phone"] = info.Phone
+		payload["vehicle_plate"] = info.VehiclePlate
+		payload["transport_type"] = info.TransportType
+		if info.Lat != 0 || info.Lng != 0 {
+			payload["lat"] = info.Lat
+			payload["lng"] = info.Lng
+		}
+	}
+	e.hub.SendToCustomer(rideID, tracking.Message{
+		Type:    "driver_matched",
+		RideID:  rideID,
+		Payload: payload,
+	})
 }
 
 func (e *Engine) onDeclined(ctx context.Context, rideID string, c *candidate) {

@@ -46,3 +46,21 @@ func (s *Service) Archive(ctx context.Context, id string) error {
 func (s *Service) MarkSpam(ctx context.Context, id string) error {
 	return s.repo.UpdateStatus(ctx, id, "SPAM")
 }
+
+func (s *Service) UpdateStatus(ctx context.Context, id, status string) error {
+	if _, err := s.repo.FindByID(ctx, id); err != nil {
+		return apperrors.ErrNotFound
+	}
+	return s.repo.UpdateStatus(ctx, id, status)
+}
+
+func (s *Service) Delete(ctx context.Context, id string) error {
+	if _, err := s.repo.FindByID(ctx, id); err != nil {
+		return apperrors.ErrNotFound
+	}
+	return s.repo.Delete(ctx, id)
+}
+
+func (s *Service) Stats(ctx context.Context) (map[string]interface{}, error) {
+	return s.repo.Stats(ctx)
+}
