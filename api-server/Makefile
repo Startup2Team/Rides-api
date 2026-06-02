@@ -64,3 +64,4 @@ smoke:
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
+
