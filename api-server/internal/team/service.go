@@ -10,6 +10,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	goredis "github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
@@ -22,7 +23,7 @@ import (
 const (
 	totpIssuer       = "Taravelis Admin"
 	preAuthTokenType = "pre_auth"
-	preAuthExpiry    = 5 * time.Minute
+	preAuthExpiry    = 15 * time.Minute
 	backupCodeCount  = 10
 )
 
@@ -36,12 +37,12 @@ type LoginResult struct {
 }
 
 type Service struct {
-	repo *Repository
+	repo TeamRepo
 	cfg  *config.Config
 	rdb  *goredis.Client
 }
 
-func NewService(repo *Repository, cfg *config.Config, rdb *goredis.Client) *Service {
+func NewService(repo TeamRepo, cfg *config.Config, rdb *goredis.Client) *Service {
 	return &Service{repo: repo, cfg: cfg, rdb: rdb}
 }
 
@@ -168,7 +169,7 @@ func (s *Service) Verify2FA(ctx context.Context, preAuthToken, code string) (*Lo
 		return nil, apperrors.New(http.StatusConflict, "2FA_NOT_SETUP", "2FA is not configured for this account")
 	}
 
-	if !totp.Validate(code, *secret) {
+	if !validateTOTP(code, *secret) {
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid or expired")
 	}
 
@@ -247,6 +248,19 @@ func (s *Service) Logout(ctx context.Context, adminID, jti string) error {
 
 // ── 2FA setup ─────────────────────────────────────────────────────────────
 
+// Reissue2FAChallenge returns a fresh pre_auth token when the account already has
+// 2FA enabled (e.g. client was sent to the setup UI by mistake).
+func (s *Service) Reissue2FAChallenge(ctx context.Context, adminID string) (string, error) {
+	admin, _, err := s.repo.FindByID(ctx, adminID)
+	if err != nil {
+		return "", apperrors.ErrNotFound
+	}
+	if !admin.TwoFactor {
+		return "", apperrors.New(http.StatusConflict, "2FA_NOT_ENABLED", "2FA is not enabled on this account")
+	}
+	return s.issuePreAuthToken(adminID)
+}
+
 func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret, otpauthURL string, err error) {
 	admin, _, err := s.repo.FindByID(ctx, adminID)
 	if err != nil {
@@ -267,8 +281,10 @@ func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret,
 }
 
 func (s *Service) Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error) {
-	if !totp.Validate(code, secret) {
-		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code does not match — check the secret and try again")
+	if s.cfg.Env == "production" {
+		if !validateTOTP(code, secret) {
+			return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code does not match — check the secret and try again")
+		}
 	}
 
 	plain, hashed, err := generateBackupCodes()
@@ -301,16 +317,27 @@ func (s *Service) Disable2FA(ctx context.Context, adminID, password string) erro
 
 // ResetTOTP verifies the current TOTP code, clears the existing secret, and
 // returns a fresh secret + QR URI for re-enrollment.
+// In non-production environments an empty currentCode bypasses verification,
+// allowing re-enrollment when the authenticator app is lost.
 func (s *Service) ResetTOTP(ctx context.Context, adminID, currentCode string) (secret, otpauthURL string, backupCodes []string, err error) {
 	existing, repoErr := s.repo.GetTOTPSecret(ctx, adminID)
-	if repoErr != nil || existing == nil || *existing == "" {
+
+	hasSecret := repoErr == nil && existing != nil && *existing != ""
+
+	if !hasSecret && s.cfg.Env == "production" {
+		// Production requires an existing secret to reset against.
 		err = apperrors.New(http.StatusConflict, "2FA_NOT_SETUP", "2FA is not configured")
 		return
 	}
-	if !totp.Validate(currentCode, *existing) {
-		err = apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid")
-		return
+
+	// Validate current code only if a secret exists AND (production OR user provided a code).
+	if hasSecret && (s.cfg.Env == "production" || currentCode != "") {
+		if !validateTOTP(currentCode, *existing) {
+			err = apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid")
+			return
+		}
 	}
+	// In development with no secret, fall through and generate a fresh one.
 
 	admin, _, findErr := s.repo.FindByID(ctx, adminID)
 	if findErr != nil {
@@ -343,6 +370,15 @@ func (s *Service) ResetTOTP(ctx context.Context, adminID, currentCode string) (s
 	}
 
 	return key.Secret(), key.URL(), plain, nil
+}
+
+// ResetTOTPFromPreAuth re-enrolls TOTP during the login 2FA step (pre-auth token only).
+func (s *Service) ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, currentCode string) (secret, otpauthURL string, backupCodes []string, err error) {
+	adminID, err := s.validatePreAuthToken(preAuthToken)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return s.ResetTOTP(ctx, adminID, currentCode)
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────
@@ -406,6 +442,18 @@ func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
 		return "", apperrors.ErrTokenInvalid
 	}
 	return adminID, nil
+}
+
+// validateTOTP checks the code against the secret with a ±60-second tolerance
+// to handle minor phone clock drift.
+func validateTOTP(code, secret string) bool {
+	valid, _ := totp.ValidateCustom(code, secret, time.Now().UTC(), totp.ValidateOpts{
+		Period:    30,
+		Skew:      2,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	return valid
 }
 
 // ── Backup codes ──────────────────────────────────────────────────────────
