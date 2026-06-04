@@ -1,4 +1,8 @@
-SHELL := /bin/sh
+SHELL := /bin/bash
+
+# Auto-detect Go: use system go, or fall back to the local SDK install.
+GO := $(shell command -v go 2>/dev/null || echo /home/salomon/sdk/go1.26.3/bin/go)
+export PATH := $(dir $(GO)):$(PATH)
 
 .PHONY: help env deps db-up db-down dev docker-up docker-down test coverage coverage-html swagger-check smoke fmt
 
@@ -24,7 +28,7 @@ env:
 	@echo ".env is ready"
 
 deps:
-	go mod download
+	$(GO) mod download
 
 db-up:
 	docker compose up -d postgres redis minio
@@ -33,7 +37,7 @@ db-down:
 	docker compose down
 
 dev: env
-	go run ./cmd/server
+	$(GO) run ./cmd/server
 
 docker-up: env
 	docker compose up --build
@@ -42,14 +46,14 @@ docker-down:
 	docker compose down
 
 test:
-	go test ./...
+	$(GO) test ./...
 
 coverage:
-	go test ./... -coverprofile=coverage.out
-	go tool cover -func=coverage.out | tail -n 1
+	$(GO) test ./... -coverprofile=coverage.out
+	$(GO) tool cover -func=coverage.out | tail -n 1
 
 coverage-html: coverage
-	go tool cover -html=coverage.out -o coverage.html
+	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "coverage.html generated"
 
 swagger-check:
@@ -63,7 +67,7 @@ smoke:
 	@echo "Smoke checks passed"
 
 fmt:
-	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
+	$(GO)fmt -w $$(find . -name '*.go' -not -path './vendor/*')
 
 lint-check:
 	@unformatted=$$(gofmt -l .); if [ -n "$$unformatted" ]; then echo "$$unformatted"; exit 1; fi
