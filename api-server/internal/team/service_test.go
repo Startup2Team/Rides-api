@@ -206,11 +206,14 @@ func TestListAdmins_Delegates(t *testing.T) {
 func TestInvite_Delegates(t *testing.T) {
 	repo := &mockRepo{
 		inviteFn: func(_ context.Context, name, email, roleID string) (*AdminAccount, error) {
+		_ = name
+		_ = email
+		_ = roleID
 			return &AdminAccount{ID: "new", Email: email}, nil
 		},
 	}
 	svc := newTestService(repo, newTestRedis(t))
-	a, err := svc.Invite(context.Background(), "Test", "t@test.com", "role-id")
+	a, err := svc.Invite(context.Background(), "Test", "t@test.com", "role-id", "")
 	require.NoError(t, err)
 	assert.Equal(t, "t@test.com", a.Email)
 }

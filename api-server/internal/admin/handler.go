@@ -572,7 +572,7 @@ func paginate(r *http.Request) (int, int) {
 	limit := 20
 	offset := 0
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, _ := strconv.Atoi(l); n > 0 && n <= 100 {
+		if n, _ := strconv.Atoi(l); n > 0 && n <= 500 {
 			limit = n
 		}
 	}

@@ -208,7 +208,12 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 		SELECT dp.id, dp.user_id, u.phone_number, u.full_name,
 		       dp.transport_type, dp.vehicle_plate, dp.approval_status,
 		       dp.priority_tier, dp.total_rides, dp.acceptance_rate,
-		       dp.is_online, dp.city, dp.created_at
+		       dp.is_online, dp.city, dp.created_at,
+		       EXISTS(
+		           SELECT 1 FROM rides r
+		           WHERE r.driver_id = dp.id
+		           AND r.status IN ('CONFIRMED','DRIVER_EN_ROUTE','DRIVER_ARRIVED','IN_PROGRESS')
+		       ) AS on_trip
 		%s %s ORDER BY %s LIMIT $%d OFFSET $%d
 	`, base, where, orderBy, n, n+1), args...)
 	if err != nil {
@@ -223,10 +228,10 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 		var city *string
 		var priorityTier, totalRides int
 		var acceptanceRate float64
-		var isOnline bool
+		var isOnline, onTrip bool
 		var createdAt time.Time
 		if err := rows.Scan(&id, &userID, &phone, &fullName, &transportType, &plate,
-			&approvalStatus, &priorityTier, &totalRides, &acceptanceRate, &isOnline, &city, &createdAt); err != nil {
+			&approvalStatus, &priorityTier, &totalRides, &acceptanceRate, &isOnline, &city, &createdAt, &onTrip); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, map[string]interface{}{
@@ -234,7 +239,7 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 			"transport_type": transportType, "vehicle_plate": plate,
 			"approval_status": approvalStatus, "priority_tier": priorityTier,
 			"total_rides": totalRides, "acceptance_rate": acceptanceRate,
-			"is_online": isOnline, "city": city, "created_at": createdAt,
+			"is_online": isOnline, "on_trip": onTrip, "city": city, "created_at": createdAt,
 		})
 	}
 	return result, total, nil

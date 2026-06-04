@@ -238,15 +238,20 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/team/invite
 func (h *Handler) Invite(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name   string `json:"name"`
-		Email  string `json:"email"`
-		RoleID string `json:"role_id"`
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		RoleID   string `json:"role_id"`
+		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Email == "" || body.RoleID == "" {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "email and role_id are required")
 		return
 	}
-	admin, err := h.svc.Invite(r.Context(), body.Name, body.Email, body.RoleID)
+	if body.Password != "" && len(body.Password) < 8 {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "password must be at least 8 characters")
+		return
+	}
+	admin, err := h.svc.Invite(r.Context(), body.Name, body.Email, body.RoleID, body.Password)
 	if err != nil {
 		respond.Error(w, err)
 		return
