@@ -113,6 +113,14 @@ func buildWhere(f ListFilter) (string, []interface{}) {
 	return "WHERE " + strings.Join(clauses, " AND "), args
 }
 
+func (r *Repository) Create(ctx context.Context, fromName, fromEmail, category, subject, body string) error {
+	_, err := r.db.Exec(ctx,
+		`INSERT INTO inbox_messages (from_name, from_email, category, subject, body, status)
+		 VALUES ($1, $2, $3, $4, $5, 'NEW')`,
+		fromName, fromEmail, category, subject, body)
+	return err
+}
+
 func (r *Repository) Stats(ctx context.Context) (map[string]interface{}, error) {
 	var newCount, replied7d, spam int
 	_ = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM inbox_messages WHERE status='NEW'`).Scan(&newCount)
