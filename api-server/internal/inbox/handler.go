@@ -18,6 +18,41 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// POST /api/v1/contact  — public, no auth required.
+func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		Phone    string `json:"phone"`
+		Category string `json:"category"`
+		Subject  string `json:"subject"`
+		Message  string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Name == "" || body.Email == "" || body.Subject == "" || body.Message == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "name, email, subject, and message are required")
+		return
+	}
+	if err := h.svc.Submit(r.Context(), body.Name, body.Email, body.Phone, body.Category, body.Subject, body.Message); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"message": "Message received"})
+}
+
+// GET /api/v1/admin/inbox/stats
+func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.Stats(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 // GET /api/v1/admin/inbox
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	f := ListFilter{
