@@ -2,6 +2,7 @@ package respond
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -42,10 +43,7 @@ func NoContent(w http.ResponseWriter) {
 // Error writes an error JSON response. Accepts *AppError or falls back to 500.
 func Error(w http.ResponseWriter, err error) {
 	var ae *apperrors.AppError
-	var ok bool
-
-	ae, ok = err.(*apperrors.AppError)
-	if !ok {
+	if !errors.As(err, &ae) {
 		ae = apperrors.ErrInternal
 	}
 
