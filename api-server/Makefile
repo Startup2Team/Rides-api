@@ -68,6 +68,7 @@ smoke:
 
 fmt:
 	$(GO)fmt -w $$(find . -name '*.go' -not -path './vendor/*')
+	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
 
 lint-check:
 	@unformatted=$$(gofmt -l .); if [ -n "$$unformatted" ]; then echo "$$unformatted"; exit 1; fi
