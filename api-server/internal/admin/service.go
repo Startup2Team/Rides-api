@@ -9,11 +9,20 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
+
+// DBTX is the minimal database interface the Service requires.
+// *pgxpool.Pool satisfies this interface automatically.
+type DBTX interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
 
 // PackagesService grants the free-trial credit when a driver is first approved.
 type PackagesService interface {
@@ -22,12 +31,12 @@ type PackagesService interface {
 
 // Service handles admin business logic.
 type Service struct {
-	db       *pgxpool.Pool
+	db       DBTX
 	log      zerolog.Logger
 	packages PackagesService
 }
 
-func NewService(db *pgxpool.Pool, log zerolog.Logger) *Service {
+func NewService(db DBTX, log zerolog.Logger) *Service {
 	return &Service{db: db, log: log}
 }
 
