@@ -166,6 +166,9 @@ func (m *mockSvc) ListLiveRides(ctx context.Context, status, district, search st
 func (m *mockSvc) GetLiveRide(ctx context.Context, rideID string) (map[string]interface{}, error) {
 	return m.getLiveRideFn(ctx, rideID)
 }
+func (m *mockSvc) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error {
+	return nil
+}
 func (m *mockSvc) InterveneRide(ctx context.Context, rideID, action, reason string) error {
 	return m.interveneRideFn(ctx, rideID, action, reason)
 }
