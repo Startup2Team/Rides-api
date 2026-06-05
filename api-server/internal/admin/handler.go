@@ -281,22 +281,24 @@ func (h *Handler) DeviceCollisions(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/drivers
 func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		FullName       string `json:"full_name"`
-		Phone          string `json:"phone"`
-		TransportType  string `json:"transport_type"`
-		VehiclePlate   string `json:"vehicle_plate"`
-		LicenseNumber  string `json:"license_number"`
-		DateOfBirth    string `json:"date_of_birth"`
-		Province       string `json:"province"`
-		District       string `json:"district"`
-		Sector         string `json:"sector"`
-		Cell           string `json:"cell"`
-		Village        string `json:"village"`
-		City           string `json:"city"`
-		MomoProvider   string `json:"momo_provider"`
-		MomoPayCode    string `json:"momo_pay_code"`
-		PassengerSeats *int   `json:"passenger_seats"`
-		LoadCapacityKg *int   `json:"load_capacity_kg"`
+		FullName        string `json:"full_name"`
+		Phone           string `json:"phone"`
+		TransportType   string `json:"transport_type"`
+		VehiclePlate    string `json:"vehicle_plate"`
+		LicenseNumber   string `json:"license_number"`
+		DateOfBirth     string `json:"date_of_birth"`
+		Province        string `json:"province"`
+		District        string `json:"district"`
+		Sector          string `json:"sector"`
+		Cell            string `json:"cell"`
+		Village         string `json:"village"`
+		City            string `json:"city"`
+		MomoProvider    string `json:"momo_provider"`
+		MomoPayCode     string `json:"momo_pay_code"`
+		MerchantPayCode string `json:"merchant_pay_code"`
+		ProfileImageURL string `json:"profile_image_url"`
+		PassengerSeats  *int   `json:"passenger_seats"`
+		LoadCapacityKg  *int   `json:"load_capacity_kg"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
@@ -313,6 +315,7 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		Province: body.Province, District: body.District, Sector: body.Sector,
 		Cell: body.Cell, Village: body.Village, City: body.City,
 		MomoProvider: body.MomoProvider, MomoPayCode: body.MomoPayCode,
+		MerchantPayCode: body.MerchantPayCode, ProfileImageURL: body.ProfileImageURL,
 		PassengerSeats: body.PassengerSeats, LoadCapacityKg: body.LoadCapacityKg,
 	})
 	if err != nil {
@@ -566,13 +569,31 @@ func (h *Handler) DisbursePayouts(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, map[string]interface{}{"disbursed": count, "totalAmount": total})
 }
 
+// POST /api/v1/admin/drivers/:id/documents
+func (h *Handler) UploadDriverDocument(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	var body struct {
+		DocumentType string `json:"document_type"`
+		FileURL      string `json:"file_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
+		return
+	}
+	if err := h.svc.UpsertDriverDocument(r.Context(), profileID, body.DocumentType, body.FileURL); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 func paginate(r *http.Request) (int, int) {
 	limit := 20
 	offset := 0
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, _ := strconv.Atoi(l); n > 0 && n <= 100 {
+		if n, _ := strconv.Atoi(l); n > 0 && n <= 500 {
 			limit = n
 		}
 	}

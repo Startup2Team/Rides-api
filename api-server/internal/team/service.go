@@ -52,8 +52,18 @@ func (s *Service) ListAdmins(ctx context.Context, status, roleID, search string)
 	return s.repo.ListAdmins(ctx, status, roleID, search)
 }
 
-func (s *Service) Invite(ctx context.Context, name, email, roleID string) (*AdminAccount, error) {
-	return s.repo.Invite(ctx, name, email, roleID)
+func (s *Service) Invite(ctx context.Context, name, email, roleID, password string) (*AdminAccount, error) {
+	admin, err := s.repo.Invite(ctx, name, email, roleID)
+	if err != nil {
+		return nil, err
+	}
+	if password != "" {
+		if err := s.SetPassword(ctx, admin.ID, password); err != nil {
+			return nil, err
+		}
+		admin.Status = "ACTIVE"
+	}
+	return admin, nil
 }
 
 func (s *Service) UpdateRole(ctx context.Context, id, roleID string) error {

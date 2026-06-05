@@ -32,7 +32,7 @@ type mockSvc struct {
 	resetTOTPFn        func(ctx context.Context, adminID, currentCode string) (string, string, []string, error)
 	resetTOTPPreAuthFn func(ctx context.Context, preAuthToken, currentCode string) (string, string, []string, error)
 	listAdminsFn       func(ctx context.Context, status, roleID, search string) ([]*team.AdminAccount, error)
-	inviteFn           func(ctx context.Context, name, email, roleID string) (*team.AdminAccount, error)
+	inviteFn           func(ctx context.Context, name, email, roleID, password string) (*team.AdminAccount, error)
 	listRolesFn        func(ctx context.Context) ([]*team.Role, error)
 	createRoleFn       func(ctx context.Context, name, description string, permissions interface{}) (*team.Role, error)
 	updateRoleByIDFn   func(ctx context.Context, roleID, name, description string, permissions interface{}) (*team.Role, error)
@@ -91,8 +91,8 @@ func (m *mockSvc) ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, code s
 func (m *mockSvc) ListAdmins(ctx context.Context, status, roleID, search string) ([]*team.AdminAccount, error) {
 	return m.listAdminsFn(ctx, status, roleID, search)
 }
-func (m *mockSvc) Invite(ctx context.Context, name, email, roleID string) (*team.AdminAccount, error) {
-	return m.inviteFn(ctx, name, email, roleID)
+func (m *mockSvc) Invite(ctx context.Context, name, email, roleID, password string) (*team.AdminAccount, error) {
+	return m.inviteFn(ctx, name, email, roleID, password)
 }
 func (m *mockSvc) ListRoles(ctx context.Context) ([]*team.Role, error) {
 	return m.listRolesFn(ctx)
@@ -625,7 +625,7 @@ func TestListAdmins_NoAuth(t *testing.T) {
 
 func TestInvite_HappyPath(t *testing.T) {
 	mock := &mockSvc{
-		inviteFn: func(_ context.Context, name, email, roleID string) (*team.AdminAccount, error) {
+		inviteFn: func(_ context.Context, name, email, roleID, _ string) (*team.AdminAccount, error) {
 			return &team.AdminAccount{ID: "new-admin", Email: email}, nil
 		},
 	}
@@ -642,7 +642,7 @@ func TestInvite_HappyPath(t *testing.T) {
 
 func TestInvite_DuplicateEmail(t *testing.T) {
 	mock := &mockSvc{
-		inviteFn: func(_ context.Context, _, _, _ string) (*team.AdminAccount, error) {
+		inviteFn: func(_ context.Context, _, _, _, _ string) (*team.AdminAccount, error) {
 			return nil, apperrors.ErrConflict
 		},
 	}

@@ -219,6 +219,7 @@ func main() {
 
 	// ── Public contact form ───────────────────────────────────────────────────
 	r.Post(apiV1Prefix+"/contact", inboxH.Submit)
+	r.Get(apiV1Prefix+"/media/documents/{filename}", adminH.ServeDriverMedia)
 
 	// ── Public auth ───────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/auth", func(r chi.Router) {
@@ -382,6 +383,11 @@ func main() {
 		r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
 		r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 		r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
+		r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)
+		r.Post("/uploads/file", adminH.UploadDriverFile)
+		if uploadH != nil {
+			r.Post("/uploads/presigned-url", uploadH.PresignedURL)
+		}
 
 		// Customers
 		r.Get("/customers", adminH.ListCustomers)
@@ -522,12 +528,6 @@ func main() {
 		r.Post("/team/members/{id}/remove", teamH.Remove)
 		r.Post("/team/members/{id}/set-password", teamH.SetPassword)
 	})
-
-	// ── Dev-only endpoints (never registered in production) ──────────────────
-	if cfg.Env != "production" {
-		seedH := admin.NewSeedHandler(db, rdb, log)
-		r.Post(apiV1Prefix+"/admin/dev/seed-drivers", seedH.SeedDrivers)
-	}
 
 	// ── WebSocket ─────────────────────────────────────────────────────────────
 	// Mobile uses EXPO_PUBLIC_WS_BASE_URL = ws://host/api/v1, so paths must be

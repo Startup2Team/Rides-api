@@ -262,7 +262,7 @@ func TestRejectDriver_Success(t *testing.T) {
 	svc := newTestService(&mockDB{
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			called = true
-			return pgconn.CommandTag{}, nil
+			return pgconn.NewCommandTag("UPDATE 1"), nil
 		},
 	})
 	err := svc.RejectDriver(context.Background(), "profile-xyz", "admin-uuid", "incomplete docs")

@@ -16,7 +16,7 @@ type TeamService interface {
 	ResetTOTP(ctx context.Context, adminID, currentCode string) (secret, qr string, backupCodes []string, err error)
 	ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, currentCode string) (secret, qr string, backupCodes []string, err error)
 	ListAdmins(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
-	Invite(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
+	Invite(ctx context.Context, name, email, roleID, password string) (*AdminAccount, error)
 	ListRoles(ctx context.Context) ([]*Role, error)
 	CreateRole(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
 	UpdateRoleByID(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
