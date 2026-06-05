@@ -146,6 +146,11 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 		_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
 	}
 
+	// Reject suspended accounts before issuing tokens.
+	if user.IsSuspended {
+		return nil, nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
+	}
+
 	// Log device session
 	_ = s.repo.LogDeviceSession(ctx, user.ID, deviceID, platform, appVersion, ipAddr)
 
@@ -193,6 +198,13 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 		return nil, err
 	}
 
+	// Suspended users cannot refresh — catches suspension that happened after last login.
+	if user.IsSuspended {
+		// Revoke the session so further refresh attempts also fail immediately.
+		_ = s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err()
+		return nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
+	}
+
 	return s.issueTokenPair(ctx, user)
 }
 
@@ -218,9 +230,10 @@ func (s *Service) issueTokenPair(ctx context.Context, user *User) (*TokenPair, e
 	refreshJTI := uuid.New().String()
 
 	accessClaims := &middleware.Claims{
-		UserID:    user.ID,
-		RoleState: user.RoleState,
-		TokenType: "access",
+		UserID:      user.ID,
+		RoleState:   user.RoleState,
+		TokenType:   "access",
+		IsSuspended: user.IsSuspended,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        accessJTI,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

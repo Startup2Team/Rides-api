@@ -24,6 +24,11 @@ type DBTX interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
+// BonusService grants the registration bonus when a driver is approved.
+type BonusService interface {
+	GrantRegistrationBonus(ctx context.Context, driverID, vehicleTypeID string) (any, error)
+}
+
 // PackagesService grants the free-trial credit when a driver is first approved.
 type PackagesService interface {
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
@@ -34,15 +39,15 @@ type Service struct {
 	db       DBTX
 	log      zerolog.Logger
 	packages PackagesService
+	bonus    BonusService
 }
 
 func NewService(db DBTX, log zerolog.Logger) *Service {
 	return &Service{db: db, log: log}
 }
 
-func (s *Service) SetPackagesService(svc PackagesService) {
-	s.packages = svc
-}
+func (s *Service) SetPackagesService(svc PackagesService) { s.packages = svc }
+func (s *Service) SetBonusService(svc BonusService)       { s.bonus = svc }
 
 // ── Driver management ─────────────────────────────────────────────────────
 
@@ -90,6 +95,18 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 				Str("driver_user_id", driverUserID).
 				Str("transport_type", transportType).
 				Msg("admin: free trial grant failed after approval")
+		}
+	}
+
+	// Grant the 30-ride registration bonus (separate from the free-trial package credit).
+	if s.bonus != nil {
+		// Look up the vehicle_type_id for the transport_type code.
+		var vehicleTypeID string
+		_ = s.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, transportType).Scan(&vehicleTypeID)
+		if vehicleTypeID != "" {
+			if _, err := s.bonus.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID); err != nil {
+				s.log.Warn().Err(err).Str("driver_user_id", driverUserID).Msg("admin: registration bonus grant failed")
+			}
 		}
 	}
 	return nil

@@ -25,6 +25,7 @@ import (
 	"github.com/workspace/ride-platform/internal/admin"
 	"github.com/workspace/ride-platform/internal/analytics"
 	"github.com/workspace/ride-platform/internal/auth"
+	"github.com/workspace/ride-platform/internal/bonus"
 	"github.com/workspace/ride-platform/internal/customer"
 	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
@@ -125,6 +126,7 @@ func main() {
 	fareRepo := fare.NewRepository(db)
 	pkgRepo := packages.NewRepository(db)
 	walletRepo := wallet.NewRepository(db)
+	bonusRepo := bonus.NewRepository(db)
 
 	// ── New module repositories ───────────────────────────────────────────────
 	incidentRepo := incidents.NewRepository(db)
@@ -141,6 +143,7 @@ func main() {
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
 	driverSvc := driver.NewService(driverRepo, rdb, anaSvc, cfg, log)
 	walletSvc := wallet.NewService(walletRepo, log)
+	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
 	// rideSvc needs hub for WS notifications; engine is set after construction
@@ -179,6 +182,8 @@ func main() {
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
 	pkgH := packages.NewHandler(pkgSvc)
+	pkgH.SetBonus(bonusSvc) // auto-grant purchase bonuses
+	bonusH := bonus.NewHandler(bonusSvc)
 	walletH := wallet.NewHandler(walletSvc)
 	var uploadH *upload.Handler
 	if uh, err := upload.NewHandler(cfg); err != nil {
@@ -268,6 +273,7 @@ func main() {
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.RequireNotSuspended())
 		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
 
 		r.Get("/profile", custH.GetProfile)
@@ -289,6 +295,7 @@ func main() {
 	// ── Driver ────────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/driver", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.RequireNotSuspended())
 
 		r.Post("/apply", driverH.Apply)
 
@@ -314,6 +321,8 @@ func main() {
 			r.Get("/packages", pkgH.ListPackages)
 			r.Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/credits", pkgH.GetCredits)
+			r.Get("/bonuses", bonusH.DriverGrants)
+			r.Get("/bonuses/tiers", bonusH.ListActiveTiers)
 
 			r.Get("/rides/active", rideH.GetActiveRideForDriver)
 			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc, cfg))
@@ -549,6 +558,12 @@ func main() {
 		r.Delete("/reports/{id}", reportH.Delete)
 		r.Delete("/reports/{id}", reportH.Delete)
 
+		// Bonuses — admin CRUD for bonus tiers
+		r.Get("/bonuses/tiers", bonusH.AdminListTiers)
+		r.Post("/bonuses/tiers", bonusH.AdminCreateTier)
+		r.Delete("/bonuses/tiers/{tierID}", bonusH.AdminDeactivateTier)
+		r.Put("/bonuses/tiers/{tierID}/activate", bonusH.AdminActivateTier)
+
 		// Packages — admin CRUD
 		r.Get("/packages", pkgH.AdminListPackages)
 		r.Post("/packages", pkgH.AdminCreatePackage)
@@ -602,6 +617,7 @@ func main() {
 	rideSvc.SetRouteFareRecorder(locSvc)
 	rideSvc.SetPackagesService(pkgSvc)
 	adminSvc.SetPackagesService(pkgSvc)
+	adminSvc.SetBonusService(bonusSvc)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// WriteTimeout must be 0 when serving WebSockets — a global write timeout

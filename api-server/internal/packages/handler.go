@@ -1,8 +1,10 @@
 package packages
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
@@ -14,14 +16,23 @@ import (
 
 var validate = validator.New()
 
+// BonusAfterPurchase is the subset of bonus.Service called after a package purchase.
+type BonusAfterPurchase interface {
+	AfterPackagePurchase(ctx context.Context, driverID, creditID, vehicleTypeID string, expiresAt time.Time) (any, error)
+}
+
 // Handler exposes package and credit HTTP endpoints.
 type Handler struct {
-	svc *Service
+	svc   *Service
+	bonus BonusAfterPurchase // optional; nil = bonus disabled
 }
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
+
+// SetBonus wires the bonus service so purchases automatically trigger bonus grants.
+func (h *Handler) SetBonus(b BonusAfterPurchase) { h.bonus = b }
 
 // ── Driver endpoints ──────────────────────────────────────────────────────────
 
@@ -65,7 +76,19 @@ func (h *Handler) PurchasePackage(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
-	respond.Created(w, credit)
+
+	// Trigger purchase bonus asynchronously — never blocks or fails the purchase.
+	var bonusGrant interface{}
+	if h.bonus != nil {
+		bonusGrant, _ = h.bonus.AfterPackagePurchase(
+			r.Context(), claims.UserID, credit.ID, credit.VehicleTypeID, credit.ExpiresAt,
+		)
+	}
+
+	respond.Created(w, map[string]interface{}{
+		"credit": credit,
+		"bonus":  bonusGrant, // nil if no bonus applied this purchase
+	})
 }
 
 // GET /api/v1/driver/credits
