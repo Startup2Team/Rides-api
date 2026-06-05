@@ -14,10 +14,10 @@ import (
 
 // Handler exposes admin HTTP endpoints.
 type Handler struct {
-	svc *Service
+	svc AdminService
 }
 
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc AdminService) *Handler {
 	return &Handler{svc: svc}
 }
 
