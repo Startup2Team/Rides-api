@@ -20,17 +20,26 @@ import (
 // maxOffersPerSide matches the frontend: each party gets at most 3 offers.
 const maxOffersPerSide = 3
 
+// TimeoutManager resets or cancels the negotiation inactivity clock.
+// Implemented by ride.Service; injected via SetTimeoutManager to avoid an
+// import cycle (negotiation → ride is fine; ride → negotiation would cycle).
+type TimeoutManager interface {
+	ResetNegotiationTimeout(rideID string)
+	CancelNegotiationTimeout(rideID string)
+}
+
 // Service handles fare negotiation business logic.
 type Service struct {
-	repo      *Repository
-	rideRepo  *ride.Repository
-	redis     *goredis.Client
-	hub       *tracking.Hub
-	telephony *telephony.Service
-	analytics *analytics.Service
-	cfg       *config.Config
-	log       zerolog.Logger
-	fareRepo  FareConfigRepository
+	repo       *Repository
+	rideRepo   *ride.Repository
+	redis      *goredis.Client
+	hub        *tracking.Hub
+	telephony  *telephony.Service
+	analytics  *analytics.Service
+	cfg        *config.Config
+	log        zerolog.Logger
+	fareRepo   FareConfigRepository
+	timeoutMgr TimeoutManager
 }
 
 type FareConfigRepository interface {
@@ -46,6 +55,11 @@ func NewService(repo *Repository, rideRepo *ride.Repository, rdb *goredis.Client
 
 func (s *Service) SetFareRepository(repo FareConfigRepository) {
 	s.fareRepo = repo
+}
+
+// SetTimeoutManager wires the ride.Service timer so negotiation activity resets it.
+func (s *Service) SetTimeoutManager(mgr TimeoutManager) {
+	s.timeoutMgr = mgr
 }
 
 // Propose submits a fare counter-offer from a customer or driver.
@@ -64,6 +78,10 @@ func (s *Service) Propose(ctx context.Context, rideID, actorRole, actorUserID st
 		return err
 	}
 	if sideCount >= maxOffersPerSide {
+		// Both sides have hit their offer limits — prompt them to call each other
+		// and use LockManualFare once they verbally agree, instead of letting the
+		// negotiation timeout silently kill the ride.
+		s.notifyCallPrompt(ctx, rideID, r)
 		return apperrors.ErrNegotiationRoundLimit
 	}
 
@@ -108,6 +126,12 @@ func (s *Service) Propose(ctx context.Context, rideID, actorRole, actorUserID st
 		s.hub.SendToCustomer(rideID, msg)
 	}
 
+	// Each counter-offer is activity — reset the inactivity clock so the 5-minute
+	// window only triggers after a true silence, not while parties are bargaining.
+	if s.timeoutMgr != nil {
+		s.timeoutMgr.ResetNegotiationTimeout(rideID)
+	}
+
 	return nil
 }
 
@@ -132,8 +156,14 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 	}
 	if s.fareRepo != nil {
 		cfg, err := s.fareRepo.GetConfigByVehicleType(ctx, r.TransportType)
-		if err == nil && latest.ProposedAmount < float64(cfg.MinFareRWF) {
-			return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
+		if err == nil {
+			if latest.ProposedAmount < float64(cfg.MinFareRWF) {
+				return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
+			}
+			maxFare := float64(cfg.MinFareRWF) * maxFareMultiplier
+			if latest.ProposedAmount > maxFare {
+				return apperrors.New(400, "ABOVE_MAX_FARE", fmt.Sprintf("fare cannot exceed %d RWF", int(maxFare)))
+			}
 		}
 	}
 
@@ -169,8 +199,17 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 		"agreed_fare": latest.ProposedAmount,
 	})
 
+	// Fare is agreed — disarm the inactivity timer cleanly.
+	if s.timeoutMgr != nil {
+		s.timeoutMgr.CancelNegotiationTimeout(rideID)
+	}
+
 	return nil
 }
+
+// maxFareMultiplier caps a manually-locked fare at 10× the minimum fare to
+// prevent drivers from accidentally (or maliciously) locking absurd amounts.
+const maxFareMultiplier = 10
 
 // LockManualFare confirms a verbally agreed fare without consuming offer rounds.
 func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID string, amount float64) error {
@@ -183,8 +222,14 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 	}
 	if s.fareRepo != nil {
 		cfg, err := s.fareRepo.GetConfigByVehicleType(ctx, r.TransportType)
-		if err == nil && amount < float64(cfg.MinFareRWF) {
-			return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
+		if err == nil {
+			if amount < float64(cfg.MinFareRWF) {
+				return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
+			}
+			maxFare := float64(cfg.MinFareRWF) * maxFareMultiplier
+			if amount > maxFare {
+				return apperrors.New(400, "ABOVE_MAX_FARE", fmt.Sprintf("fare cannot exceed %d RWF", int(maxFare)))
+			}
 		}
 	}
 
@@ -214,6 +259,10 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 		"agreed_fare": amount,
 	})
 
+	if s.timeoutMgr != nil {
+		s.timeoutMgr.CancelNegotiationTimeout(rideID)
+	}
+
 	return nil
 }
 
@@ -232,7 +281,50 @@ func (s *Service) Decline(ctx context.Context, rideID, actorRole, actorUserID st
 		return err
 	}
 
-	return s.repo.SetResponse(ctx, latest.ID, "DECLINED")
+	if err := s.repo.SetResponse(ctx, latest.ID, "DECLINED"); err != nil {
+		return err
+	}
+
+	// Notify the other party so they see the rejection in real time
+	// instead of waiting for a poll or timeout.
+	msg := tracking.Message{
+		Type:   "negotiation_declined",
+		RideID: rideID,
+		Payload: map[string]interface{}{
+			"declined_by": actorRole,
+		},
+	}
+	if actorRole == "CUSTOMER" {
+		if r.DriverID != nil {
+			s.hub.SendToDriver(*r.DriverID, msg)
+		}
+	} else {
+		s.hub.SendToCustomer(rideID, msg)
+	}
+
+	s.analytics.Publish(ctx, "ride.negotiation_declined", actorRole, actorUserID, &rideID, map[string]interface{}{
+		"ride_id":     rideID,
+		"declined_by": actorRole,
+	})
+
+	return nil
+}
+
+// notifyCallPrompt is sent to both parties when offer rounds are exhausted.
+// It tells the mobile apps to show the "Call to negotiate" UI so both sides
+// can agree verbally and one of them types the final fare into LockManualFare.
+func (s *Service) notifyCallPrompt(ctx context.Context, rideID string, r *ride.Ride) {
+	msg := tracking.Message{
+		Type:   "negotiation_call_prompt",
+		RideID: rideID,
+		Payload: map[string]interface{}{
+			"message": "Offer rounds exhausted. Call the other party to agree on a fare, then lock it manually.",
+		},
+	}
+	s.hub.SendToCustomer(rideID, msg)
+	if r.DriverID != nil {
+		s.hub.SendToDriver(*r.DriverID, msg)
+	}
 }
 
 // InitiateCall logs the call timestamp and returns the Africa's Talking masking number.

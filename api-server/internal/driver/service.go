@@ -147,6 +147,22 @@ func (s *Service) ListDocuments(ctx context.Context, userID string) ([]*Document
 	return s.repo.ListDocuments(ctx, profile.ID)
 }
 
+// ForceOffline sets a driver OFFLINE unconditionally, ignoring any active-ride
+// guard and cooldown. Used during logout so the driver is always cleanly removed
+// from the matching pool even if their Redis state is stale.
+func (s *Service) ForceOffline(ctx context.Context, userID string) {
+	profile, err := s.repo.FindProfileByUserID(ctx, userID)
+	if err != nil {
+		// Not a driver — nothing to do.
+		return
+	}
+	s.redis.Del(ctx, rkeys.K.DriverActiveRide(profile.ID))
+	s.redis.Set(ctx, rkeys.K.DriverState(profile.ID), "OFFLINE", 0)
+	s.redis.ZRem(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), profile.ID)
+	_ = s.repo.UpdateOnlineStatus(ctx, userID, false)
+	s.log.Info().Str("driver_id", profile.ID).Msg("driver: force-offlined on logout")
+}
+
 // SetAvailability toggles a driver online/offline with cooldown enforcement.
 func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline bool) error {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
@@ -178,10 +194,21 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 			s.analytics.Publish(ctx, "driver.went_online", "DRIVER", userID, nil, map[string]interface{}{"driver_id": profile.ID})
 		}
 	} else {
-		// Verify no active ride before going offline
+		// Verify no active ride before going offline.
+		// Cross-check Redis against the DB: if the Redis key is stale (ride already
+		// completed/cancelled) we clean it up and allow the offline transition.
+		// This prevents the driver from being permanently locked offline when
+		// a CompleteRide Redis write failed silently after the DB write succeeded.
 		activeRide, _ := s.redis.Get(ctx, rkeys.K.DriverActiveRide(profile.ID)).Result()
 		if activeRide != "" {
-			return apperrors.New(409, "ACTIVE_RIDE", "complete your active ride before going offline")
+			// Redis says active — verify the ride is actually still open in the DB.
+			hasActiveInDB := s.repo.HasActiveRide(ctx, userID)
+			if hasActiveInDB {
+				return apperrors.New(409, "ACTIVE_RIDE", "complete your active ride before going offline")
+			}
+			// Stale Redis key — ride is done in DB. Clean up and continue.
+			s.redis.Del(ctx, rkeys.K.DriverActiveRide(profile.ID))
+			s.log.Warn().Str("driver_id", profile.ID).Str("stale_ride_id", activeRide).Msg("driver: cleaned up stale active_ride Redis key on offline transition")
 		}
 		offlineKey := rkeys.K.DriverOfflineAt(profile.ID)
 		s.redis.Set(ctx, offlineKey, time.Now().UTC().Format(time.RFC3339),

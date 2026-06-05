@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -13,6 +14,7 @@ import (
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
+	"github.com/workspace/ride-platform/pkg/timeutil"
 
 	"github.com/workspace/ride-platform/internal/analytics"
 	"github.com/workspace/ride-platform/internal/fare"
@@ -53,6 +55,10 @@ type Service struct {
 	routes    RouteFareRecorder
 	packages  PackagesService
 	fareRepo  FareConfigRepository
+
+	// negTimers tracks the active negotiation inactivity timer for each ride.
+	// keyed by rideID → *time.Timer; cleaned up on cancel, accept, or timeout.
+	negTimers sync.Map
 }
 
 type FareConfigRepository interface {
@@ -82,6 +88,26 @@ func (s *Service) SetFareRepository(repo FareConfigRepository) {
 
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
 func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64) (*Ride, error) {
+	// ── Concurrent-creation guard ─────────────────────────────────────────────
+	// Use SET NX with a 10-second TTL to prevent two simultaneous requests from
+	// the same customer (e.g. double-tap, retry storm) creating duplicate rides.
+	// The key is deleted explicitly on success so the TTL is just a safety net.
+	createLockKey := rkeys.K.CustomerCreatingRide(customerID)
+	locked, err := s.redis.SetNX(ctx, createLockKey, "1", 10*time.Second).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ride: acquire create lock: %w", err)
+	}
+	if !locked {
+		return nil, apperrors.ErrRideAlreadyActive
+	}
+	defer s.redis.Del(ctx, createLockKey)
+
+	// Also reject immediately if the customer already has a live ride in Redis.
+	// This catches the case where the client somehow bypasses the UI guard.
+	if existing, _ := s.redis.Get(ctx, rkeys.K.CustomerActiveRide(customerID)).Result(); existing != "" {
+		return nil, apperrors.ErrRideAlreadyActive
+	}
+
 	key := rkeys.K.CustomerDailyCancel(customerID)
 	count, _ := s.redis.Get(ctx, key).Int()
 	if count >= s.cfg.Customer.CancelSuspendThreshold {
@@ -107,8 +133,15 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 		return nil, err
 	}
 
-	s.redis.Set(ctx, rkeys.K.RideState(r.ID), string(StatusSearching), 0)
-	s.redis.Set(ctx, rkeys.K.CustomerActiveRide(customerID), r.ID, 0)
+	// 15-minute TTL: matching takes at most MaxAttempts × TimeoutSeconds (≈45s).
+	// If the server crashes mid-search and the recovery job misses this ride,
+	// the key will self-expire rather than being stuck at SEARCHING forever.
+	if err := s.redis.Set(ctx, rkeys.K.RideState(r.ID), string(StatusSearching), 15*time.Minute).Err(); err != nil {
+		s.log.Error().Err(err).Str("ride_id", r.ID).Msg("ride: failed to write ride state to Redis")
+	}
+	if err := s.redis.Set(ctx, rkeys.K.CustomerActiveRide(customerID), r.ID, 0).Err(); err != nil {
+		s.log.Error().Err(err).Str("ride_id", r.ID).Str("customer_id", customerID).Msg("ride: failed to write customer active ride to Redis")
+	}
 
 	_ = s.repo.AppendEvent(ctx, r.ID, "ride.created", "CUSTOMER", customerID, map[string]interface{}{
 		"transport_type": transportType,
@@ -129,6 +162,16 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 func (s *Service) GetRide(ctx context.Context, rideID, customerID string) (*Ride, error) {
 	r, err := s.repo.FindByIDAndCustomer(ctx, rideID, customerID)
 	if err != nil {
+		// Self-heal: if the ride can't be found, clean up any stale Redis state
+		// for it so the mobile app stops looping on a ghost ride ID.
+		// This happens when CompleteRide's Redis write fails silently after the
+		// DB write succeeds — the ride:state key gets stuck at IN_PROGRESS forever.
+		s.redis.Del(ctx, rkeys.K.RideState(rideID))
+		// Also clear the customer's active_ride pointer if it still points here.
+		if cached, cerr := s.redis.Get(ctx, rkeys.K.CustomerActiveRide(customerID)).Result(); cerr == nil && cached == rideID {
+			s.redis.Del(ctx, rkeys.K.CustomerActiveRide(customerID))
+			s.log.Warn().Str("ride_id", rideID).Str("customer_id", customerID).Msg("ride: cleaned up stale Redis active_ride pointer on 404")
+		}
 		return nil, err
 	}
 	switch r.Status {
@@ -146,7 +189,18 @@ func (s *Service) GetActiveRide(ctx context.Context, customerID string) (*Ride, 
 	}
 	r, err := s.repo.FindByIDAndCustomer(ctx, rideID, customerID)
 	if err != nil {
+		// Redis pointer is stale (ride completed/cancelled but key wasn't cleaned up).
+		// Delete it so the next call goes straight to the DB fallback.
+		s.redis.Del(ctx, rkeys.K.CustomerActiveRide(customerID))
+		s.log.Warn().Str("ride_id", rideID).Str("customer_id", customerID).Msg("ride: deleted stale customer active_ride Redis key")
 		return s.repo.FindActiveByCustomer(ctx, customerID)
+	}
+	// Also self-heal: if the ride we found is terminal, the Redis key should be gone.
+	if IsTerminal(r.Status) {
+		s.redis.Del(ctx, rkeys.K.CustomerActiveRide(customerID))
+		s.redis.Del(ctx, rkeys.K.RideState(rideID))
+		s.log.Warn().Str("ride_id", rideID).Str("status", string(r.Status)).Msg("ride: cleaned up terminal ride from active_ride Redis key")
+		return nil, apperrors.ErrNotFound
 	}
 	return r, nil
 }
@@ -229,10 +283,12 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 	return nil
 }
 
-// StartNegotiationTimeout starts a 5-minute goroutine that auto-cancels
-// a ride still in NEGOTIATING state after the timeout.
+// StartNegotiationTimeout starts a 5-minute inactivity timer that auto-cancels
+// a ride still in NEGOTIATING state. The timer is stored in negTimers so it can
+// be reset (on each counter-offer) or cancelled (on fare acceptance).
 func (s *Service) StartNegotiationTimeout(rideID string) {
-	time.AfterFunc(negotiationTimeoutDuration, func() {
+	fire := func() {
+		s.negTimers.Delete(rideID)
 		ctx := context.Background()
 		r, err := s.repo.FindByID(ctx, rideID)
 		if err != nil || r.Status != StatusNegotiating {
@@ -249,7 +305,7 @@ func (s *Service) StartNegotiationTimeout(rideID string) {
 		})
 		s.hub.SendToCustomer(rideID, tracking.Message{
 			Type: "ride_cancelled", RideID: rideID,
-			Payload: map[string]interface{}{"reason": "Negotiation timed out."},
+			Payload: map[string]interface{}{"reason": "Negotiation timed out. Please request a new ride."},
 		})
 		if r.DriverID != nil {
 			s.hub.SendToDriver(*r.DriverID, tracking.Message{
@@ -257,7 +313,41 @@ func (s *Service) StartNegotiationTimeout(rideID string) {
 				Payload: map[string]interface{}{"reason": "Negotiation timed out."},
 			})
 		}
-	})
+	}
+
+	t := time.AfterFunc(negotiationTimeoutDuration, fire)
+	s.negTimers.Store(rideID, t)
+}
+
+// ResetNegotiationTimeout resets the inactivity clock back to the full 5 minutes.
+// Called by negotiation.Service on every counter-offer so the clock only runs
+// during true silence, not while the parties are actively negotiating.
+func (s *Service) ResetNegotiationTimeout(rideID string) {
+	if v, ok := s.negTimers.Load(rideID); ok {
+		t := v.(*time.Timer)
+		// Stop the timer; drain the channel if it already fired between Load and Stop.
+		if !t.Stop() {
+			select {
+			case <-t.C:
+			default:
+			}
+		}
+		t.Reset(negotiationTimeoutDuration)
+	}
+}
+
+// CancelNegotiationTimeout disarms the inactivity timer without cancelling the ride.
+// Called when negotiation ends cleanly (fare accepted or ride manually cancelled).
+func (s *Service) CancelNegotiationTimeout(rideID string) {
+	if v, ok := s.negTimers.Load(rideID); ok {
+		t := v.(*time.Timer)
+		t.Stop()
+		select {
+		case <-t.C:
+		default:
+		}
+		s.negTimers.Delete(rideID)
+	}
 }
 
 // SetEnRoute transitions CONFIRMED → DRIVER_EN_ROUTE.
@@ -410,7 +500,12 @@ func (s *Service) StartRide(ctx context.Context, rideID, driverUserID string) er
 	if err := s.repo.SetStarted(ctx, rideID); err != nil {
 		return err
 	}
-	s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusInProgress), 0)
+	// 2-hour TTL: if CompleteRide's Redis write fails (the exact bug that caused
+	// the "stuck IN_PROGRESS" ghost ride), this key self-heals within 2 hours
+	// instead of living forever with no TTL.
+	if err := s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusInProgress), 2*time.Hour).Err(); err != nil {
+		s.log.Error().Err(err).Str("ride_id", rideID).Msg("ride: failed to write IN_PROGRESS state to Redis")
+	}
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.started", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.started", "DRIVER", driverUserID, &rideID, map[string]interface{}{"ride_id": rideID})
 	// Notify the customer that the journey has started so they transition to
@@ -521,7 +616,9 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 	// reconnect (e.g. brief signal drop at ride end) still receives the
 	// state-replay message and auto-navigates to the rating screen.
 	// The key expires automatically — no manual cleanup required.
-	s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusCompleted), 5*time.Minute)
+	if err := s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusCompleted), 5*time.Minute).Err(); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: failed to write COMPLETED state to Redis (non-fatal)")
+	}
 
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.completed", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.completed", "DRIVER", driverUserID, &rideID, map[string]interface{}{
@@ -615,10 +712,7 @@ func (s *Service) DriverCancelRide(ctx context.Context, rideID, driverUserID, re
 	return nil
 }
 
-func endOfDay() time.Time {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
-}
+func endOfDay() time.Time { return timeutil.EndOfDay() }
 
 // withinRadius checks whether a driver is within radiusM of target.
 //

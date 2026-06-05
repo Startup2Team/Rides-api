@@ -17,6 +17,9 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5/pgxpool"
+	goredis "github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/admin"
@@ -60,6 +63,25 @@ func main() {
 
 	log := logger.New(cfg.Env)
 	log.Info().Str("env", cfg.Env).Str("port", cfg.Port).Msg("ride-platform: starting")
+
+	// ── Production safety guards ──────────────────────────────────────────────
+	// Catch dev-only flags that must never be true in production.
+	// A misconfigured deploy would silently bypass geofences or skip driver approval.
+	if cfg.Env == "production" {
+		if cfg.Ride.DevSkipGeofence {
+			log.Fatal().Msg("FATAL: DEV_SKIP_GEOFENCE=true in production — refusing to start")
+		}
+		if cfg.Driver.DevAutoApprove {
+			log.Fatal().Msg("FATAL: DEV_AUTO_APPROVE_DRIVERS=true in production — refusing to start")
+		}
+	} else {
+		if cfg.Ride.DevSkipGeofence {
+			log.Warn().Msg("⚠️  DEV_SKIP_GEOFENCE=true — geofence checks disabled (dev only)")
+		}
+		if cfg.Driver.DevAutoApprove {
+			log.Warn().Msg("⚠️  DEV_AUTO_APPROVE_DRIVERS=true — driver approval skipped (dev only)")
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -124,6 +146,8 @@ func main() {
 	negSvc := negotiation.NewService(negRepo, rideRepo, rdb, hub, telSvc, anaSvc, cfg, log)
 	rideSvc.SetFareRepository(fareRepo)
 	negSvc.SetFareRepository(fareRepo)
+	// Wire the timeout manager so negotiation activity resets the 5-minute clock.
+	negSvc.SetTimeoutManager(rideSvc)
 	adminSvc := admin.NewService(db, log)
 	locSvc := location.NewService(db, rdb, cfg, log)
 
@@ -140,6 +164,7 @@ func main() {
 	custSvc := customer.NewService(custRepo)
 
 	authH := auth.NewHandler(authSvc, cfg.Env)
+	authH.SetDriverService(driverSvc) // force-offline driver on logout
 	custH := customer.NewHandler(custSvc)
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
@@ -172,6 +197,13 @@ func main() {
 
 	consumer := analytics.NewConsumer(rdb, log)
 	go consumer.Run(bgCtx)
+
+	// ── Orphaned-ride recovery ────────────────────────────────────────────────
+	// After a crash or deploy restart, any ride in SEARCHING or NEGOTIATING
+	// has lost its in-memory goroutine/timer. We scan for these on startup and
+	// either re-queue the search or cancel + notify so customers aren't left
+	// staring at a spinner forever.
+	go recoverOrphanedRides(bgCtx, db, rdb, engine, hub, log.With().Str("component", "recovery").Logger())
 
 	// Pre-warm landmark route cache
 	locSvc.WarmLandmarkRoutes(bgCtx)
@@ -265,7 +297,11 @@ func main() {
 			r.Use(mw.RequireRole(mw.RoleDriverActive))
 
 			r.Post("/availability", driverH.SetAvailability)
-			r.Post("/location", driverH.UpdateLocation)
+			// 20 req/min = 1 every 3 s. Drivers send every 5–12 s so this is
+			// headroom for bursts without blocking normal use. Returns 204 (not
+			// 429) so the app doesn't log a red error when a burst is trimmed.
+			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
+				Post("/location", driverH.UpdateLocation)
 
 			r.Get("/packages", pkgH.ListPackages)
 			r.Post("/packages/purchase", pkgH.PurchasePackage)
@@ -729,6 +765,96 @@ func driverCompleteHandler(rideSvc *ride.Service) http.HandlerFunc {
 }
 
 const apiV1Prefix = "/api/v1"
+
+// recoverOrphanedRides runs once at startup to handle rides whose in-memory
+// goroutines or timers were lost due to a server crash or deploy restart.
+//
+//   - SEARCHING → re-queue the matching search so the customer isn't left spinning.
+//   - NEGOTIATING → cancel the ride and notify; the negotiation state is too
+//     ephemeral to safely replay (agreed-fare context is gone).
+//
+// Rides in other non-terminal states (CONFIRMED, DRIVER_EN_ROUTE, etc.) are
+// left untouched — they are handled by driver/customer re-connection or admin.
+func recoverOrphanedRides(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	rdb *goredis.Client,
+	engine *matching.Engine,
+	hub *tracking.Hub,
+	log zerolog.Logger,
+) {
+	// Small delay so all services are fully wired before we start re-queueing.
+	time.Sleep(2 * time.Second)
+
+	type orphan struct {
+		id            string
+		status        string
+		customerID    string
+		transportType string
+		pickupLat     float64
+		pickupLng     float64
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT id, status, customer_id, transport_type,
+		       ST_Y(pickup_point::geometry) AS pickup_lat,
+		       ST_X(pickup_point::geometry) AS pickup_lng
+		FROM rides
+		WHERE status IN ('SEARCHING','NEGOTIATING')
+		  AND created_at > NOW() - INTERVAL '2 hours'
+	`)
+	if err != nil {
+		log.Error().Err(err).Msg("recovery: failed to query orphaned rides")
+		return
+	}
+	defer rows.Close()
+
+	var orphans []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.id, &o.status, &o.customerID, &o.transportType, &o.pickupLat, &o.pickupLng); err != nil {
+			continue
+		}
+		orphans = append(orphans, o)
+	}
+	if rows.Err() != nil {
+		log.Error().Err(rows.Err()).Msg("recovery: row scan error")
+	}
+
+	if len(orphans) == 0 {
+		log.Info().Msg("recovery: no orphaned rides found")
+		return
+	}
+
+	log.Warn().Int("count", len(orphans)).Msg("recovery: orphaned rides found — processing")
+
+	for _, o := range orphans {
+		switch o.status {
+		case "SEARCHING":
+			// Re-queue matching — customer is still waiting.
+			log.Info().Str("ride_id", o.id).Msg("recovery: re-queuing SEARCHING ride")
+			engine.StartSearch(o.id, geo.Point{Lat: o.pickupLat, Lng: o.pickupLng}, o.transportType)
+
+		case "NEGOTIATING":
+			// Negotiation timers are in-memory; we can't safely resume. Cancel and
+			// tell the customer to request a new ride.
+			log.Info().Str("ride_id", o.id).Msg("recovery: cancelling orphaned NEGOTIATING ride")
+			_, _ = pool.Exec(ctx,
+				`UPDATE rides SET status = 'CANCELLED', cancelled_by = 'SYSTEM', cancel_reason = 'server_restart', updated_at = NOW() WHERE id = $1 AND status = 'NEGOTIATING'`,
+				o.id,
+			)
+			rdb.Del(ctx, "ride:state:"+o.id)
+			rdb.Del(ctx, "customer:active_ride:"+o.customerID)
+			hub.SendToCustomer(o.id, tracking.Message{
+				Type:   "ride_cancelled",
+				RideID: o.id,
+				Payload: map[string]interface{}{
+					"reason": "Server restarted during negotiation. Please request a new ride.",
+				},
+			})
+		}
+	}
+}
 
 const swaggerHTML = `<!DOCTYPE html>
 <html lang="en">

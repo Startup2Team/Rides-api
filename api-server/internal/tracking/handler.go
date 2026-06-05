@@ -1,6 +1,7 @@
 package tracking
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -61,7 +62,13 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 	// SendToDriver calls in ride/service and negotiation/service use that same
 	// profile_id.  Without this lookup the hub key is the user_id and messages
 	// from those services are silently dropped.
-	driverProfile, err := h.driverSvc.GetProfile(r.Context(), claims.UserID)
+	//
+	// Use a 5 s deadline so a slow DB query never hangs the WebSocket handshake.
+	// A hung handshake causes ngrok to drop the TCP connection mid-SSL, which iOS
+	// reports as the misleading OSStatus -9806 error instead of a clean 403.
+	profileCtx, profileCancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer profileCancel()
+	driverProfile, err := h.driverSvc.GetProfile(profileCtx, claims.UserID)
 	if err != nil {
 		respond.ErrorMsg(w, http.StatusForbidden, "DRIVER_PROFILE_REQUIRED", "active driver profile required")
 		return
@@ -175,20 +182,42 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Forward real-time position to the customer watching this driver's active ride.
-			// Also persist it under ride:<rideID>:driver_location so a reconnecting
-			// customer immediately receives the driver's last known position.
+			// Apply EMA smoothing (α=0.4) before fan-out to reduce GPS jitter on the
+			// customer map without introducing significant lag. The raw coordinates are
+			// already persisted by UpdateLocation for geofence checks — we only smooth
+			// the customer-facing position here.
 			if rideID, rerr := h.redis.Get(r.Context(), rkeys.K.DriverActiveRide(driverProfile.ID)).Result(); rerr == nil && rideID != "" {
-				locJSON, _ := json.Marshal(map[string]interface{}{
-					"lat": incoming.Lat,
-					"lng": incoming.Lng,
+				smoothLat, smoothLng := incoming.Lat, incoming.Lng
+
+				const emaAlpha = 0.4
+				if prev, perr := h.redis.Get(r.Context(), rkeys.K.DriverSmoothedLocation(driverProfile.ID)).Result(); perr == nil {
+					var prevLoc struct {
+						Lat float64 `json:"lat"`
+						Lng float64 `json:"lng"`
+					}
+					if json.Unmarshal([]byte(prev), &prevLoc) == nil && (prevLoc.Lat != 0 || prevLoc.Lng != 0) {
+						smoothLat = emaAlpha*incoming.Lat + (1-emaAlpha)*prevLoc.Lat
+						smoothLng = emaAlpha*incoming.Lng + (1-emaAlpha)*prevLoc.Lng
+					}
+				}
+
+				smoothJSON, _ := json.Marshal(map[string]interface{}{
+					"lat": smoothLat,
+					"lng": smoothLng,
 				})
-				h.redis.Set(r.Context(), rkeys.K.RideDriverLocation(rideID), string(locJSON), 30*time.Minute)
+				// Store smoothed position (no expiry — overwritten on every update,
+				// cleared when driver goes offline).
+				h.redis.Set(r.Context(), rkeys.K.DriverSmoothedLocation(driverProfile.ID), string(smoothJSON), 0)
+
+				// Persist smoothed position for reconnecting customers.
+				h.redis.Set(r.Context(), rkeys.K.RideDriverLocation(rideID), string(smoothJSON), 30*time.Minute)
+
 				h.hub.SendToCustomer(rideID, Message{
 					Type:   "driver_location",
 					RideID: rideID,
 					Payload: map[string]interface{}{
-						"lat": incoming.Lat,
-						"lng": incoming.Lng,
+						"lat": smoothLat,
+						"lng": smoothLng,
 					},
 				})
 			}
@@ -266,11 +295,13 @@ func (h *Handler) CustomerWS(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	// Background reader to handle pongs and detect disconnects
+	// Background reader to handle pongs and detect disconnects.
+	// Uses client.Done() (sync.Once) so it never panics even if the hub
+	// already closed the channel because the customer reconnected.
 	go func() {
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
-				close(client.done)
+				client.Done()
 				return
 			}
 		}

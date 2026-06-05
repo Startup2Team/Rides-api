@@ -51,6 +51,10 @@ type ATConfig struct {
 	Username      string
 	SenderID      string
 	MaskingNumber string
+	// WhatsApp fields — optional, dev convenience only.
+	// Set AT_WHATSAPP_ENABLED=true + AT_WHATSAPP_SENDER to a registered WA number.
+	WhatsAppEnabled bool
+	WhatsAppSender  string
 }
 
 type FirebaseConfig struct {
@@ -133,6 +137,8 @@ func Load() (*Config, error) {
 	cfg.AT.Username = getEnv("AT_USERNAME", "")
 	cfg.AT.SenderID = getEnv("AT_SENDER_ID", "")
 	cfg.AT.MaskingNumber = getEnv("AT_MASKING_NUMBER", "")
+	cfg.AT.WhatsAppEnabled = getEnvBool("AT_WHATSAPP_ENABLED", false)
+	cfg.AT.WhatsAppSender = getEnv("AT_WHATSAPP_SENDER", "")
 
 	cfg.Firebase.ServiceAccountPath = getEnv("FIREBASE_SERVICE_ACCOUNT_PATH", "./firebase-service-account.json")
 

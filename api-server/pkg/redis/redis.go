@@ -108,6 +108,12 @@ func (Keys) CustomerDailyCancel(customerID string) string {
 	return fmt.Sprintf("customer:cancels:%s:daily", customerID)
 }
 
+// CustomerCreatingRide is a short-lived SET NX lock (10 s TTL) that prevents
+// two concurrent HTTP requests from the same customer creating duplicate rides.
+func (Keys) CustomerCreatingRide(customerID string) string {
+	return fmt.Sprintf("customer:%s:creating_ride", customerID)
+}
+
 // ── Auth sessions ─────────────────────────────────────────────────────────
 
 func (Keys) Session(userID, jti string) string {
@@ -139,6 +145,13 @@ func (Keys) LandmarkSuggestions() string {
 
 func (Keys) GPSAnomalyCount(driverID string) string {
 	return fmt.Sprintf("driver:gps_anomalies:%s:session_count", driverID)
+}
+
+// DriverSmoothedLocation stores the EMA-smoothed GPS position for a driver.
+// Updated on every accepted location_update; read before fanning out to the
+// customer so the map path doesn't jitter from raw GPS noise.
+func (Keys) DriverSmoothedLocation(driverID string) string {
+	return fmt.Sprintf("driver:%s:smoothed_location", driverID)
 }
 
 // DriverGracePeriod is set for 60 s when a driver goes online.

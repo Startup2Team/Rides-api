@@ -409,3 +409,16 @@ func (r *Repository) GetCompletionRate(ctx context.Context, driverProfileID stri
 	`, driverProfileID).Scan(&rate)
 	return rate, err
 }
+
+// HasActiveRide returns true if the driver has a ride in a non-terminal state in the DB.
+// Used to cross-check a stale Redis driver:active_ride key before blocking offline transitions.
+func (r *Repository) HasActiveRide(ctx context.Context, driverUserID string) bool {
+	var count int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM rides r
+		JOIN driver_profiles dp ON dp.id = r.driver_id
+		WHERE dp.user_id = $1
+		  AND r.status NOT IN ('COMPLETED','CANCELLED')
+	`, driverUserID).Scan(&count)
+	return err == nil && count > 0
+}
