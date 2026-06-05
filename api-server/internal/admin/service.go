@@ -1441,12 +1441,3 @@ func (s *Service) DisbursePayouts(ctx context.Context, transactionIDs []string) 
 
 	return len(transactionIDs), total * 0.85, nil
 }
-
-func (s *Service) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error {
-	_, err := s.db.Exec(ctx, `
-		INSERT INTO driver_documents (driver_id, document_type, file_url)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (driver_id, document_type) DO UPDATE SET file_url = $3, updated_at = NOW()
-	`, profileID, documentType, fileURL)
-	return err
-}
