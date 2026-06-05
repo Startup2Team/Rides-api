@@ -2,6 +2,7 @@ package inbox
 
 import (
 	"context"
+	"strings"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
@@ -12,6 +13,21 @@ type Service struct {
 
 func NewService(repo *Repository) *Service {
 	return &Service{repo: repo}
+}
+
+// Submit saves a contact-form submission from the public website.
+func (s *Service) Submit(ctx context.Context, fromName, fromEmail, phone, category, subject, body string) error {
+	// Normalise category to uppercase for consistent storage.
+	cat := strings.ToUpper(strings.ReplaceAll(category, " ", "_"))
+	if cat == "" {
+		cat = "GENERAL"
+	}
+	// Prepend phone to the body when provided so it's visible in the admin inbox.
+	fullBody := body
+	if phone != "" {
+		fullBody = "Phone: " + phone + "\n\n" + body
+	}
+	return s.repo.Create(ctx, fromName, fromEmail, cat, subject, fullBody)
 }
 
 func (s *Service) List(ctx context.Context, f ListFilter) ([]*Message, int, error) {

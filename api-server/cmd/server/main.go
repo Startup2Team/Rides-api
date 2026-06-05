@@ -217,6 +217,9 @@ func main() {
 	})
 	r.Get(apiV1Prefix+"/pricing", fareH.ListPublicPricing)
 
+	// ── Public contact form ───────────────────────────────────────────────────
+	r.Post(apiV1Prefix+"/contact", inboxH.Submit)
+
 	// ── Public auth ───────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/auth", func(r chi.Router) {
 		r.With(mw.OTPRateLimit(rdb, 5, time.Hour)).Post("/register", authH.Register)
