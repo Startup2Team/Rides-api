@@ -150,6 +150,151 @@ func (r *Repository) PurchasePackage(ctx context.Context, driverUserID, packageI
 	return c, err
 }
 
+// ── Admin repo methods ────────────────────────────────────────────────────────
+
+// ListAllPackages returns all packages (active and inactive) for the admin panel.
+func (r *Repository) ListAllPackages(ctx context.Context) ([]*Package, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
+		       rp.ride_count, rp.validity_days, rp.price_rwf,
+		       rp.is_promotional, rp.is_active, rp.created_at
+		FROM ride_packages rp
+		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
+		ORDER BY vt.code, rp.price_rwf ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pkgs []*Package
+	for rows.Next() {
+		p := &Package{}
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.VehicleTypeID, &p.VehicleTypeCode,
+			&p.RideCount, &p.ValidityDays, &p.PriceRWF,
+			&p.IsPromotional, &p.IsActive, &p.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		pkgs = append(pkgs, p)
+	}
+	return pkgs, rows.Err()
+}
+
+// CreatePackage inserts a new admin-defined package.
+func (r *Repository) CreatePackage(ctx context.Context, input *CreatePackageInput) (*Package, error) {
+	p := &Package{}
+	err := r.db.QueryRow(ctx, `
+		WITH vt AS (SELECT id FROM vehicle_types WHERE code = $1 AND is_active = TRUE)
+		INSERT INTO ride_packages
+		  (name, vehicle_type_id, ride_count, validity_days, price_rwf, cost_per_ride_rwf, is_promotional)
+		SELECT $2, vt.id, $3, $4, $5, $6, $7 FROM vt
+		RETURNING id, name, vehicle_type_id, ride_count, validity_days, price_rwf, is_promotional, is_active, created_at
+	`, input.VehicleTypeCode, input.Name, input.RideCount, input.ValidityDays,
+		input.PriceRWF, input.CostPerRideRWF, input.IsPromotional,
+	).Scan(
+		&p.ID, &p.Name, &p.VehicleTypeID,
+		&p.RideCount, &p.ValidityDays, &p.PriceRWF,
+		&p.IsPromotional, &p.IsActive, &p.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	p.VehicleTypeCode = input.VehicleTypeCode
+	return p, nil
+}
+
+// UpdatePackage updates mutable package fields. Only non-nil fields are changed.
+func (r *Repository) UpdatePackage(ctx context.Context, packageID string, input *UpdatePackageInput) (*Package, error) {
+	// Build dynamic SET clause.
+	sets := []string{"updated_at = NOW()"}
+	args := []interface{}{packageID}
+	n := 2
+
+	if input.Name != nil {
+		sets = append(sets, "name = $"+itoa(n))
+		args = append(args, *input.Name)
+		n++
+	}
+	if input.RideCount != nil {
+		sets = append(sets, "ride_count = $"+itoa(n))
+		args = append(args, *input.RideCount)
+		n++
+	}
+	if input.ValidityDays != nil {
+		sets = append(sets, "validity_days = $"+itoa(n))
+		args = append(args, *input.ValidityDays)
+		n++
+	}
+	if input.PriceRWF != nil {
+		sets = append(sets, "price_rwf = $"+itoa(n))
+		args = append(args, *input.PriceRWF)
+		n++
+	}
+	if input.CostPerRideRWF != nil {
+		sets = append(sets, "cost_per_ride_rwf = $"+itoa(n))
+		args = append(args, *input.CostPerRideRWF)
+		n++
+	}
+	if input.IsPromotional != nil {
+		sets = append(sets, "is_promotional = $"+itoa(n))
+		args = append(args, *input.IsPromotional)
+		n++
+	}
+
+	_ = n
+	query := "UPDATE ride_packages SET " + joinStrings(sets, ", ") +
+		" WHERE id = $1" +
+		" RETURNING id, name, vehicle_type_id, ride_count, validity_days, price_rwf, is_promotional, is_active, created_at"
+
+	p := &Package{}
+	err := r.db.QueryRow(ctx, query, args...).Scan(
+		&p.ID, &p.Name, &p.VehicleTypeID,
+		&p.RideCount, &p.ValidityDays, &p.PriceRWF,
+		&p.IsPromotional, &p.IsActive, &p.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrNotFound
+		}
+		return nil, err
+	}
+	return p, nil
+}
+
+// SetPackageActive toggles a package's active flag.
+func (r *Repository) SetPackageActive(ctx context.Context, packageID string, active bool) error {
+	tag, err := r.db.Exec(ctx,
+		`UPDATE ride_packages SET is_active = $2, updated_at = NOW() WHERE id = $1`,
+		packageID, active,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func itoa(n int) string {
+	return string(rune('0' + n)) // works for n < 10; enough for our field count
+}
+
+func joinStrings(ss []string, sep string) string {
+	out := ""
+	for i, s := range ss {
+		if i > 0 {
+			out += sep
+		}
+		out += s
+	}
+	return out
+}
+
 // GrantFreeTrialIfEligible grants the free-trial package for the driver's vehicle type.
 // It is idempotent: if free_trial_used is already TRUE, it silently returns.
 // Uses a transaction + SELECT FOR UPDATE to prevent duplicate grants under concurrency.

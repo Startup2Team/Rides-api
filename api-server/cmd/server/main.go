@@ -46,6 +46,7 @@ import (
 	"github.com/workspace/ride-platform/internal/tickets"
 	"github.com/workspace/ride-platform/internal/tracking"
 	"github.com/workspace/ride-platform/internal/upload"
+	"github.com/workspace/ride-platform/internal/wallet"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	"github.com/workspace/ride-platform/pkg/logger"
@@ -123,6 +124,7 @@ func main() {
 	negRepo := negotiation.NewRepository(db)
 	fareRepo := fare.NewRepository(db)
 	pkgRepo := packages.NewRepository(db)
+	walletRepo := wallet.NewRepository(db)
 
 	// ── New module repositories ───────────────────────────────────────────────
 	incidentRepo := incidents.NewRepository(db)
@@ -138,7 +140,9 @@ func main() {
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
 	driverSvc := driver.NewService(driverRepo, rdb, anaSvc, cfg, log)
+	walletSvc := wallet.NewService(walletRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
+	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
@@ -175,6 +179,7 @@ func main() {
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
 	pkgH := packages.NewHandler(pkgSvc)
+	walletH := wallet.NewHandler(walletSvc)
 	var uploadH *upload.Handler
 	if uh, err := upload.NewHandler(cfg); err != nil {
 		log.Warn().Err(err).Msg("upload: storage not configured, presign endpoint disabled")
@@ -342,6 +347,16 @@ func main() {
 		r.Post("/me/saved-locations", locH.CreateSavedLocation)
 		r.Put("/me/saved-locations/{id}", locH.UpdateSavedLocation)
 		r.Delete("/me/saved-locations/{id}", locH.DeleteSavedLocation)
+	})
+
+	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────
+	r.Route(apiV1Prefix+"/wallet", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+
+		r.Get("/", walletH.GetWallet)
+		r.Get("/transactions", walletH.GetTransactions)
+		r.Post("/top-up", walletH.TopUp)
+		r.Post("/withdraw", walletH.Withdraw)
 	})
 
 	r.Route(apiV1Prefix+"/uploads", func(r chi.Router) {
@@ -533,6 +548,13 @@ func main() {
 		r.Get("/reports/{id}/download", reportH.Download)
 		r.Delete("/reports/{id}", reportH.Delete)
 		r.Delete("/reports/{id}", reportH.Delete)
+
+		// Packages — admin CRUD
+		r.Get("/packages", pkgH.AdminListPackages)
+		r.Post("/packages", pkgH.AdminCreatePackage)
+		r.Patch("/packages/{packageID}", pkgH.AdminUpdatePackage)
+		r.Delete("/packages/{packageID}", pkgH.AdminDeactivatePackage)
+		r.Put("/packages/{packageID}/activate", pkgH.AdminActivatePackage)
 
 		// Settings
 		r.Get("/settings", settingsH.GetAll)
