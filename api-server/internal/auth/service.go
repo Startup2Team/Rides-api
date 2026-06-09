@@ -153,6 +153,19 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 	return tokens, user, nil
 }
 
+// VerifyOTPCode checks a code against the latest stored OTP for a phone.
+// Used by the admin panel to verify a driver's phone without creating a session.
+func (s *Service) VerifyOTPCode(ctx context.Context, phone, code string) error {
+	record, err := s.repo.FindLatestOTP(ctx, phone, "ADMIN_DRIVER_VERIFY")
+	if err != nil {
+		return apperrors.ErrInvalidOTP
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(record.OTPHash), []byte(code)); err != nil {
+		return apperrors.ErrInvalidOTP
+	}
+	return s.repo.MarkOTPUsed(ctx, record.ID)
+}
+
 // RefreshTokens validates a refresh token and issues a new access token.
 func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*TokenPair, error) {
 	claims := &middleware.Claims{}

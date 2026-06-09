@@ -25,4 +25,4 @@ logs/
 .cache/
 *.log
 *.env
-.env
+.envvar/uploads/

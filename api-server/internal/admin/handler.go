@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -14,11 +15,13 @@ import (
 
 // Handler exposes admin HTTP endpoints.
 type Handler struct {
-	svc AdminService
+	svc  AdminService
+	auth AuthService
+	env  string
 }
 
-func NewHandler(svc AdminService) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc AdminService, auth AuthService, env string) *Handler {
+	return &Handler{svc: svc, auth: auth, env: env}
 }
 
 // ── Drivers ───────────────────────────────────────────────────────────────
@@ -279,6 +282,7 @@ func (h *Handler) DeviceCollisions(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/admin/drivers
 func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
 	var body struct {
 		FullName        string `json:"full_name"`
 		Phone           string `json:"phone"`
@@ -341,7 +345,8 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out, err := h.svc.CreateDriverFromAdmin(r.Context(), AdminCreateDriverInput{
-		FullName: body.FullName, Phone: body.Phone,
+		AdminUserID: claims.UserID,
+		FullName:    body.FullName, Phone: body.Phone,
 		TransportType: body.TransportType, VehiclePlate: body.VehiclePlate,
 		LicenseNumber: body.LicenseNumber, DateOfBirth: body.DateOfBirth,
 		Province: body.Province, District: body.District, Sector: body.Sector,
@@ -621,6 +626,52 @@ func (h *Handler) UploadDriverDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+// AuthService is the subset of auth.Service used by the admin handler.
+type AuthService interface {
+	InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email *string) (string, error)
+	VerifyOTPCode(ctx context.Context, phone, code string) error
+}
+
+// POST /api/v1/admin/drivers/send-otp
+// Sends a 6-digit OTP to the driver's phone number for verification.
+func (h *Handler) SendDriverOTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Phone == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone is required")
+		return
+	}
+	devOTP, err := h.auth.InitiateOTP(r.Context(), body.Phone, "ADMIN_DRIVER_VERIFY", "admin", "web", "", nil)
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusInternalServerError, "OTP_SEND_FAILED", "failed to send OTP")
+		return
+	}
+	if h.env != "production" && devOTP != "" {
+		respond.OK(w, map[string]string{"dev_otp": devOTP})
+		return
+	}
+	respond.NoContent(w)
+}
+
+// POST /api/v1/admin/drivers/verify-otp
+// Verifies the OTP submitted by the admin for the driver's phone.
+func (h *Handler) VerifyDriverOTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+		OTP   string `json:"otp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Phone == "" || body.OTP == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone and otp are required")
+		return
+	}
+	if err := h.auth.VerifyOTPCode(r.Context(), body.Phone, body.OTP); err != nil {
+		respond.ErrorMsg(w, http.StatusUnauthorized, "INVALID_OTP", "invalid or expired OTP")
+		return
+	}
+	respond.OK(w, map[string]string{"status": "verified"})
+}
 
 func paginate(r *http.Request) (int, int) {
 	limit := 20
