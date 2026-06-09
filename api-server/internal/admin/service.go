@@ -1072,6 +1072,12 @@ func (s *Service) DeleteDriver(ctx context.Context, profileID string) error {
 	return err
 }
 
+// DriverDocumentInput represents a single document to attach during driver registration.
+type DriverDocumentInput struct {
+	DocumentType string
+	FileURL      string
+}
+
 // AdminCreateDriverInput holds the payload for admin-registered drivers.
 type AdminCreateDriverInput struct {
 	FullName        string
@@ -1092,6 +1098,7 @@ type AdminCreateDriverInput struct {
 	ProfileImageURL string
 	PassengerSeats  *int
 	LoadCapacityKg  *int
+	Documents       []DriverDocumentInput
 }
 
 // Allowed driver document types (aligned with mobile onboarding + admin registration).
@@ -1180,12 +1187,20 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		return nil, mapAdminCreateDriverError(err, in)
 	}
 
+	// Attach documents — mirrors mobile step 2 (license, insurance, authorization)
+	for _, doc := range in.Documents {
+		if err := s.UpsertDriverDocument(ctx, profileID, doc.DocumentType, doc.FileURL); err != nil {
+			s.log.Warn().Err(err).Str("document_type", doc.DocumentType).Msg("admin: failed to attach document during driver registration")
+		}
+	}
+
 	return map[string]interface{}{
 		"id":              profileID,
 		"user_id":         userID,
 		"transport_type":  in.TransportType,
 		"vehicle_plate":   in.VehiclePlate,
 		"approval_status": "PENDING_REVIEW",
+		"documents_saved": len(in.Documents),
 		"message":         "Driver registered. Pending KYC verification.",
 	}, nil
 }

@@ -277,7 +277,6 @@ func (h *Handler) DeviceCollisions(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, data)
 }
 
-// GET /api/v1/admin/drivers/:id
 // POST /api/v1/admin/drivers
 func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -299,14 +298,44 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		ProfileImageURL string `json:"profile_image_url"`
 		PassengerSeats  *int   `json:"passenger_seats"`
 		LoadCapacityKg  *int   `json:"load_capacity_kg"`
+		Documents       []struct {
+			DocumentType string `json:"document_type"`
+			FileURL      string `json:"file_url"`
+		} `json:"documents"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
 		return
 	}
-	if body.Phone == "" || body.TransportType == "" || body.VehiclePlate == "" || body.LicenseNumber == "" {
-		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone, transport_type, vehicle_plate, and license_number are required")
+	// Required fields — mirrors mobile onboarding step 0 + step 1
+	switch {
+	case body.Phone == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone is required")
 		return
+	case body.TransportType == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "transport_type is required")
+		return
+	case body.VehiclePlate == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "vehicle_plate is required")
+		return
+	case body.LicenseNumber == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "license_number is required")
+		return
+	case body.DateOfBirth == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "date_of_birth is required")
+		return
+	case body.Province == "" || body.District == "" || body.Sector == "" || body.Cell == "" || body.Village == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "province, district, sector, cell, and village are required")
+		return
+	case body.MomoPayCode == "" && body.MerchantPayCode == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "at least one of momo_pay_code or merchant_pay_code is required")
+		return
+	}
+	docs := make([]DriverDocumentInput, 0, len(body.Documents))
+	for _, d := range body.Documents {
+		if d.DocumentType != "" && d.FileURL != "" {
+			docs = append(docs, DriverDocumentInput{DocumentType: d.DocumentType, FileURL: d.FileURL})
+		}
 	}
 	out, err := h.svc.CreateDriverFromAdmin(r.Context(), AdminCreateDriverInput{
 		FullName: body.FullName, Phone: body.Phone,
@@ -317,6 +346,7 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		MomoProvider: body.MomoProvider, MomoPayCode: body.MomoPayCode,
 		MerchantPayCode: body.MerchantPayCode, ProfileImageURL: body.ProfileImageURL,
 		PassengerSeats: body.PassengerSeats, LoadCapacityKg: body.LoadCapacityKg,
+		Documents: docs,
 	})
 	if err != nil {
 		respond.Error(w, err)
