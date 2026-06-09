@@ -144,7 +144,7 @@ func main() {
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
 	negH := negotiation.NewHandler(negSvc)
-	adminH := admin.NewHandler(adminSvc)
+	adminH := admin.NewHandler(adminSvc, authSvc, cfg.Env)
 	anaH := analytics.NewHandler(anaRepo)
 	trackH := tracking.NewHandler(hub, driverSvc, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
@@ -370,6 +370,8 @@ func main() {
 		r.Post("/account/2fa/disable", teamH.Disable2FA)
 
 		// Drivers
+		r.Post("/drivers/send-otp", adminH.SendDriverOTP)
+		r.Post("/drivers/verify-otp", adminH.VerifyDriverOTP)
 		r.Get("/drivers", adminH.ListDrivers)
 		r.Post("/drivers", adminH.CreateDriver)
 		r.Get("/drivers/overview", adminH.DriverOverview)

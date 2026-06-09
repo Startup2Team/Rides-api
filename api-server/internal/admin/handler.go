@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -14,11 +15,13 @@ import (
 
 // Handler exposes admin HTTP endpoints.
 type Handler struct {
-	svc AdminService
+	svc  AdminService
+	auth AuthService
+	env  string
 }
 
-func NewHandler(svc AdminService) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc AdminService, auth AuthService, env string) *Handler {
+	return &Handler{svc: svc, auth: auth, env: env}
 }
 
 // ── Drivers ───────────────────────────────────────────────────────────────
@@ -277,9 +280,9 @@ func (h *Handler) DeviceCollisions(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, data)
 }
 
-// GET /api/v1/admin/drivers/:id
 // POST /api/v1/admin/drivers
 func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
 	var body struct {
 		FullName        string `json:"full_name"`
 		Phone           string `json:"phone"`
@@ -299,17 +302,51 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		ProfileImageURL string `json:"profile_image_url"`
 		PassengerSeats  *int   `json:"passenger_seats"`
 		LoadCapacityKg  *int   `json:"load_capacity_kg"`
+		Documents       []struct {
+			DocumentType string `json:"document_type"`
+			FileURL      string `json:"file_url"`
+		} `json:"documents"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
 		return
 	}
-	if body.Phone == "" || body.TransportType == "" || body.VehiclePlate == "" || body.LicenseNumber == "" {
-		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone, transport_type, vehicle_plate, and license_number are required")
+	// Required fields — mirrors mobile onboarding step 0 + step 1
+	switch {
+	case body.Phone == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone is required")
+		return
+	case body.TransportType == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "transport_type is required")
+		return
+	case body.VehiclePlate == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "vehicle_plate is required")
+		return
+	case body.LicenseNumber == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "license_number is required")
+		return
+	case len(body.LicenseNumber) != 16:
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "license_number must be exactly 16 characters")
+		return
+	case body.DateOfBirth == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "date_of_birth is required")
+		return
+	case body.Province == "" || body.District == "" || body.Sector == "" || body.Cell == "" || body.Village == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "province, district, sector, cell, and village are required")
+		return
+	case body.MomoPayCode == "" && body.MerchantPayCode == "":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "at least one of momo_pay_code or merchant_pay_code is required")
 		return
 	}
+	docs := make([]DriverDocumentInput, 0, len(body.Documents))
+	for _, d := range body.Documents {
+		if d.DocumentType != "" && d.FileURL != "" {
+			docs = append(docs, DriverDocumentInput{DocumentType: d.DocumentType, FileURL: d.FileURL})
+		}
+	}
 	out, err := h.svc.CreateDriverFromAdmin(r.Context(), AdminCreateDriverInput{
-		FullName: body.FullName, Phone: body.Phone,
+		AdminUserID: claims.UserID,
+		FullName:    body.FullName, Phone: body.Phone,
 		TransportType: body.TransportType, VehiclePlate: body.VehiclePlate,
 		LicenseNumber: body.LicenseNumber, DateOfBirth: body.DateOfBirth,
 		Province: body.Province, District: body.District, Sector: body.Sector,
@@ -317,6 +354,7 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		MomoProvider: body.MomoProvider, MomoPayCode: body.MomoPayCode,
 		MerchantPayCode: body.MerchantPayCode, ProfileImageURL: body.ProfileImageURL,
 		PassengerSeats: body.PassengerSeats, LoadCapacityKg: body.LoadCapacityKg,
+		Documents: docs,
 	})
 	if err != nil {
 		respond.Error(w, err)
@@ -588,6 +626,52 @@ func (h *Handler) UploadDriverDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+// AuthService is the subset of auth.Service used by the admin handler.
+type AuthService interface {
+	InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email *string) (string, error)
+	VerifyOTPCode(ctx context.Context, phone, code string) error
+}
+
+// POST /api/v1/admin/drivers/send-otp
+// Sends a 6-digit OTP to the driver's phone number for verification.
+func (h *Handler) SendDriverOTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Phone == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone is required")
+		return
+	}
+	devOTP, err := h.auth.InitiateOTP(r.Context(), body.Phone, "ADMIN_DRIVER_VERIFY", "admin", "web", "", nil)
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusInternalServerError, "OTP_SEND_FAILED", "failed to send OTP")
+		return
+	}
+	if h.env != "production" && devOTP != "" {
+		respond.OK(w, map[string]string{"dev_otp": devOTP})
+		return
+	}
+	respond.NoContent(w)
+}
+
+// POST /api/v1/admin/drivers/verify-otp
+// Verifies the OTP submitted by the admin for the driver's phone.
+func (h *Handler) VerifyDriverOTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+		OTP   string `json:"otp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Phone == "" || body.OTP == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone and otp are required")
+		return
+	}
+	if err := h.auth.VerifyOTPCode(r.Context(), body.Phone, body.OTP); err != nil {
+		respond.ErrorMsg(w, http.StatusUnauthorized, "INVALID_OTP", "invalid or expired OTP")
+		return
+	}
+	respond.OK(w, map[string]string{"status": "verified"})
+}
 
 func paginate(r *http.Request) (int, int) {
 	limit := 20
