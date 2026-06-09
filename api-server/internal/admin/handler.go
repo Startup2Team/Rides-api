@@ -321,6 +321,9 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 	case body.LicenseNumber == "":
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "license_number is required")
 		return
+	case len(body.LicenseNumber) != 16:
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "license_number must be exactly 16 characters")
+		return
 	case body.DateOfBirth == "":
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "date_of_birth is required")
 		return
