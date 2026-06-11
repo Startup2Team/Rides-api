@@ -93,6 +93,9 @@ type RideConfig struct {
 	// DevSkipGeofence bypasses arrival/start/complete radius checks.
 	// NEVER set true in production.
 	DevSkipGeofence bool
+	// MaxInProgressMinutes is how long a ride may stay IN_PROGRESS before the
+	// dead-man finalizer auto-completes it (driver abandoned / went offline).
+	MaxInProgressMinutes int
 }
 
 type GPSConfig struct {
@@ -163,6 +166,7 @@ func Load() (*Config, error) {
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
 	cfg.Ride.DevSkipGeofence = getEnvBool("DEV_SKIP_GEOFENCE", false)
+	cfg.Ride.MaxInProgressMinutes = getEnvInt("RIDE_MAX_IN_PROGRESS_MINUTES", 120)
 
 	cfg.GPS.MaxSpeedKMH = getEnvFloat("GPS_MAX_SPEED_KMH", 200.0)
 	cfg.GPS.StaleThresholdSeconds = getEnvFloat("GPS_STALE_THRESHOLD_SECONDS", 300.0)

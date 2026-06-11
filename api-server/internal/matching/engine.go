@@ -165,7 +165,7 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 
 	// All attempts exhausted
 	e.log.Warn().Str("ride_id", rideID).Msg("matching: no driver found — cancelling ride")
-	_ = e.rideRepo.Cancel(ctx, rideID, "no driver found after max attempts", "SYSTEM")
+	_, _ = e.rideRepo.Cancel(ctx, rideID, "no driver found after max attempts", "SYSTEM")
 	_ = e.rideRepo.AppendEvent(ctx, rideID, "ride.cancelled", "SYSTEM", rideID, map[string]interface{}{
 		"reason": "no_driver_found",
 	})

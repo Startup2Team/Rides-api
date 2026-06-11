@@ -37,9 +37,11 @@ type RouteFareRecorder interface {
 	RecordAgreedFare(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string, agreedFare float64)
 }
 
-// PackagesService is used to deduct a ride credit when a trip completes.
+// PackagesService charges a ride credit when a fare is agreed and refunds it
+// on server-verified blameless cancellations.
 type PackagesService interface {
 	DeductCredit(ctx context.Context, driverUserID string) error
+	RefundCredit(ctx context.Context, driverUserID string) error
 }
 
 // Service handles ride lifecycle business logic.
@@ -222,6 +224,110 @@ func (s *Service) GetActiveRideForDriver(ctx context.Context, driverUserID strin
 	return s.repo.FindActiveByDriver(ctx, driverUserID)
 }
 
+// refundDriverCredit returns the agreed-fare credit to a driver after a
+// blameless cancellation. Best-effort: a refund failure is logged, never fatal.
+func (s *Service) refundDriverCredit(ctx context.Context, rideID string, driverProfileID *string, why string) {
+	if s.packages == nil || driverProfileID == nil {
+		return
+	}
+	driverUserID, err := s.repo.FindDriverUserIDByProfileID(ctx, *driverProfileID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: credit refund — could not resolve driver user")
+		return
+	}
+	if err := s.packages.RefundCredit(ctx, driverUserID); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Str("driver_user_id", driverUserID).Msg("ride: credit refund failed")
+		return
+	}
+	s.log.Info().Str("ride_id", rideID).Str("driver_user_id", driverUserID).Str("reason", why).Msg("ride: credit refunded")
+}
+
+// creditCharged reports whether the ride had reached fare agreement — the
+// point at which the driver's credit was deducted.
+func creditCharged(status Status) bool {
+	switch status {
+	case StatusConfirmed, StatusDriverEnRoute, StatusDriverArrived, StatusInProgress:
+		return true
+	}
+	return false
+}
+
+// ChargeForAgreedFare deducts one ride credit when a fare is agreed (the ride
+// reaches CONFIRMED via negotiation Accept or a manual fare lock). Charging at
+// agreement — not at completion — is what closes the "do the trip then never
+// tap Complete" loophole: the driver is already committed the moment a deal
+// exists. Idempotent per ride via a Redis guard so Accept + manual-lock can't
+// double-charge. Best-effort: a failure is logged, never blocks the ride.
+func (s *Service) ChargeForAgreedFare(ctx context.Context, rideID string) {
+	if s.packages == nil {
+		return
+	}
+	ok, err := s.redis.SetNX(ctx, "ride:credit_charged:"+rideID, "1", 24*time.Hour).Result()
+	if err != nil || !ok {
+		return // redis error, or already charged for this ride
+	}
+	r, err := s.repo.FindByID(ctx, rideID)
+	if err != nil || r.DriverID == nil {
+		return
+	}
+	driverUserID, err := s.repo.FindDriverUserIDByProfileID(ctx, *r.DriverID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: credit charge — could not resolve driver user")
+		return
+	}
+	if err := s.packages.DeductCredit(ctx, driverUserID); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Str("driver_user_id", driverUserID).Msg("ride: credit charge on agreement failed")
+		return
+	}
+	s.log.Info().Str("ride_id", rideID).Str("driver_user_id", driverUserID).Msg("ride: credit charged on fare agreement")
+}
+
+// FinalizeStaleInProgressRides auto-completes rides stuck IN_PROGRESS past
+// cfg.Ride.MaxInProgressMinutes — a driver started a trip but never completed
+// it (went offline, killed the app). Without this the ride lingers forever as a
+// ghost AND keeps the driver locked ON_TRIP, unable to take new work. The credit
+// was charged at fare agreement, so there is nothing to charge or refund here —
+// we just settle the final fare and release both parties. Returns how many were
+// finalized. Designed to be called on a periodic background tick.
+func (s *Service) FinalizeStaleInProgressRides(ctx context.Context) (int, error) {
+	stale, err := s.repo.FindStaleInProgress(ctx, s.cfg.Ride.MaxInProgressMinutes)
+	if err != nil {
+		return 0, err
+	}
+	finalized := 0
+	for _, r := range stale {
+		// Atomic transition — skip if the ride changed underneath us.
+		if err := s.repo.Transition(ctx, r.ID, StatusInProgress, StatusCompleted); err != nil {
+			continue
+		}
+		_ = s.repo.SetCompleted(ctx, r.ID)
+		_ = s.repo.SetFinalFare(ctx, r.ID, r.AgreedFare, 0, 0, false, 0)
+		_ = s.repo.IncrementDriverRides(ctx, r.DriverUserID)
+		_ = s.repo.AppendEvent(ctx, r.ID, "ride.auto_finalized", "SYSTEM", r.ID, map[string]interface{}{
+			"reason":      "in_progress_timeout",
+			"max_minutes": s.cfg.Ride.MaxInProgressMinutes,
+		})
+		s.analytics.Publish(ctx, "ride.auto_finalized", "SYSTEM", r.ID, &r.ID, map[string]interface{}{
+			"ride_id": r.ID, "reason": "in_progress_timeout",
+		})
+		// Release the driver (clears ON_TRIP, re-adds to geo) and the customer's
+		// active-ride pointer so both can move on.
+		profileID := r.DriverProfileID
+		s.releaseRideRedisState(ctx, r.ID, r.CustomerID, &profileID, r.TransportType)
+		s.hub.SendToCustomer(r.ID, tracking.Message{
+			Type: "ride_completed", RideID: r.ID,
+			Payload: map[string]interface{}{"final_fare": r.AgreedFare, "auto": true},
+		})
+		s.hub.SendToDriver(r.DriverProfileID, tracking.Message{
+			Type: "ride_completed", RideID: r.ID,
+			Payload: map[string]interface{}{"reason": "Ride auto-finalized after timeout.", "auto": true},
+		})
+		s.log.Warn().Str("ride_id", r.ID).Str("driver_profile_id", r.DriverProfileID).Msg("ride: auto-finalized stale IN_PROGRESS ride")
+		finalized++
+	}
+	return finalized, nil
+}
+
 // CancelRide cancels a ride initiated by a customer.
 func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason string) error {
 	r, err := s.repo.FindByIDAndCustomer(ctx, rideID, customerID)
@@ -240,14 +346,24 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 	}
 	cancellationFee := 0.0
 	if r.Status == StatusDriverArrived && r.PricingConfigID != nil && s.fareRepo != nil {
-		cfg, err := s.fareRepo.GetConfigByID(ctx, *r.PricingConfigID)
-		if err == nil {
+		cfg, ferr := s.fareRepo.GetConfigByID(ctx, *r.PricingConfigID)
+		if ferr == nil {
 			cancellationFee = fare.CancellationFee(cfg, true)
 		}
 	}
 
-	if err := s.repo.CancelWithFee(ctx, rideID, reason, "CUSTOMER", cancellationFee); err != nil {
+	didCancel, err := s.repo.CancelWithFee(ctx, rideID, reason, "CUSTOMER", cancellationFee)
+	if err != nil {
 		return err
+	}
+	if !didCancel {
+		return nil // already terminal between read and write — idempotent
+	}
+
+	// The customer cancelled after the fare was agreed → the driver is blameless,
+	// so refund the credit charged at agreement.
+	if creditCharged(r.Status) {
+		s.refundDriverCredit(ctx, rideID, r.DriverID, "customer_cancelled")
 	}
 
 	s.releaseRideRedisState(ctx, rideID, customerID, r.DriverID, r.TransportType)
@@ -295,7 +411,8 @@ func (s *Service) StartNegotiationTimeout(rideID string) {
 			return
 		}
 		s.log.Warn().Str("ride_id", rideID).Msg("ride: negotiation timeout — cancelling")
-		_ = s.repo.Cancel(ctx, rideID, "negotiation_timeout", "SYSTEM")
+		// NEGOTIATING — no credit was charged yet (charge happens at agreement), so no refund.
+		_, _ = s.repo.Cancel(ctx, rideID, "negotiation_timeout", "SYSTEM")
 		s.releaseRideRedisState(ctx, rideID, r.CustomerID, r.DriverID, r.TransportType)
 		_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", "SYSTEM", rideID, map[string]interface{}{
 			"reason": "negotiation_timeout",
@@ -461,8 +578,19 @@ func (s *Service) CancelAfterPickupExpiry(ctx context.Context, rideID, driverUse
 	if r.Status != StatusDriverArrived || !r.PickupExpired {
 		return apperrors.New(409, "PICKUP_NOT_EXPIRED", "pickup wait window has not expired")
 	}
-	if err := s.repo.Cancel(ctx, rideID, "customer_no_show", "DRIVER"); err != nil {
+	didCancel, err := s.repo.Cancel(ctx, rideID, "customer_no_show", "DRIVER")
+	if err != nil {
 		return err
+	}
+	if !didCancel {
+		return nil
+	}
+	// Verified customer no-show: the driver was geofenced at the pickup and the
+	// server-timed wait window expired. The driver is blameless, so refund the
+	// credit charged at agreement. (A plain driver cancel does NOT refund — see
+	// DriverCancelRide — which is what discourages bailing on agreed rides.)
+	if creditCharged(r.Status) {
+		s.refundDriverCredit(ctx, rideID, r.DriverID, "customer_no_show")
 	}
 	s.releaseRideRedisState(ctx, rideID, r.CustomerID, r.DriverID, r.TransportType)
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", "DRIVER", driverUserID, map[string]interface{}{
@@ -600,12 +728,10 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 		s.routes.RecordAgreedFare(ctx, r.PickupPoint.Lat, r.PickupPoint.Lng, destination.Lat, destination.Lng, r.TransportType, *r.AgreedFare)
 	}
 
-	// Deduct one ride credit — fire-and-forget on error so the completion is never blocked.
-	if s.packages != nil {
-		if err := s.packages.DeductCredit(ctx, driverUserID); err != nil {
-			s.log.Warn().Err(err).Str("driver_id", driverUserID).Msg("ride: credit deduction failed on complete")
-		}
-	}
+	// Note: the ride credit was charged when the fare was agreed (negotiation
+	// Accept / manual lock → CONFIRMED), not here — completing must never
+	// double-charge, and charging at agreement closes the "finish the trip but
+	// never tap Complete" free-ride loophole.
 
 	profile, _ := s.repo.FindDriverProfileByUserID(ctx, driverUserID)
 	if profile != nil {
@@ -692,9 +818,17 @@ func (s *Service) DriverCancelRide(ctx context.Context, rideID, driverUserID, re
 	if !validFrom[r.Status] {
 		return apperrors.ErrInvalidTransition
 	}
-	if err := s.repo.Cancel(ctx, rideID, reason, "DRIVER"); err != nil {
+	didCancel, err := s.repo.Cancel(ctx, rideID, reason, "DRIVER")
+	if err != nil {
 		return err
 	}
+	if !didCancel {
+		return nil
+	}
+	// Deliberately NO credit refund here: a driver who bails on an agreed ride
+	// forfeits the credit. That's the cost that discourages accepting-then-
+	// abandoning and nudges drivers to actually complete. The only blameless
+	// driver exit is a verified no-show via CancelAfterPickupExpiry.
 	s.releaseRideRedisState(ctx, rideID, r.CustomerID, r.DriverID, r.TransportType)
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", "DRIVER", driverUserID, map[string]interface{}{
 		"reason": reason, "status_at_cancel": string(r.Status),

@@ -21,6 +21,7 @@ type Repo interface {
 	SetPackageActive(ctx context.Context, packageID string, active bool) error
 	GetActiveCredit(ctx context.Context, driverUserID string) (*DriverCredit, error)
 	DeductCredit(ctx context.Context, driverUserID string) error
+	RefundCredit(ctx context.Context, driverUserID string) error
 	PurchasePackage(ctx context.Context, driverUserID, packageID, vehicleTypeID string, ridesTotal, validityDays int, isPromotional bool) (*DriverCredit, error)
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
 }
@@ -85,9 +86,18 @@ func (s *Service) HasCredits(ctx context.Context, driverUserID, vehicleType stri
 }
 
 // DeductCredit decrements the driver's best usable credit by one.
-// Called after a ride is COMPLETED — never for cancellations.
+// Called when a fare is agreed (NEGOTIATING → CONFIRMED) — the credit is
+// committed the moment a deal exists, so going offline mid-ride can't dodge it.
 func (s *Service) DeductCredit(ctx context.Context, driverUserID string) error {
 	return s.repo.DeductCredit(ctx, driverUserID)
+}
+
+// RefundCredit returns one ride to the driver's balance. Only called on
+// server-verified blameless cancellations: the customer cancelled after the
+// fare was agreed, or a customer no-show (driver geofenced at pickup AND the
+// server-timed wait window expired).
+func (s *Service) RefundCredit(ctx context.Context, driverUserID string) error {
+	return s.repo.RefundCredit(ctx, driverUserID)
 }
 
 // ListPackages returns active packages available for purchase for a vehicle type.

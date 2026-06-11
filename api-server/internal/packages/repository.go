@@ -126,6 +126,28 @@ func (r *Repository) DeductCredit(ctx context.Context, driverUserID string) erro
 	return err
 }
 
+// RefundCredit returns one ride to the driver's credit balance. It mirrors
+// DeductCredit's row selection so the ride goes back onto the same credit it
+// was most plausibly taken from, and never inflates a credit past its
+// purchased total (rides_remaining < rides_total guard).
+func (r *Repository) RefundCredit(ctx context.Context, driverUserID string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE driver_ride_credits
+		SET rides_remaining = rides_remaining + 1
+		WHERE id = (
+		    SELECT id
+		    FROM driver_ride_credits
+		    WHERE driver_id = $1
+		      AND is_active = TRUE
+		      AND rides_remaining < rides_total
+		      AND expires_at > NOW()
+		    ORDER BY is_promotional DESC, expires_at ASC
+		    LIMIT 1
+		)
+	`, driverUserID)
+	return err
+}
+
 // PurchasePackage inserts a new credit record for a driver and returns it.
 func (r *Repository) PurchasePackage(ctx context.Context, driverUserID, packageID, vehicleTypeID string, ridesTotal, validityDays int, isPromotional bool) (*DriverCredit, error) {
 	c := &DriverCredit{}

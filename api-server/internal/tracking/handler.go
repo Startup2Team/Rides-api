@@ -89,7 +89,18 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.hub.RegisterDriver(driverProfile.ID, client)
-	defer h.hub.UnregisterDriver(driverProfile.ID)
+	// ── Presence tied to the socket ───────────────────────────────────────
+	// The WebSocket connection is the real "is this driver reachable" signal.
+	// On connect, (re)add an online+idle driver to the geo index so a reconnect
+	// restores discoverability immediately. On disconnect, remove them so we
+	// never offer a ride to a driver whose app is gone. A driver mid-ride is
+	// left untouched in both cases (they're already out of the index and must
+	// stay assigned).
+	h.restoreDriverPresence(r.Context(), driverProfile.ID, driverProfile.TransportType)
+	defer func() {
+		h.hub.UnregisterDriver(driverProfile.ID)
+		h.clearDriverPresence(context.Background(), driverProfile.ID, driverProfile.TransportType)
+	}()
 
 	// ── State replay on reconnect ─────────────────────────────────────────
 	// After a kill/background/signal-drop the driver reconnects here.
@@ -223,6 +234,43 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// restoreDriverPresence re-adds an online, idle driver to the geo index from
+// their last known location when their WebSocket connects. No-op if the driver
+// isn't AVAILABLE or is mid-ride.
+func (h *Handler) restoreDriverPresence(ctx context.Context, profileID, vehicleType string) {
+	if state, _ := h.redis.Get(ctx, rkeys.K.DriverState(profileID)).Result(); state != "AVAILABLE" {
+		return
+	}
+	if active, _ := h.redis.Get(ctx, rkeys.K.DriverActiveRide(profileID)).Result(); active != "" {
+		return
+	}
+	raw, err := h.redis.Get(ctx, rkeys.K.DriverLocation(profileID)).Result()
+	if err != nil {
+		return
+	}
+	var loc struct {
+		Lat float64 `json:"lat"`
+		Lng float64 `json:"lng"`
+	}
+	if json.Unmarshal([]byte(raw), &loc) == nil && (loc.Lat != 0 || loc.Lng != 0) {
+		h.redis.GeoAdd(ctx, rkeys.K.DriverGeoIndex(vehicleType), &goredis.GeoLocation{
+			Name:      profileID,
+			Longitude: loc.Lng,
+			Latitude:  loc.Lat,
+		})
+	}
+}
+
+// clearDriverPresence removes a driver from the geo index when their WebSocket
+// drops, so we never offer a ride to an unreachable app. A driver mid-ride is
+// left assigned (and is already out of the index).
+func (h *Handler) clearDriverPresence(ctx context.Context, profileID, vehicleType string) {
+	if active, _ := h.redis.Get(ctx, rkeys.K.DriverActiveRide(profileID)).Result(); active != "" {
+		return
+	}
+	h.redis.ZRem(ctx, rkeys.K.DriverGeoIndex(vehicleType), profileID)
 }
 
 // WS /ws/customer

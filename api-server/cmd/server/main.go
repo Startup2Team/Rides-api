@@ -222,6 +222,27 @@ func main() {
 	dashSvc.WarmCache(bgCtx)
 	go dashSvc.PollLoop(bgCtx)
 
+	// ── Dead-man finalizer ────────────────────────────────────────────────────
+	// Auto-complete rides stuck IN_PROGRESS past RIDE_MAX_IN_PROGRESS_MINUTES so
+	// a driver who started a trip then went offline doesn't leave a ghost ride
+	// (and isn't locked ON_TRIP forever). Runs every 5 minutes.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := rideSvc.FinalizeStaleInProgressRides(bgCtx); err != nil {
+					log.Error().Err(err).Msg("finalizer: failed to scan stale in-progress rides")
+				} else if n > 0 {
+					log.Warn().Int("count", n).Msg("finalizer: auto-finalized stale in-progress rides")
+				}
+			}
+		}
+	}()
+
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
 

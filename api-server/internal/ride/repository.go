@@ -401,25 +401,45 @@ func (repo *Repository) SetCompletionDestination(ctx context.Context, rideID str
 	return err
 }
 
-func (repo *Repository) Cancel(ctx context.Context, rideID, reason, cancelledByRole string) error {
-	_, err := repo.db.Exec(ctx, `
+// Cancel marks a ride CANCELLED only if it isn't already terminal. The bool
+// reports whether THIS call performed the transition — callers use it to make
+// side effects (credit refunds, analytics) exactly-once under concurrent cancels.
+func (repo *Repository) Cancel(ctx context.Context, rideID, reason, cancelledByRole string) (bool, error) {
+	tag, err := repo.db.Exec(ctx, `
 		UPDATE rides SET status = 'CANCELLED', cancel_reason = $1, cancelled_by_role = $2, updated_at = NOW()
-		WHERE id = $3
+		WHERE id = $3 AND status NOT IN ('COMPLETED','CANCELLED')
 	`, reason, cancelledByRole, rideID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
-func (repo *Repository) CancelWithFee(ctx context.Context, rideID, reason, cancelledByRole string, cancellationFee float64) error {
-	_, err := repo.db.Exec(ctx, `
+// CancelWithFee is Cancel plus a cancellation fee; same exactly-once bool contract.
+func (repo *Repository) CancelWithFee(ctx context.Context, rideID, reason, cancelledByRole string, cancellationFee float64) (bool, error) {
+	tag, err := repo.db.Exec(ctx, `
 		UPDATE rides
 		SET status = 'CANCELLED',
 		    cancel_reason = $1,
 		    cancelled_by_role = $2,
 		    cancellation_fee_rwf = $3,
 		    updated_at = NOW()
-		WHERE id = $4
+		WHERE id = $4 AND status NOT IN ('COMPLETED','CANCELLED')
 	`, reason, cancelledByRole, cancellationFee, rideID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// FindDriverUserIDByProfileID resolves a driver profile id to its user id.
+// Used by credit charge/refund paths, which are keyed by user id.
+func (repo *Repository) FindDriverUserIDByProfileID(ctx context.Context, profileID string) (string, error) {
+	var userID string
+	err := repo.db.QueryRow(ctx,
+		`SELECT user_id FROM driver_profiles WHERE id = $1`, profileID,
+	).Scan(&userID)
+	return userID, err
 }
 
 func (repo *Repository) SetFinalFare(ctx context.Context, rideID string, finalFare *float64, waitingSeconds int, waitingCharge float64, nightApplied bool, nightPct float64) error {
@@ -493,6 +513,43 @@ func (repo *Repository) FindActiveByCustomer(ctx context.Context, customerID str
 		customerID,
 	)
 	return scanRide(row)
+}
+
+// StaleRide is the minimal projection the dead-man finalizer needs.
+type StaleRide struct {
+	ID              string
+	CustomerID      string
+	DriverProfileID string
+	DriverUserID    string
+	TransportType   string
+	AgreedFare      *float64
+}
+
+// FindStaleInProgress returns rides stuck IN_PROGRESS longer than
+// olderThanMinutes — trips a driver started but never completed (went offline,
+// killed the app, etc.).
+func (repo *Repository) FindStaleInProgress(ctx context.Context, olderThanMinutes int) ([]*StaleRide, error) {
+	rows, err := repo.db.Query(ctx, `
+		SELECT r.id, r.customer_id, r.driver_id, dp.user_id, r.transport_type, r.agreed_fare
+		FROM rides r
+		JOIN driver_profiles dp ON dp.id = r.driver_id
+		WHERE r.status = 'IN_PROGRESS'
+		  AND r.started_at IS NOT NULL
+		  AND r.started_at < NOW() - make_interval(mins => $1)
+	`, olderThanMinutes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*StaleRide
+	for rows.Next() {
+		sr := &StaleRide{}
+		if err := rows.Scan(&sr.ID, &sr.CustomerID, &sr.DriverProfileID, &sr.DriverUserID, &sr.TransportType, &sr.AgreedFare); err != nil {
+			continue
+		}
+		out = append(out, sr)
+	}
+	return out, rows.Err()
 }
 
 // SetPickupExpired marks a ride's pickup window as expired.

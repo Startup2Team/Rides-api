@@ -20,12 +20,16 @@ import (
 // maxOffersPerSide matches the frontend: each party gets at most 3 offers.
 const maxOffersPerSide = 3
 
-// TimeoutManager resets or cancels the negotiation inactivity clock.
-// Implemented by ride.Service; injected via SetTimeoutManager to avoid an
-// import cycle (negotiation → ride is fine; ride → negotiation would cycle).
+// TimeoutManager resets/cancels the negotiation inactivity clock and charges
+// the ride credit at fare agreement. Implemented by ride.Service; injected via
+// SetTimeoutManager to avoid an import cycle (negotiation → ride is fine;
+// ride → negotiation would cycle).
 type TimeoutManager interface {
 	ResetNegotiationTimeout(rideID string)
 	CancelNegotiationTimeout(rideID string)
+	// ChargeForAgreedFare deducts the driver's ride credit the moment a fare is
+	// agreed (NEGOTIATING → CONFIRMED). Idempotent per ride.
+	ChargeForAgreedFare(ctx context.Context, rideID string)
 }
 
 // Service handles fare negotiation business logic.
@@ -201,6 +205,9 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 
 	// Fare is agreed — disarm the inactivity timer cleanly.
 	if s.timeoutMgr != nil {
+		// Fare agreed → charge the driver's credit now (closes the complete-dodge
+		// loophole), and disarm the inactivity timer.
+		s.timeoutMgr.ChargeForAgreedFare(ctx, rideID)
 		s.timeoutMgr.CancelNegotiationTimeout(rideID)
 	}
 
@@ -260,6 +267,9 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 	})
 
 	if s.timeoutMgr != nil {
+		// Fare agreed → charge the driver's credit now (closes the complete-dodge
+		// loophole), and disarm the inactivity timer.
+		s.timeoutMgr.ChargeForAgreedFare(ctx, rideID)
 		s.timeoutMgr.CancelNegotiationTimeout(rideID)
 	}
 

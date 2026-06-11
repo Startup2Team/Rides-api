@@ -260,32 +260,28 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		"heading":    update.Heading,
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
-	s.redis.Set(ctx, rkeys.K.DriverLocation(profile.ID), locJSON, 30*time.Second)
+	// 120s TTL: clients now throttle pings (idle drivers send a heartbeat only
+	// every ~60s), so a 30s TTL would let the location key expire between
+	// heartbeats. 120s leaves headroom for a missed beat before the geofence
+	// has to fall back to the PostGIS location.
+	s.redis.Set(ctx, rkeys.K.DriverLocation(profile.ID), locJSON, 120*time.Second)
 	s.redis.LPush(ctx, rkeys.K.DriverLocationHistory(profile.ID), locJSON)
 	s.redis.LTrim(ctx, rkeys.K.DriverLocationHistory(profile.ID), 0, 9)
 
-	// Update Redis GEO index (skip if movement < 15m — noise filter)
-	prevEntries, _ := s.redis.LRange(ctx, rkeys.K.DriverLocationHistory(profile.ID), 1, 1).Result()
-	skipGeo := false
-	if len(prevEntries) > 0 {
-		var prev struct {
-			Lat float64 `json:"lat"`
-			Lng float64 `json:"lng"`
-		}
-		if json.Unmarshal([]byte(prevEntries[0]), &prev) == nil {
-			prevPoint := geo.Point{Lat: prev.Lat, Lng: prev.Lng}
-			if geo.DistanceKM(prevPoint, newPoint)*1000 < 15 {
-				skipGeo = true
-			}
-		}
-	}
-	if !skipGeo {
-		s.redis.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
-			Name:      profile.ID,
-			Longitude: update.Lng,
-			Latitude:  update.Lat,
-		})
-	}
+	// Re-assert the driver's presence in the Redis GEO index on EVERY ping.
+	//
+	// We used to skip this when movement was < 15m (a write-saving "noise
+	// filter"), but that left a parked-yet-online driver invisible: if their
+	// geo entry was ever dropped (trip handoff, Redis restart/eviction, manual
+	// flush) while stationary, no subsequent ping would re-add them and they
+	// became unmatchable despite being online. GeoAdd is O(log N) and
+	// idempotent for an unchanged position, so always re-adding is the correct
+	// trade-off — an online driver who is pinging is always discoverable.
+	s.redis.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
+		Name:      profile.ID,
+		Longitude: update.Lng,
+		Latitude:  update.Lat,
+	})
 
 	_ = s.repo.UpsertLocation(ctx, profile.ID, newPoint, update.SpeedKMH, update.Heading)
 	return nil
