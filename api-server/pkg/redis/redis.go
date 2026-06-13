@@ -108,6 +108,10 @@ func (Keys) CustomerDailyCancel(customerID string) string {
 	return fmt.Sprintf("customer:cancels:%s:daily", customerID)
 }
 
+func (Keys) DriverDailyCancel(driverUserID string) string {
+	return fmt.Sprintf("driver:cancels:%s:daily", driverUserID)
+}
+
 // CustomerCreatingRide is a short-lived SET NX lock (10 s TTL) that prevents
 // two concurrent HTTP requests from the same customer creating duplicate rides.
 func (Keys) CustomerCreatingRide(customerID string) string {

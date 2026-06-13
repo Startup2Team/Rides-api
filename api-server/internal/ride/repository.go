@@ -506,6 +506,25 @@ func (repo *Repository) DriverWithinRadius(ctx context.Context, driverUserID str
 	return within, nil
 }
 
+// DriverLastLocation returns the driver's most recent recorded location from
+// PostGIS. ok=false if there is no row (driver never sent a location).
+func (repo *Repository) DriverLastLocation(ctx context.Context, driverUserID string) (geo.Point, bool, error) {
+	var lat, lng float64
+	err := repo.db.QueryRow(ctx, `
+		SELECT ST_Y(dl.location::geometry), ST_X(dl.location::geometry)
+		FROM driver_locations dl
+		JOIN driver_profiles dp ON dp.id = dl.driver_id
+		WHERE dp.user_id = $1
+	`, driverUserID).Scan(&lat, &lng)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return geo.Point{}, false, nil
+		}
+		return geo.Point{}, false, err
+	}
+	return geo.Point{Lat: lat, Lng: lng}, true, nil
+}
+
 // FindActiveByCustomer returns the customer's current non-terminal ride.
 func (repo *Repository) FindActiveByCustomer(ctx context.Context, customerID string) (*Ride, error) {
 	row := repo.db.QueryRow(ctx,
@@ -584,5 +603,36 @@ func (repo *Repository) IncrementDriverRides(ctx context.Context, driverUserID s
 		UPDATE driver_profiles SET total_rides = total_rides + 1, updated_at = NOW()
 		WHERE user_id = $1
 	`, driverUserID)
+	return err
+}
+
+// ── Cancellation penalties ──────────────────────────────────────────────────
+
+// IncrementUserBanCount bumps the lifetime ban counter and returns the new value.
+func (repo *Repository) IncrementUserBanCount(ctx context.Context, userID string) (int, error) {
+	var n int
+	err := repo.db.QueryRow(ctx, `
+		UPDATE users SET ban_count = ban_count + 1, updated_at = NOW()
+		WHERE id = $1
+		RETURNING ban_count
+	`, userID).Scan(&n)
+	return n, err
+}
+
+// BanUserUntil applies a temporary suspension that lifts itself at `until`.
+func (repo *Repository) BanUserUntil(ctx context.Context, userID string, until time.Time, reason string) error {
+	_, err := repo.db.Exec(ctx, `
+		UPDATE users SET is_suspended = TRUE, suspension_until = $1, suspension_reason = $2, updated_at = NOW()
+		WHERE id = $3
+	`, until, reason, userID)
+	return err
+}
+
+// SuspendUserIndefinitely applies a suspension with no expiry (admin must lift).
+func (repo *Repository) SuspendUserIndefinitely(ctx context.Context, userID, reason string) error {
+	_, err := repo.db.Exec(ctx, `
+		UPDATE users SET is_suspended = TRUE, suspension_until = NULL, suspension_reason = $1, updated_at = NOW()
+		WHERE id = $2
+	`, reason, userID)
 	return err
 }

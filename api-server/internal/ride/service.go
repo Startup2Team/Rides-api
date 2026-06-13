@@ -242,6 +242,72 @@ func (s *Service) refundDriverCredit(ctx context.Context, rideID string, driverP
 	s.log.Info().Str("ride_id", rideID).Str("driver_user_id", driverUserID).Str("reason", why).Msg("ride: credit refunded")
 }
 
+// recordCancelPenalty escalates a fault cancellation by the given party.
+//   - increments their daily cancel counter (resets end-of-day)
+//   - at warnAt → a warning is published
+//   - at banAt  → a 24h temp-ban, OR an indefinite suspension once the user has
+//     accumulated PenaltyBansBeforeSuspend lifetime bans
+//
+// role is "DRIVER" or "CUSTOMER"; userID is the user's id (for a driver this is
+// the user_id, not the profile_id). Best-effort — never blocks the cancel.
+func (s *Service) recordCancelPenalty(ctx context.Context, userID, role string) {
+	warnAt, banAt := s.cfg.Customer.CancelWarnThreshold, s.cfg.Customer.CancelBanThreshold
+	dailyKey := rkeys.K.CustomerDailyCancel(userID)
+	if role == "DRIVER" {
+		warnAt, banAt = s.cfg.Driver.CancelWarnThreshold, s.cfg.Driver.CancelBanThreshold
+		dailyKey = rkeys.K.DriverDailyCancel(userID)
+	}
+
+	count, err := s.redis.Incr(ctx, dailyKey).Result()
+	if err != nil {
+		return
+	}
+	s.redis.ExpireAt(ctx, dailyKey, endOfDay())
+	n := int(count)
+
+	if warnAt > 0 && n == warnAt {
+		s.analytics.Publish(ctx, "user.cancel_warned", role, userID, nil, map[string]interface{}{
+			"daily_cancels": n, "role": role,
+		})
+		s.log.Info().Str("user_id", userID).Str("role", role).Int("daily_cancels", n).Msg("penalty: cancellation warning")
+	}
+
+	// Apply the penalty exactly once, at the moment the count crosses banAt.
+	if banAt > 0 && n == banAt {
+		bans, err := s.repo.IncrementUserBanCount(ctx, userID)
+		if err != nil {
+			s.log.Warn().Err(err).Str("user_id", userID).Msg("penalty: failed to increment ban count")
+			return
+		}
+		if bans >= s.cfg.Penalty.BansBeforeSuspend {
+			_ = s.repo.SuspendUserIndefinitely(ctx, userID, "excessive_cancellations")
+			s.analytics.Publish(ctx, "user.suspended", role, userID, nil, map[string]interface{}{
+				"reason": "excessive_cancellations", "ban_count": bans, "role": role,
+			})
+			s.log.Warn().Str("user_id", userID).Str("role", role).Int("ban_count", bans).Msg("penalty: user SUSPENDED (max bans reached)")
+		} else {
+			until := time.Now().Add(time.Duration(s.cfg.Penalty.BanHours) * time.Hour)
+			_ = s.repo.BanUserUntil(ctx, userID, until, "excessive_cancellations")
+			s.analytics.Publish(ctx, "user.banned", role, userID, nil, map[string]interface{}{
+				"reason": "excessive_cancellations", "ban_count": bans, "ban_hours": s.cfg.Penalty.BanHours, "role": role,
+			})
+			s.log.Warn().Str("user_id", userID).Str("role", role).Int("ban_count", bans).Int("hours", s.cfg.Penalty.BanHours).Msg("penalty: user TEMP-BANNED")
+		}
+		// Kick active sessions so the ban applies immediately (the middleware
+		// rejects requests whose session key is gone).
+		s.revokeUserSessions(ctx, userID)
+	}
+}
+
+// revokeUserSessions deletes every active session key for a user so a ban or
+// suspension takes effect at once rather than on next token refresh.
+func (s *Service) revokeUserSessions(ctx context.Context, userID string) {
+	iter := s.redis.Scan(ctx, 0, "session:"+userID+":*", 100).Iterator()
+	for iter.Next(ctx) {
+		s.redis.Del(ctx, iter.Val())
+	}
+}
+
 // creditCharged reports whether the ride had reached fare agreement — the
 // point at which the driver's credit was deducted.
 func creditCharged(status Status) bool {
@@ -372,14 +438,8 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 		"reason": reason, "status_at_cancel": string(r.Status),
 	})
 
-	ckey := rkeys.K.CustomerDailyCancel(customerID)
-	count, _ := s.redis.Incr(ctx, ckey).Result()
-	s.redis.ExpireAt(ctx, ckey, endOfDay())
-	if int(count) == s.cfg.Customer.CancelWarnThreshold {
-		s.analytics.Publish(ctx, "customer.cancel_warned", "CUSTOMER", customerID, nil, map[string]interface{}{
-			"daily_cancel_count": count,
-		})
-	}
+	// Escalating cancellation penalty (warn → 24h ban → suspension).
+	s.recordCancelPenalty(ctx, customerID, "CUSTOMER")
 	s.analytics.Publish(ctx, "ride.cancelled", "CUSTOMER", customerID, &rideID, map[string]interface{}{
 		"ride_id": rideID, "status_at_cancel": string(r.Status),
 		"cancelled_by_role": "CUSTOMER", "reason": reason,
@@ -578,26 +638,61 @@ func (s *Service) CancelAfterPickupExpiry(ctx context.Context, rideID, driverUse
 	if r.Status != StatusDriverArrived || !r.PickupExpired {
 		return apperrors.New(409, "PICKUP_NOT_EXPIRED", "pickup wait window has not expired")
 	}
-	didCancel, err := s.repo.Cancel(ctx, rideID, "customer_no_show", "DRIVER")
+
+	// ── GPS-verify the no-show ────────────────────────────────────────────────
+	// A genuine no-show means the driver waited at the pickup and left empty, so
+	// their last-known position should still be near the pickup. If they've
+	// driven off (e.g. carried the passenger to the destination, then claim
+	// no-show to dodge the credit), deny the refund and flag the ride. Dev
+	// bypass mirrors the geofence skip.
+	noShowVerified := s.cfg.Ride.DevSkipGeofence
+	var driverDistM float64 = -1
+	if !noShowVerified {
+		if pt, ok := s.driverLastKnownPoint(ctx, driverUserID, r.DriverID); ok {
+			driverDistM = geo.DistanceKM(pt, r.PickupPoint) * 1000
+			noShowVerified = driverDistM <= float64(s.cfg.Ride.NoShowVerifyRadiusM)
+		}
+		// No location at all → cannot verify → not verified (no refund, flagged).
+	}
+
+	cancelReason := "customer_no_show"
+	if !noShowVerified {
+		cancelReason = "customer_no_show_unverified"
+	}
+	didCancel, err := s.repo.Cancel(ctx, rideID, cancelReason, "DRIVER")
 	if err != nil {
 		return err
 	}
 	if !didCancel {
 		return nil
 	}
-	// Verified customer no-show: the driver was geofenced at the pickup and the
-	// server-timed wait window expired. The driver is blameless, so refund the
-	// credit charged at agreement. (A plain driver cancel does NOT refund — see
-	// DriverCancelRide — which is what discourages bailing on agreed rides.)
+
 	if creditCharged(r.Status) {
-		s.refundDriverCredit(ctx, rideID, r.DriverID, "customer_no_show")
+		if noShowVerified {
+			// Driver still at the pickup + wait window expired → blameless → refund
+			// the credit charged at agreement.
+			s.refundDriverCredit(ctx, rideID, r.DriverID, "customer_no_show")
+		} else {
+			// Driver had driven away (or no GPS) → suspicious. Keep the credit
+			// forfeited and flag for review.
+			s.log.Warn().
+				Str("ride_id", rideID).Str("driver_user_id", driverUserID).
+				Float64("driver_dist_m", driverDistM).Int("allowed_m", s.cfg.Ride.NoShowVerifyRadiusM).
+				Msg("ride: no-show refund DENIED — driver not at pickup (possible fraud)")
+			_ = s.repo.AppendEvent(ctx, rideID, "ride.no_show_unverified", "SYSTEM", rideID, map[string]interface{}{
+				"reason": "driver_not_at_pickup", "driver_dist_m": driverDistM,
+			})
+			s.analytics.Publish(ctx, "ride.no_show_unverified", "SYSTEM", driverUserID, &rideID, map[string]interface{}{
+				"ride_id": rideID, "driver_dist_m": driverDistM,
+			})
+		}
 	}
 	s.releaseRideRedisState(ctx, rideID, r.CustomerID, r.DriverID, r.TransportType)
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", "DRIVER", driverUserID, map[string]interface{}{
-		"reason": "customer_no_show", "pickup_expired": true,
+		"reason": cancelReason, "pickup_expired": true, "no_show_verified": noShowVerified,
 	})
 	s.analytics.Publish(ctx, "ride.cancelled", "DRIVER", driverUserID, &rideID, map[string]interface{}{
-		"ride_id": rideID, "reason": "customer_no_show", "pickup_expired": true,
+		"ride_id": rideID, "reason": cancelReason, "pickup_expired": true,
 	})
 	s.hub.SendToCustomer(rideID, tracking.Message{
 		Type: "ride_cancelled", RideID: rideID,
@@ -829,6 +924,9 @@ func (s *Service) DriverCancelRide(ctx context.Context, rideID, driverUserID, re
 	// forfeits the credit. That's the cost that discourages accepting-then-
 	// abandoning and nudges drivers to actually complete. The only blameless
 	// driver exit is a verified no-show via CancelAfterPickupExpiry.
+	// On top of the forfeited credit, count it toward the cancellation penalty
+	// (warn → 24h ban → suspension).
+	s.recordCancelPenalty(ctx, driverUserID, "DRIVER")
 	s.releaseRideRedisState(ctx, rideID, r.CustomerID, r.DriverID, r.TransportType)
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", "DRIVER", driverUserID, map[string]interface{}{
 		"reason": reason, "status_at_cancel": string(r.Status),
@@ -884,4 +982,26 @@ func (s *Service) withinRadius(ctx context.Context, driverUserID string, driverP
 
 	// PostGIS fallback.
 	return s.repo.DriverWithinRadius(ctx, driverUserID, target, radiusM)
+}
+
+// driverLastKnownPoint returns the driver's freshest known position — Redis
+// first (rewritten on every ping), then the PostGIS fallback. ok=false if the
+// driver has no recorded location at all.
+func (s *Service) driverLastKnownPoint(ctx context.Context, driverUserID string, driverProfileID *string) (geo.Point, bool) {
+	if driverProfileID != nil {
+		raw, err := s.redis.Get(ctx, rkeys.K.DriverLocation(*driverProfileID)).Result()
+		if err == nil {
+			var loc struct {
+				Lat float64 `json:"lat"`
+				Lng float64 `json:"lng"`
+			}
+			if json.Unmarshal([]byte(raw), &loc) == nil && (loc.Lat != 0 || loc.Lng != 0) {
+				return geo.Point{Lat: loc.Lat, Lng: loc.Lng}, true
+			}
+		}
+	}
+	if p, ok, err := s.repo.DriverLastLocation(ctx, driverUserID); err == nil && ok {
+		return p, true
+	}
+	return geo.Point{}, false
 }

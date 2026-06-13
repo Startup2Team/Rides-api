@@ -146,7 +146,9 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 		_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
 	}
 
-	// Reject suspended accounts before issuing tokens.
+	// Reject suspended accounts before issuing tokens (auto-lifting any temp-ban
+	// whose window has already elapsed).
+	s.liftExpiredSuspension(ctx, user)
 	if user.IsSuspended {
 		return nil, nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
 	}
@@ -158,7 +160,12 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 	collision, _ := s.repo.DetectDeviceCollision(ctx, deviceID, user.ID)
 	if collision {
 		s.log.Warn().Str("device_id", deviceID).Str("user_id", user.ID).Msg("device collision detected")
-		_ = s.repo.FlagUserForReview(ctx, user.ID)
+		// Auto-suspend on device collision is a production anti-fraud guard. In
+		// dev/test we routinely sign into multiple accounts (customer + driver)
+		// on one device/simulator, so only flag — never suspend — outside prod.
+		if s.cfg.Env == "production" {
+			_ = s.repo.FlagUserForReview(ctx, user.ID)
+		}
 	}
 
 	tokens, err := s.issueTokenPair(ctx, user)
@@ -198,7 +205,10 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 		return nil, err
 	}
 
-	// Suspended users cannot refresh — catches suspension that happened after last login.
+	// Suspended users cannot refresh — catches suspension that happened after last
+	// login. Auto-lift an expired temp-ban first so a 24h cancellation ban ends
+	// on its own without admin intervention.
+	s.liftExpiredSuspension(ctx, user)
 	if user.IsSuspended {
 		// Revoke the session so further refresh attempts also fail immediately.
 		_ = s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err()
@@ -206,6 +216,21 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 	}
 
 	return s.issueTokenPair(ctx, user)
+}
+
+// liftExpiredSuspension auto-clears a temporary ban whose window has elapsed, so
+// a 24h cancellation ban lifts itself without admin action. An indefinite
+// suspension (suspension_until = NULL) is left untouched.
+func (s *Service) liftExpiredSuspension(ctx context.Context, user *User) {
+	if !user.IsSuspended || user.SuspensionUntil == nil || user.SuspensionUntil.After(time.Now()) {
+		return
+	}
+	if err := s.repo.ClearSuspension(ctx, user.ID); err != nil {
+		s.log.Warn().Err(err).Str("user_id", user.ID).Msg("auth: failed to lift expired suspension")
+		return
+	}
+	user.IsSuspended = false
+	user.SuspensionUntil = nil
 }
 
 // Logout revokes the refresh session in Redis.
