@@ -26,6 +26,9 @@ const (
 	PurposeLogin        = "LOGIN"
 	otpLength           = 6
 	otpExpiryMinutes    = 10
+	// maxOTPAttempts locks a code after this many wrong guesses within its window,
+	// so a 6-digit OTP can't be brute-forced even if the HTTP limiter is bypassed.
+	maxOTPAttempts = 5
 )
 
 // Service handles all authentication business logic.
@@ -105,15 +108,27 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 
 // VerifyOTP validates the submitted OTP code and returns JWT tokens.
 func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID, platform, appVersion, ipAddr string) (*TokenPair, *User, error) {
+	// Lock the code after too many wrong guesses in its window — caps brute force.
+	attemptsKey := "otp:attempts:" + phone + ":" + purpose
+	if n, _ := s.redis.Get(ctx, attemptsKey).Int(); n >= maxOTPAttempts {
+		return nil, nil, apperrors.New(429, "OTP_LOCKED", "Too many incorrect attempts. Request a new code.")
+	}
+
 	record, err := s.repo.FindLatestOTP(ctx, phone, purpose)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(record.OTPHash), []byte(code)); err != nil {
+		// Count the failed attempt; set TTL = OTP lifetime on first failure.
+		if c, e := s.redis.Incr(ctx, attemptsKey).Result(); e == nil && c == 1 {
+			s.redis.Expire(ctx, attemptsKey, otpExpiryMinutes*time.Minute)
+		}
 		return nil, nil, apperrors.ErrInvalidOTP
 	}
 
+	// Correct code — clear the attempt counter and consume the OTP.
+	s.redis.Del(ctx, attemptsKey)
 	if err := s.repo.MarkOTPUsed(ctx, record.ID); err != nil {
 		return nil, nil, fmt.Errorf("mark otp used: %w", err)
 	}

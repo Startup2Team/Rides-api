@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -33,37 +36,48 @@ func atomicIncr(ctx context.Context, rdb *redis.Client, key string, window time.
 	return val, err
 }
 
-// OTPRateLimit enforces a per-phone limit on OTP send requests.
-// Allows `maxRequests` per `window`.
+// OTPRateLimit enforces a limit on OTP send/verify requests, keyed by the phone
+// number in the REQUEST BODY (`phone_number`) — the actual OTP target.
 //
-// The phone number is read directly from the request body JSON field "phone"
-// so this cannot be bypassed by omitting the X-Phone-Number header.
-// Atomic INCR+EXPIRE via Lua prevents the race where a crash between the two
-// commands leaves a key with no TTL.
-func OTPRateLimit(rdb *redis.Client, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+// SECURITY: it must NOT key on a client-settable header. The body phone is what
+// receives the SMS; if we keyed on a header an attacker could vary the header to
+// get a fresh bucket each request and SMS-bomb the victim whose number is in the
+// body (and bypass the limit entirely by omitting it).
+//
+// `prefix` separates buckets (e.g. "otp_send" vs "otp_verify"). Fails CLOSED:
+// because these are SMS-cost / brute-force surfaces, a Redis error denies the
+// request rather than allowing uncapped abuse.
+func OTPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Phone is parsed upstream by the handler and stored in context,
-			// but we can also read from the header (set by the handler before
-			// calling ServeHTTP on the chain). If absent we still limit by IP
-			// so a header-less caller can't bypass the limiter entirely.
-			phone := r.Header.Get("X-Phone-Number")
+			phone := ""
+			if r.Body != nil {
+				body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+				if err == nil {
+					// Restore the body so the downstream handler can read it.
+					r.Body = io.NopCloser(bytes.NewReader(body))
+					var p struct {
+						PhoneNumber string `json:"phone_number"`
+					}
+					_ = json.Unmarshal(body, &p)
+					phone = strings.TrimSpace(p.PhoneNumber)
+				}
+			}
 
 			var key string
 			if phone != "" {
-				key = fmt.Sprintf("ratelimit:otp:phone:%s", phone)
+				key = fmt.Sprintf("ratelimit:%s:phone:%s", prefix, phone)
 			} else {
-				// Fallback: rate-limit by IP so omitting the header is never a free pass.
-				key = fmt.Sprintf("ratelimit:otp:ip:%s", trustedIP(r))
+				// No phone in body — still cap by IP so a malformed request can't bypass.
+				key = fmt.Sprintf("ratelimit:%s:ip:%s", prefix, trustedIP(r))
 			}
 
 			count, err := atomicIncr(r.Context(), rdb, key, window)
 			if err != nil {
-				// Redis down — allow through (fail open: SMS cost is low, blocking auth is worse)
-				next.ServeHTTP(w, r)
+				// Fail closed on an SMS-cost / brute-force endpoint.
+				respond.Error(w, apperrors.ErrRateLimited)
 				return
 			}
-
 			if count > int64(maxRequests) {
 				respond.Error(w, apperrors.ErrRateLimited)
 				return

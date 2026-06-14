@@ -142,7 +142,7 @@ func main() {
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
 	driverSvc := driver.NewService(driverRepo, rdb, anaSvc, cfg, log)
-	walletSvc := wallet.NewService(walletRepo, log)
+	walletSvc := wallet.NewService(walletRepo, log, cfg.Payments.Enabled)
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
@@ -262,7 +262,10 @@ func main() {
 	}))
 
 	r.Use(chimw.RequestID)
-	r.Use(chimw.RealIP)
+	// NOTE: chimw.RealIP is deliberately NOT used — it rewrites RemoteAddr from the
+	// spoofable X-Forwarded-For/X-Real-IP on EVERY request, which would let clients
+	// fake their IP for rate-limiting and logging. We use mw.trustedIP() instead,
+	// which only trusts those headers from a private/loopback peer (our edge proxy).
 	r.Use(chimw.Recoverer)
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
@@ -285,8 +288,9 @@ func main() {
 
 	// ── Public auth ───────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/auth", func(r chi.Router) {
-		r.With(mw.OTPRateLimit(rdb, 5, time.Hour)).Post("/register", authH.Register)
-		r.Post("/verify-otp", authH.VerifyOTP)
+		r.With(mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour)).Post("/register", authH.Register)
+		// verify-otp is brute-forceable (6-digit code) — cap attempts per phone too.
+		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
 		r.Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
 	})

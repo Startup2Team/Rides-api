@@ -28,6 +28,14 @@ type Config struct {
 	Driver   DriverConfig
 	Customer CustomerConfig
 	Penalty  PenaltyConfig
+	Payments PaymentsConfig
+}
+
+// PaymentsConfig gates real-money wallet movement. Until a payment gateway
+// (MoMo collect/disburse) is wired and verified, top-up and withdraw MUST stay
+// disabled — otherwise a user could mint wallet balance with no payment captured.
+type PaymentsConfig struct {
+	Enabled bool
 }
 
 type DatabaseConfig struct {
@@ -210,6 +218,9 @@ func Load() (*Config, error) {
 	// Shared escalation: a temp-ban lasts 24h; the 5th ban becomes a suspension.
 	cfg.Penalty.BanHours = getEnvInt("PENALTY_BAN_HOURS", 24)
 	cfg.Penalty.BansBeforeSuspend = getEnvInt("PENALTY_BANS_BEFORE_SUSPEND", 5)
+
+	// Real-money wallet movement stays OFF until a verified payment gateway exists.
+	cfg.Payments.Enabled = getEnvBool("PAYMENTS_ENABLED", false)
 
 	return cfg, nil
 }

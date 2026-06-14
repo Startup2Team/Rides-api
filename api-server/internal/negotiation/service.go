@@ -66,9 +66,21 @@ func (s *Service) SetTimeoutManager(mgr TimeoutManager) {
 	s.timeoutMgr = mgr
 }
 
+// findRideForActor loads the ride ONLY if the caller is the participant they
+// claim to be — the customer who owns it, or the driver assigned to it. This is
+// the authorization boundary for every negotiation action: it stops an
+// authenticated user from driving (or accepting) a fare on a ride that isn't
+// theirs just by knowing the ride_id (IDOR).
+func (s *Service) findRideForActor(ctx context.Context, rideID, actorRole, actorUserID string) (*ride.Ride, error) {
+	if actorRole == "CUSTOMER" {
+		return s.rideRepo.FindByIDAndCustomer(ctx, rideID, actorUserID)
+	}
+	return s.rideRepo.FindByIDAndDriver(ctx, rideID, actorUserID)
+}
+
 // Propose submits a fare counter-offer from a customer or driver.
 func (s *Service) Propose(ctx context.Context, rideID, actorRole, actorUserID string, amount float64) error {
-	r, err := s.rideRepo.FindByID(ctx, rideID)
+	r, err := s.findRideForActor(ctx, rideID, actorRole, actorUserID)
 	if err != nil {
 		return err
 	}
@@ -141,7 +153,7 @@ func (s *Service) Propose(ctx context.Context, rideID, actorRole, actorUserID st
 
 // Accept confirms a proposed fare, locking it and transitioning to CONFIRMED.
 func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID string) error {
-	r, err := s.rideRepo.FindByID(ctx, rideID)
+	r, err := s.findRideForActor(ctx, rideID, actorRole, actorUserID)
 	if err != nil {
 		return err
 	}
@@ -220,7 +232,8 @@ const maxFareMultiplier = 10
 
 // LockManualFare confirms a verbally agreed fare without consuming offer rounds.
 func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID string, amount float64) error {
-	r, err := s.rideRepo.FindByID(ctx, rideID)
+	// Only the assigned driver may lock a manual fare on this ride.
+	r, err := s.rideRepo.FindByIDAndDriver(ctx, rideID, driverUserID)
 	if err != nil {
 		return err
 	}
@@ -278,7 +291,7 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 
 // Decline rejects a proposed fare. Negotiation continues until limits are hit.
 func (s *Service) Decline(ctx context.Context, rideID, actorRole, actorUserID string) error {
-	r, err := s.rideRepo.FindByID(ctx, rideID)
+	r, err := s.findRideForActor(ctx, rideID, actorRole, actorUserID)
 	if err != nil {
 		return err
 	}
@@ -339,7 +352,8 @@ func (s *Service) notifyCallPrompt(ctx context.Context, rideID string, r *ride.R
 
 // InitiateCall logs the call timestamp and returns the Africa's Talking masking number.
 func (s *Service) InitiateCall(ctx context.Context, rideID, driverUserID string) (string, error) {
-	r, err := s.rideRepo.FindByID(ctx, rideID)
+	// Only the assigned driver may pull the masked number for this ride.
+	r, err := s.rideRepo.FindByIDAndDriver(ctx, rideID, driverUserID)
 	if err != nil {
 		return "", err
 	}

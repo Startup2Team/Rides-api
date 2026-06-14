@@ -3,8 +3,11 @@ package wallet
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/rs/zerolog"
+
+	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
 const (
@@ -15,13 +18,18 @@ const (
 
 // Service contains wallet business logic.
 type Service struct {
-	repo *Repository
-	log  zerolog.Logger
+	repo            *Repository
+	log             zerolog.Logger
+	paymentsEnabled bool
 }
 
-func NewService(repo *Repository, log zerolog.Logger) *Service {
-	return &Service{repo: repo, log: log}
+func NewService(repo *Repository, log zerolog.Logger, paymentsEnabled bool) *Service {
+	return &Service{repo: repo, log: log, paymentsEnabled: paymentsEnabled}
 }
+
+// errPaymentsDisabled is returned while no verified payment gateway is wired.
+var errPaymentsDisabled = apperrors.New(http.StatusNotImplemented, "PAYMENTS_DISABLED",
+	"Wallet top-up and withdrawal are not available yet.")
 
 // GetWallet returns the wallet for a user (auto-created on user registration via DB trigger).
 func (s *Service) GetWallet(ctx context.Context, userID string) (*Wallet, error) {
@@ -41,6 +49,14 @@ func (s *Service) GetTransactions(ctx context.Context, userID string, limit, off
 // When the gateway is integrated, this will initiate a MoMo collect request
 // and return PENDING — a webhook will later call ConfirmTopUp.
 func (s *Service) TopUp(ctx context.Context, userID string, amountRWF int64, phoneNumber string) (*Transaction, error) {
+	// SECURITY: crediting balance here without capturing a real payment would let
+	// any user mint funds (top-up → spend / withdraw). Until a MoMo collect is
+	// wired, top-up is disabled. When enabled, this must create a PENDING tx and
+	// only credit the balance from an idempotent gateway webhook (keyed on the
+	// provider's transaction ref) — never optimistically as it does today.
+	if !s.paymentsEnabled {
+		return nil, errPaymentsDisabled
+	}
 	if err := validateAmount(amountRWF, maxTopUpRWF); err != nil {
 		return nil, err
 	}
@@ -59,6 +75,12 @@ func (s *Service) TopUp(ctx context.Context, userID string, amountRWF int64, pho
 
 // Withdraw deducts money from the wallet to a phone number.
 func (s *Service) Withdraw(ctx context.Context, userID string, amountRWF int64, phoneNumber string) (*Transaction, error) {
+	// SECURITY: a withdrawal must trigger a real MoMo disburse to the user's
+	// number. Until that is wired, withdraw is disabled so balance can't be moved
+	// out (and so the top-up→withdraw cash-out path can't exist).
+	if !s.paymentsEnabled {
+		return nil, errPaymentsDisabled
+	}
 	if err := validateAmount(amountRWF, maxWithdrawRWF); err != nil {
 		return nil, err
 	}
