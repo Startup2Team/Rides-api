@@ -288,6 +288,14 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 }
 
 func (s *Service) checkGPSPlausibility(ctx context.Context, driverProfileID string, newPoint geo.Point) (bool, float64) {
+	// Outside production, skip plausibility entirely. Developers routinely
+	// teleport the simulator (e.g. Cupertino → Kigali), which would otherwise
+	// compute an impossible speed, flag a false anomaly, and eventually
+	// auto-suspend the test driver. The guard stays fully active in production.
+	if s.cfg.Env != "production" {
+		return false, 0
+	}
+
 	// Skip the check entirely during the go-online grace period (first ~60 s).
 	// The mobile app sends the placeholder KIGALI_CENTER position before real
 	// device GPS resolves; comparing that to the actual GPS coordinates would
