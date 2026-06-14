@@ -423,8 +423,11 @@ var allVehicleTypes = []string{"MOTO_BIKE", "CAB_TAXI", "HEAVY_FUSO", "LIGHT_HIL
 
 const (
 	driverStateAvailable = "AVAILABLE"
-	nearbySearchRadiusKM = 5.0
-	nearbySearchRadiusM  = 5000
+	// The nearby-driver preview radius matches the matching engine's expanded
+	// reach (10 km) so a driver the customer could actually be matched with also
+	// shows on the map. A narrower preview made online drivers look absent.
+	nearbySearchRadiusKM = 10.0
+	nearbySearchRadiusM  = 10000
 	nearbyMaxPerType     = 6
 	// Kigali city-average speed used for ETA estimation without a routing call.
 	citySpeedKMH = 25.0
