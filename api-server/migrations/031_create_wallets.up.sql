@@ -1,3 +1,15 @@
+-- Wallets are defined HERE authoritatively, in the shape the app actually uses
+-- (wallet_transactions needs user_id, phone_number, external_ref).
+--
+-- Migration 029 (schema_v3_align) ALSO declares wallets/wallet_transactions with
+-- a different, older shape. On a clean database 029 runs first and creates the
+-- wrong shape, which then breaks this migration (and the wallet code). We drop
+-- and recreate here so the schema is correct regardless of 029. This is safe:
+-- on a fresh migrate there is no wallet data yet, and on an already-migrated DB
+-- this file has already been applied and will not re-run.
+DROP TABLE IF EXISTS wallet_transactions CASCADE;
+DROP TABLE IF EXISTS wallets CASCADE;
+
 -- One wallet per user (customer or driver — same person when they switch modes).
 -- balance_rwf is stored in integer Rwanda Francs (no decimals needed).
 CREATE TABLE wallets (
@@ -42,6 +54,7 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_create_wallet ON users;
 CREATE TRIGGER trg_create_wallet
     AFTER INSERT ON users
     FOR EACH ROW EXECUTE FUNCTION create_wallet_for_new_user();

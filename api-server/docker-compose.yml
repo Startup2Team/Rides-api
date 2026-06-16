@@ -56,7 +56,7 @@ services:
     container_name: ride_pgadmin
     restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@taravelis.com
+      PGADMIN_DEFAULT_EMAIL: admin@rides.local
       PGADMIN_DEFAULT_PASSWORD: admin123
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
@@ -76,7 +76,7 @@ services:
     container_name: ride_redis_commander
     restart: unless-stopped
     environment:
-      REDIS_HOSTS: "Taravelis Redis:redis:6379"
+      REDIS_HOSTS: "rides:redis:6379"
       HTTP_USER: admin
       HTTP_PASSWORD: admin123
     ports:
