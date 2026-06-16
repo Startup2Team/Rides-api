@@ -9,19 +9,30 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
 // Handler exposes admin HTTP endpoints.
 type Handler struct {
-	svc  AdminService
-	auth AuthService
-	env  string
+	svc   AdminService
+	auth  AuthService
+	audit *audit.Logger
+	env   string
 }
 
-func NewHandler(svc AdminService, auth AuthService, env string) *Handler {
-	return &Handler{svc: svc, auth: auth, env: env}
+func NewHandler(svc AdminService, auth AuthService, auditLog *audit.Logger, env string) *Handler {
+	return &Handler{svc: svc, auth: auth, audit: auditLog, env: env}
+}
+
+// adminCtx pulls the admin id + role off the request claims for audit entries.
+func adminCtx(r *http.Request) (id, role string) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		return "", ""
+	}
+	return claims.UserID, claims.AdminRole
 }
 
 // ── Drivers ───────────────────────────────────────────────────────────────
@@ -59,6 +70,8 @@ func (h *Handler) ApproveDriver(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "driver.approve", "driver", profileID, "Approved driver application", nil)
 	respond.NoContent(w)
 }
 
@@ -74,6 +87,8 @@ func (h *Handler) RejectDriver(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "driver.reject", "driver", profileID, "Rejected driver application", map[string]any{"reason": body.Reason})
 	respond.NoContent(w)
 }
 
@@ -93,6 +108,8 @@ func (h *Handler) SuspendDriver(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "driver.suspend", "driver", profileID, "Suspended driver", map[string]any{"reason": body.Reason, "duration_hours": body.DurationHours})
 	respond.NoContent(w)
 }
 
@@ -103,6 +120,8 @@ func (h *Handler) ReinstateDriver(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "driver.reinstate", "driver", profileID, "Reinstated driver", nil)
 	respond.NoContent(w)
 }
 
@@ -162,6 +181,8 @@ func (h *Handler) SuspendUser(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "customer.suspend", "customer", userID, "Suspended customer", map[string]any{"duration_hours": body.DurationHours})
 	respond.NoContent(w)
 }
 
@@ -172,6 +193,8 @@ func (h *Handler) ReinstateUser(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "customer.reinstate", "customer", userID, "Reinstated customer", nil)
 	respond.NoContent(w)
 }
 
@@ -509,6 +532,8 @@ func (h *Handler) BanCustomer(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "customer.ban", "customer", userID, "Banned customer", map[string]any{"reason": body.Reason})
 	respond.OK(w, map[string]string{"status": "Banned"})
 }
 
@@ -562,6 +587,8 @@ func (h *Handler) InterveneRide(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "ride.intervene", "ride", rideID, "Intervened on live ride", map[string]any{"action": body.Action, "reason": body.Reason})
 	respond.OK(w, map[string]string{"message": "action applied"})
 }
 
@@ -604,7 +631,71 @@ func (h *Handler) DisbursePayouts(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "revenue.disburse", "payout", "", "Disbursed driver payouts", map[string]any{"transaction_ids": body.TransactionIDs, "total": total, "count": count})
 	respond.OK(w, map[string]interface{}{"disbursed": count, "totalAmount": total})
+}
+
+// ── Account assist ───────────────────────────────────────────────────────
+
+// POST /api/v1/admin/customers/:id/clear-otp-lockout
+func (h *Handler) ClearOTPLockout(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	if err := h.svc.ClearOTPLockout(r.Context(), userID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "account.clear_otp_lockout", "user", userID, "Cleared OTP rate-limit lockout", nil)
+	respond.OK(w, map[string]string{"message": "OTP lockout cleared"})
+}
+
+// POST /api/v1/admin/drivers/:id/clear-gps-flags
+func (h *Handler) ClearGPSFlags(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	if err := h.svc.ClearGPSFlags(r.Context(), profileID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "account.clear_gps_flags", "driver", profileID, "Cleared GPS anomaly flags", nil)
+	respond.OK(w, map[string]string{"message": "GPS flags cleared"})
+}
+
+// POST /api/v1/admin/users/:id/clear-device-collision
+func (h *Handler) ClearDeviceCollisionFlag(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	var body struct {
+		DeviceID string `json:"device_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DeviceID == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "device_id is required")
+		return
+	}
+	if err := h.svc.ClearDeviceCollisionFlag(r.Context(), userID, body.DeviceID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "account.clear_device_collision", "user", userID, "Cleared device collision flag", map[string]any{"device_id": body.DeviceID})
+	respond.OK(w, map[string]string{"message": "device collision flag cleared"})
+}
+
+// GET /api/v1/admin/users/:id/timeline
+func (h *Handler) GetAccountTimeline(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	data, err := h.svc.GetAccountTimeline(r.Context(), userID, limit)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
 }
 
 // POST /api/v1/admin/drivers/:id/documents

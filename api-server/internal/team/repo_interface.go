@@ -24,4 +24,7 @@ type TeamRepo interface {
 	CreateRole(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
 	UpdateRoleByID(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
 	DeleteRoleByID(ctx context.Context, roleID string) error
+	LogAction(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error
+	GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
+	ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error)
 }

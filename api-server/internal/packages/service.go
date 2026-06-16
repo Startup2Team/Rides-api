@@ -19,6 +19,10 @@ type Repo interface {
 	DeductCredit(ctx context.Context, driverUserID string) error
 	PurchasePackage(ctx context.Context, driverUserID, packageID, vehicleTypeID string, ridesTotal, validityDays int, isPromotional bool) (*DriverCredit, error)
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
+	AdminListPackages(ctx context.Context) ([]*Package, error)
+	AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error)
+	AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error)
+	AdminTogglePackage(ctx context.Context, id string, isActive bool) error
 }
 
 // ErrNoCredits is returned when a driver tries to accept a ride with no credits left.
@@ -59,6 +63,22 @@ func (s *Service) ListPackages(ctx context.Context, vehicleTypeCode string) ([]*
 	return s.repo.ListPackages(ctx, vehicleTypeCode)
 }
 
+func (s *Service) AdminListPackages(ctx context.Context) ([]*Package, error) {
+	return s.repo.AdminListPackages(ctx)
+}
+
+func (s *Service) AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error) {
+	return s.repo.AdminCreatePackage(ctx, name, vehicleTypeCode, rideCount, bonusRides, validityDays, priceRWF, isPromotional)
+}
+
+func (s *Service) AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error) {
+	return s.repo.AdminUpdatePackage(ctx, id, name, rideCount, bonusRides, validityDays, priceRWF)
+}
+
+func (s *Service) AdminTogglePackage(ctx context.Context, id string, isActive bool) error {
+	return s.repo.AdminTogglePackage(ctx, id, isActive)
+}
+
 // GetCredits returns the driver's current best active credit, or nil if none.
 func (s *Service) GetCredits(ctx context.Context, driverUserID string) (*DriverCredit, error) {
 	credit, err := s.repo.GetActiveCredit(ctx, driverUserID)
@@ -86,7 +106,8 @@ func (s *Service) BuyPackage(ctx context.Context, driverUserID, packageID string
 		return nil, apperrors.New(http.StatusBadRequest, "PACKAGE_PROMOTIONAL", "promotional packages are granted automatically")
 	}
 
-	credit, err := s.repo.PurchasePackage(ctx, driverUserID, packageID, pkg.VehicleTypeID, pkg.RideCount, pkg.ValidityDays, pkg.IsPromotional)
+	ridesTotal := pkg.RideCount + pkg.BonusRides
+	credit, err := s.repo.PurchasePackage(ctx, driverUserID, packageID, pkg.VehicleTypeID, ridesTotal, pkg.ValidityDays, pkg.IsPromotional)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +116,7 @@ func (s *Service) BuyPackage(ctx context.Context, driverUserID, packageID string
 		Str("driver_id", driverUserID).
 		Str("package_id", packageID).
 		Str("vehicle_type", pkg.VehicleTypeCode).
-		Int("rides", pkg.RideCount).
+		Int("rides", ridesTotal).
 		Msg("packages: package purchased")
 
 	return credit, nil

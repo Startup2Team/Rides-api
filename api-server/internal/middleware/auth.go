@@ -26,7 +26,8 @@ const (
 type Claims struct {
 	UserID    string `json:"user_id"`
 	RoleState string `json:"role_state"`
-	TokenType string `json:"token_type"` // "access" | "refresh"
+	TokenType string `json:"token_type"`  // "access" | "refresh"
+	AdminRole string `json:"admin_role"`  // set only for admin tokens: SUPER_ADMIN, OPS_MANAGER, etc.
 	jwt.RegisteredClaims
 }
 

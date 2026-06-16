@@ -20,12 +20,16 @@ type AdminService interface {
 	GetDriver(ctx context.Context, profileID string) (map[string]interface{}, error)
 	UpdateDriver(ctx context.Context, profileID string, fields map[string]interface{}) error
 	DeleteDriver(ctx context.Context, profileID string) error
+	ClearGPSFlags(ctx context.Context, profileID string) error
 	ListCustomers(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
 	GetCustomer(ctx context.Context, userID string) (map[string]interface{}, error)
 	SuspendUser(ctx context.Context, userID string, durationHours int) error
 	ReinstateUser(ctx context.Context, userID string) error
 	UpdateCustomer(ctx context.Context, userID, status, notes string) error
 	BanCustomer(ctx context.Context, userID, reason string) error
+	ClearOTPLockout(ctx context.Context, userID string) error
+	ClearDeviceCollisionFlag(ctx context.Context, userID, deviceID string) error
+	GetAccountTimeline(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
 	ListRides(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error)
 	GetRide(ctx context.Context, rideID string) (map[string]interface{}, error)
 	ListNegotiations(ctx context.Context, status, search string, limit, offset int) ([]map[string]interface{}, int, error)

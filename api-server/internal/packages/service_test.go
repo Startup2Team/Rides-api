@@ -47,6 +47,18 @@ func (m *mockRepo) GrantFreeTrialIfEligible(_ context.Context, _, _ string) erro
 	m.grantCalled++
 	return m.grantErr
 }
+func (m *mockRepo) AdminListPackages(_ context.Context) ([]*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) AdminCreatePackage(_ context.Context, _, _ string, _, _, _, _ int, _ bool) (*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) AdminUpdatePackage(_ context.Context, _ string, _ *string, _, _, _, _ *int) (*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) AdminTogglePackage(_ context.Context, _ string, _ bool) error {
+	return nil
+}
 
 func newSvc(repo packages.Repo) *packages.Service {
 	return packages.NewService(repo, zerolog.Nop())

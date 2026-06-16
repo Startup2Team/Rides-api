@@ -23,7 +23,7 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) ListPackages(ctx context.Context, vehicleTypeCode string) ([]*Package, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
-		       rp.ride_count, rp.validity_days, rp.price_rwf,
+		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
 		       rp.is_promotional, rp.is_active, rp.created_at
 		FROM ride_packages rp
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
@@ -41,7 +41,7 @@ func (r *Repository) ListPackages(ctx context.Context, vehicleTypeCode string) (
 		p := &Package{}
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.VehicleTypeID, &p.VehicleTypeCode,
-			&p.RideCount, &p.ValidityDays, &p.PriceRWF,
+			&p.RideCount, &p.BonusRides, &p.ValidityDays, &p.PriceRWF,
 			&p.IsPromotional, &p.IsActive, &p.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -51,19 +51,102 @@ func (r *Repository) ListPackages(ctx context.Context, vehicleTypeCode string) (
 	return pkgs, rows.Err()
 }
 
+// AdminListPackages returns every package (active and inactive) across all
+// vehicle types, newest first. Used by the admin packages console.
+func (r *Repository) AdminListPackages(ctx context.Context) ([]*Package, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
+		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
+		       rp.is_promotional, rp.is_active, rp.created_at
+		FROM ride_packages rp
+		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
+		ORDER BY rp.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pkgs []*Package
+	for rows.Next() {
+		p := &Package{}
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.VehicleTypeID, &p.VehicleTypeCode,
+			&p.RideCount, &p.BonusRides, &p.ValidityDays, &p.PriceRWF,
+			&p.IsPromotional, &p.IsActive, &p.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		pkgs = append(pkgs, p)
+	}
+	return pkgs, rows.Err()
+}
+
+// AdminCreatePackage creates a new package for a vehicle type (looked up by code).
+func (r *Repository) AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error) {
+	var vehicleTypeID string
+	if err := r.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, vehicleTypeCode).Scan(&vehicleTypeID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.New(404, "VEHICLE_TYPE_NOT_FOUND", "vehicle type not found")
+		}
+		return nil, err
+	}
+
+	p := &Package{}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO ride_packages (name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional, is_active, created_at
+	`, name, vehicleTypeID, rideCount, bonusRides, validityDays, priceRWF, isPromotional).Scan(
+		&p.ID, &p.Name, &p.VehicleTypeID, &p.RideCount, &p.BonusRides,
+		&p.ValidityDays, &p.PriceRWF, &p.IsPromotional, &p.IsActive, &p.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	p.VehicleTypeCode = vehicleTypeCode
+	return p, nil
+}
+
+// AdminUpdatePackage updates a package's name, price, ride count, bonus rides,
+// or validity window. Only non-nil fields are changed.
+func (r *Repository) AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error) {
+	_, err := r.db.Exec(ctx, `
+		UPDATE ride_packages SET
+		    name          = COALESCE($1, name),
+		    ride_count    = COALESCE($2, ride_count),
+		    bonus_rides   = COALESCE($3, bonus_rides),
+		    validity_days = COALESCE($4, validity_days),
+		    price_rwf     = COALESCE($5, price_rwf)
+		WHERE id = $6
+	`, name, rideCount, bonusRides, validityDays, priceRWF, id)
+	if err != nil {
+		return nil, err
+	}
+	return r.GetPackageByID(ctx, id)
+}
+
+// AdminTogglePackage activates or deactivates a package. Deactivating removes
+// it from sale without deleting history — driver_ride_credits already issued
+// are unaffected.
+func (r *Repository) AdminTogglePackage(ctx context.Context, id string, isActive bool) error {
+	_, err := r.db.Exec(ctx, `UPDATE ride_packages SET is_active = $1 WHERE id = $2`, isActive, id)
+	return err
+}
+
 // GetPackageByID returns a single package by its ID.
 func (r *Repository) GetPackageByID(ctx context.Context, packageID string) (*Package, error) {
 	p := &Package{}
 	err := r.db.QueryRow(ctx, `
 		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
-		       rp.ride_count, rp.validity_days, rp.price_rwf,
+		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
 		       rp.is_promotional, rp.is_active, rp.created_at
 		FROM ride_packages rp
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
 		WHERE rp.id = $1
 	`, packageID).Scan(
 		&p.ID, &p.Name, &p.VehicleTypeID, &p.VehicleTypeCode,
-		&p.RideCount, &p.ValidityDays, &p.PriceRWF,
+		&p.RideCount, &p.BonusRides, &p.ValidityDays, &p.PriceRWF,
 		&p.IsPromotional, &p.IsActive, &p.CreatedAt,
 	)
 	if err != nil {
@@ -177,9 +260,9 @@ func (r *Repository) GrantFreeTrialIfEligible(ctx context.Context, driverUserID,
 	}
 
 	var pkgID, vehicleTypeID string
-	var rideCount, validityDays int
+	var rideCount, bonusRides, validityDays int
 	err = tx.QueryRow(ctx, `
-		SELECT rp.id, rp.vehicle_type_id, rp.ride_count, rp.validity_days
+		SELECT rp.id, rp.vehicle_type_id, rp.ride_count, rp.bonus_rides, rp.validity_days
 		FROM ride_packages rp
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
 		WHERE vt.code = $1
@@ -187,7 +270,7 @@ func (r *Repository) GrantFreeTrialIfEligible(ctx context.Context, driverUserID,
 		  AND rp.price_rwf = 0
 		  AND rp.is_active = TRUE
 		LIMIT 1
-	`, vehicleTypeCode).Scan(&pkgID, &vehicleTypeID, &rideCount, &validityDays)
+	`, vehicleTypeCode).Scan(&pkgID, &vehicleTypeID, &rideCount, &bonusRides, &validityDays)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // no free trial package configured — skip silently
@@ -195,11 +278,12 @@ func (r *Repository) GrantFreeTrialIfEligible(ctx context.Context, driverUserID,
 		return err
 	}
 
+	totalCredits := rideCount + bonusRides
 	_, err = tx.Exec(ctx, `
 		INSERT INTO driver_ride_credits
 		  (driver_id, package_id, vehicle_type_id, rides_total, rides_remaining, is_promotional, expires_at)
 		VALUES ($1, $2, $3, $4, $4, TRUE, NOW() + make_interval(days => $5))
-	`, driverUserID, pkgID, vehicleTypeID, rideCount, validityDays)
+	`, driverUserID, pkgID, vehicleTypeID, totalCredits, validityDays)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,6 @@
-# Taravelis Backend Documentation
+# Rides Backend Documentation
 
-This folder is the working documentation hub for the Taravelis ride-hailing backend. It is written for three audiences:
+This folder is the working documentation hub for the Rides ride-hailing backend. It is written for three audiences:
 
 - Backend engineers implementing endpoints and business rules.
 - DevOps engineers deploying and operating the API.
@@ -26,7 +26,7 @@ This folder is the working documentation hub for the Taravelis ride-hailing back
 
 ## Current System Summary
 
-Taravelis is a Go modular monolith using:
+Rides is a Go modular monolith using:
 
 - Go + Chi HTTP router.
 - PostgreSQL + PostGIS for persistent relational and geospatial data.

@@ -310,3 +310,122 @@ func (r *Repository) DeleteRoleByID(ctx context.Context, roleID string) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM admin_roles WHERE id=$1`, roleID)
 	return err
 }
+
+// LogAction inserts one audit entry. Errors are non-fatal — callers ignore them.
+func (r *Repository) LogAction(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, detail, ip)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''))
+	`, adminID, action, targetType, targetID, detail, ip)
+	return err
+}
+
+// GetMemberActivity returns the most recent audit entries for a given admin.
+func (r *Repository) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, action, COALESCE(target_type, ''), COALESCE(target_id, ''), COALESCE(detail, ''), COALESCE(ip, ''), occurred_at
+		FROM admin_audit_log
+		WHERE admin_id = $1
+		ORDER BY occurred_at DESC
+		LIMIT $2
+	`, adminID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		err := rows.Scan(&e.ID, &e.Action, &e.TargetType, &e.TargetID, &e.Detail, &e.IP, &e.OccurredAt)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// ListAuditLog returns the platform-wide admin audit trail with optional filters,
+// newest first. Super Admin only — enforced at the route level.
+func (r *Repository) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error) {
+	var clauses []string
+	var args []interface{}
+	n := 1
+
+	if actor != "" {
+		clauses = append(clauses, fmt.Sprintf("l.admin_id = $%d", n))
+		args = append(args, actor)
+		n++
+	}
+	if action != "" {
+		clauses = append(clauses, fmt.Sprintf("l.action ILIKE $%d", n))
+		args = append(args, "%"+action+"%")
+		n++
+	}
+	if targetType != "" {
+		clauses = append(clauses, fmt.Sprintf("l.target_type = $%d", n))
+		args = append(args, targetType)
+		n++
+	}
+	if from != "" {
+		clauses = append(clauses, fmt.Sprintf("l.occurred_at >= $%d", n))
+		args = append(args, from)
+		n++
+	}
+	if to != "" {
+		clauses = append(clauses, fmt.Sprintf("l.occurred_at <= $%d", n))
+		args = append(args, to)
+		n++
+	}
+
+	where := ""
+	if len(clauses) > 0 {
+		where = "WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	countQ := fmt.Sprintf(`SELECT COUNT(*) FROM admin_audit_log l %s`, where)
+	var total int
+	if err := r.db.QueryRow(ctx, countQ, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	args = append(args, limit, offset)
+	q := fmt.Sprintf(`
+		SELECT l.id, l.admin_id, a.name, COALESCE(l.admin_role, ''), l.action,
+		       COALESCE(l.target_type, ''), COALESCE(l.target_id, ''), COALESCE(l.detail, ''),
+		       COALESCE(l.ip, ''), l.metadata, l.occurred_at
+		FROM admin_audit_log l
+		JOIN admin_accounts a ON a.id = l.admin_id
+		%s
+		ORDER BY l.occurred_at DESC
+		LIMIT $%d OFFSET $%d
+	`, where, n, n+1)
+
+	rows, err := r.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var entries []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		var rawMeta []byte
+		if err := rows.Scan(&e.ID, &e.AdminID, &e.AdminName, &e.AdminRole, &e.Action,
+			&e.TargetType, &e.TargetID, &e.Detail, &e.IP, &rawMeta, &e.OccurredAt); err != nil {
+			return nil, 0, err
+		}
+		if len(rawMeta) > 0 {
+			_ = json.Unmarshal(rawMeta, &e.Metadata)
+		}
+		entries = append(entries, e)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return entries, total, nil
+}

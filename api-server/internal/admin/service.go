@@ -10,9 +10,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
+	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
 // DBTX is the minimal database interface the Service requires.
@@ -34,6 +36,7 @@ type Service struct {
 	db       DBTX
 	log      zerolog.Logger
 	packages PackagesService
+	rdb      *goredis.Client
 }
 
 func NewService(db DBTX, log zerolog.Logger) *Service {
@@ -42,6 +45,12 @@ func NewService(db DBTX, log zerolog.Logger) *Service {
 
 func (s *Service) SetPackagesService(svc PackagesService) {
 	s.packages = svc
+}
+
+// SetRedis wires the Redis client used by account-assist operations
+// (clearing OTP lockouts, GPS anomaly counters).
+func (s *Service) SetRedis(rdb *goredis.Client) {
+	s.rdb = rdb
 }
 
 // ── Driver management ─────────────────────────────────────────────────────
@@ -901,6 +910,124 @@ func (s *Service) DeviceCollisions(ctx context.Context) ([]map[string]interface{
 		})
 	}
 	return result, nil
+}
+
+// ── Account assist ───────────────────────────────────────────────────────
+
+// ClearOTPLockout removes the Redis rate-limit key blocking further OTP sends
+// for a user's phone number. Used by support staff when a user is stuck after
+// repeated OTP requests.
+func (s *Service) ClearOTPLockout(ctx context.Context, userID string) error {
+	var phone string
+	err := s.db.QueryRow(ctx, `SELECT phone_number FROM users WHERE id = $1`, userID).Scan(&phone)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperrors.ErrNotFound
+		}
+		return err
+	}
+	if s.rdb == nil {
+		return nil
+	}
+	return s.rdb.Del(ctx, rkeys.K.OTPRateLimit(phone)).Err()
+}
+
+// ClearGPSFlags deletes recorded GPS anomalies for a driver and resets the
+// Redis anomaly counter, lifting any GPS-related auto-suspension risk.
+func (s *Service) ClearGPSFlags(ctx context.Context, profileID string) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM gps_anomalies WHERE driver_id = $1`, profileID)
+	if err != nil {
+		return err
+	}
+	if s.rdb == nil {
+		return nil
+	}
+	return s.rdb.Del(ctx, rkeys.K.GPSAnomalyCount(profileID)).Err()
+}
+
+// ClearDeviceCollisionFlag removes a user from a shared-device grouping by
+// deleting their device session rows for that specific device. The user's
+// account itself is untouched; they can re-register a device on next login.
+func (s *Service) ClearDeviceCollisionFlag(ctx context.Context, userID, deviceID string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM device_sessions WHERE user_id = $1 AND device_id = $2`, userID, deviceID)
+	return err
+}
+
+// GetAccountTimeline returns a read-only chronological view of a user's
+// account activity: rides, device sessions, and suspension history.
+func (s *Service) GetAccountTimeline(ctx context.Context, userID string, limit int) (map[string]interface{}, error) {
+	rideRows, err := s.db.Query(ctx, `
+		SELECT id, status, transport_type, agreed_fare, created_at, completed_at, cancel_reason
+		FROM rides
+		WHERE customer_id = $1 OR driver_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2
+	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rideRows.Close()
+
+	var rides []map[string]interface{}
+	for rideRows.Next() {
+		var id, status, transportType string
+		var agreedFare *float64
+		var createdAt time.Time
+		var completedAt *time.Time
+		var cancelReason *string
+		if err := rideRows.Scan(&id, &status, &transportType, &agreedFare, &createdAt, &completedAt, &cancelReason); err != nil {
+			return nil, err
+		}
+		rides = append(rides, map[string]interface{}{
+			"id": id, "status": status, "transport_type": transportType,
+			"agreed_fare": agreedFare, "created_at": createdAt,
+			"completed_at": completedAt, "cancel_reason": cancelReason,
+		})
+	}
+
+	sessionRows, err := s.db.Query(ctx, `
+		SELECT device_id, platform, created_at
+		FROM device_sessions
+		WHERE user_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2
+	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer sessionRows.Close()
+
+	var sessions []map[string]interface{}
+	for sessionRows.Next() {
+		var deviceID, platform string
+		var createdAt time.Time
+		if err := sessionRows.Scan(&deviceID, &platform, &createdAt); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, map[string]interface{}{
+			"device_id": deviceID, "platform": platform, "created_at": createdAt,
+		})
+	}
+
+	var isSuspended bool
+	var suspensionUntil *time.Time
+	err = s.db.QueryRow(ctx,
+		`SELECT is_suspended, suspension_until FROM users WHERE id = $1`, userID,
+	).Scan(&isSuspended, &suspensionUntil)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrNotFound
+		}
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"rides":            rides,
+		"device_sessions":  sessions,
+		"is_suspended":     isSuspended,
+		"suspension_until": suspensionUntil,
+	}, nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

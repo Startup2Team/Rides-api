@@ -37,7 +37,10 @@ type mockRepo struct {
 	listRolesFn       func(ctx context.Context) ([]*Role, error)
 	createRoleFn      func(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
 	updateRoleByIDFn  func(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
-	deleteRoleByIDFn  func(ctx context.Context, roleID string) error
+	deleteRoleByIDFn    func(ctx context.Context, roleID string) error
+	logActionFn         func(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error
+	getMemberActivityFn func(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
+	listAuditLogFn      func(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error)
 }
 
 func (m *mockRepo) FindByEmail(ctx context.Context, email string) (*AdminAccount, *string, error) {
@@ -152,6 +155,24 @@ func (m *mockRepo) DeleteRoleByID(ctx context.Context, roleID string) error {
 		return m.deleteRoleByIDFn(ctx, roleID)
 	}
 	return nil
+}
+func (m *mockRepo) LogAction(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error {
+	if m.logActionFn != nil {
+		return m.logActionFn(ctx, adminID, action, targetType, targetID, detail, ip)
+	}
+	return nil
+}
+func (m *mockRepo) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error) {
+	if m.getMemberActivityFn != nil {
+		return m.getMemberActivityFn(ctx, adminID, limit)
+	}
+	return nil, nil
+}
+func (m *mockRepo) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error) {
+	if m.listAuditLogFn != nil {
+		return m.listAuditLogFn(ctx, actor, action, targetType, from, to, limit, offset)
+	}
+	return nil, 0, nil
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────
