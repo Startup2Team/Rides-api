@@ -75,6 +75,19 @@ func (r *Repository) GetPackageByID(ctx context.Context, packageID string) (*Pac
 	return p, nil
 }
 
+// SumActiveCredits returns the total ride credits remaining across ALL of the
+// driver's active, non-expired credit grants (a driver can hold several packages
+// at once). This is the number to show as "credits left".
+func (r *Repository) SumActiveCredits(ctx context.Context, driverUserID string) (int, error) {
+	var total int
+	err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(rides_remaining), 0)
+		FROM driver_ride_credits
+		WHERE driver_id = $1 AND is_active = TRUE AND rides_remaining > 0 AND expires_at > NOW()
+	`, driverUserID).Scan(&total)
+	return total, err
+}
+
 // GetActiveCredit returns the driver's best active credit (promos first, then earliest expiry).
 // Returns ErrNotFound if the driver has no usable credits.
 func (r *Repository) GetActiveCredit(ctx context.Context, driverUserID string) (*DriverCredit, error) {

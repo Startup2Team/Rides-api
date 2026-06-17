@@ -974,6 +974,28 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		return nil, err
 	}
 
+	// Uploaded KYC documents (licence, national ID, insurance, authorization,
+	// selfie) so the admin can review the actual photos before approving.
+	documents := []map[string]interface{}{}
+	if rows, derr := s.db.Query(ctx, `
+		SELECT document_type, file_url, uploaded_at
+		FROM driver_documents WHERE driver_id = $1
+		ORDER BY uploaded_at ASC
+	`, profileID); derr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var docType, fileURL string
+			var uploadedAt time.Time
+			if scanErr := rows.Scan(&docType, &fileURL, &uploadedAt); scanErr == nil {
+				documents = append(documents, map[string]interface{}{
+					"document_type": docType,
+					"file_url":      fileURL,
+					"uploaded_at":   uploadedAt,
+				})
+			}
+		}
+	}
+
 	return map[string]interface{}{
 		"id": id, "user_id": userID, "phone": phone, "full_name": fullName,
 		"transport_type": tType, "vehicle_plate": plate, "license_number": license,
@@ -988,6 +1010,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		"rejection_reason": rejectionReason,
 		"acceptance_rate":  acceptanceRate, "total_rides": totalRides, "is_online": isOnline,
 		"created_at": createdAt,
+		"documents":  documents,
 	}, nil
 }
 

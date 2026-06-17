@@ -19,7 +19,11 @@ import (
 	"github.com/workspace/ride-platform/internal/analytics"
 )
 
-const DriverPayoutRate = 0.85
+// DriverPayoutRate is the share of the agreed fare the driver keeps. Our model
+// is package-based (drivers buy ride credits and spend one at fare agreement) —
+// there is NO per-ride commission, so the driver keeps 100% of the fare. This is
+// the knob to change if a commission model is ever introduced.
+const DriverPayoutRate = 1.0
 
 // LocationUpdate is a single GPS update from the driver.
 type LocationUpdate struct {
@@ -377,17 +381,19 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 }
 
 // GetDailyEarnings returns total fare revenue for today.
-func (s *Service) GetDailyEarnings(ctx context.Context, driverUserID string) (float64, error) {
-	gross, err := s.repo.GetEarnings(ctx, driverUserID, "1 day")
+// GetDailyEarnings returns today's driver payout and the number of rides
+// completed today.
+func (s *Service) GetDailyEarnings(ctx context.Context, driverUserID string) (float64, int, error) {
+	gross, count, err := s.repo.GetEarnings(ctx, driverUserID, "1 day")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return CalculateDriverPayout(gross), nil
+	return CalculateDriverPayout(gross), count, nil
 }
 
 // GetWeeklyEarnings returns total fare revenue for the last 7 days.
 func (s *Service) GetWeeklyEarnings(ctx context.Context, driverUserID string) (float64, error) {
-	gross, err := s.repo.GetEarnings(ctx, driverUserID, "7 days")
+	gross, _, err := s.repo.GetEarnings(ctx, driverUserID, "7 days")
 	if err != nil {
 		return 0, err
 	}

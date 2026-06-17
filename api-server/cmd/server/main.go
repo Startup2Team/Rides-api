@@ -39,6 +39,7 @@ import (
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
+	"github.com/workspace/ride-platform/internal/rating"
 	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
 	"github.com/workspace/ride-platform/internal/settings"
@@ -155,6 +156,8 @@ func main() {
 	negSvc.SetFareRepository(fareRepo)
 	// Wire the timeout manager so negotiation activity resets the 5-minute clock.
 	negSvc.SetTimeoutManager(rideSvc)
+	notifRepo := notification.NewRepository(db)
+	notifySvc.SetRepository(notifRepo)
 	adminSvc := admin.NewService(db, log)
 	locSvc := location.NewService(db, rdb, cfg, log)
 
@@ -191,6 +194,10 @@ func main() {
 	} else {
 		uploadH = uh
 	}
+
+	ratingRepo := rating.NewRepository(db)
+	ratingH := rating.NewHandler(ratingRepo, log)
+	notifH := notification.NewHandler(notifRepo)
 
 	// New module handlers
 	incidentH := incidents.NewHandler(incidentSvc)
@@ -315,6 +322,13 @@ func main() {
 		r.Post("/rides/{ride_id}/negotiation/propose", negH.Propose("CUSTOMER"))
 		r.Post("/rides/{ride_id}/negotiation/accept", negH.Accept("CUSTOMER"))
 		r.Post("/rides/{ride_id}/negotiation/decline", negH.Decline("CUSTOMER"))
+		r.Post("/rides/{ride_id}/negotiation/message", negH.SendMessage("CUSTOMER"))
+		r.Get("/rides/{ride_id}/negotiation/history", negH.GetHistory("CUSTOMER"))
+
+		r.Post("/rides/{ride_id}/rate", ratingH.SubmitRating)
+		r.Get("/rides/{ride_id}/rating", ratingH.GetRideRating)
+
+		r.Post("/support/tickets", ticketH.SubmitTicket)
 	})
 
 	// ── Driver ────────────────────────────────────────────────────────────────
@@ -362,8 +376,13 @@ func main() {
 			r.Post("/rides/{ride_id}/negotiation/propose", negH.Propose("DRIVER"))
 			r.Post("/rides/{ride_id}/negotiation/accept", negH.Accept("DRIVER"))
 			r.Post("/rides/{ride_id}/negotiation/decline", negH.Decline("DRIVER"))
+			r.Post("/rides/{ride_id}/negotiation/message", negH.SendMessage("DRIVER"))
+			r.Get("/rides/{ride_id}/negotiation/history", negH.GetHistory("DRIVER"))
 			r.Post("/rides/{ride_id}/negotiation/lock-fare", negH.LockManualFare)
 			r.Post("/rides/{ride_id}/negotiation/initiate-call", negH.InitiateCall)
+
+			r.Post("/rides/{ride_id}/rate", ratingH.SubmitRating)
+			r.Get("/rides/{ride_id}/rating", ratingH.GetRideRating)
 
 			r.Get("/earnings/daily", driverH.DailyEarnings)
 			r.Get("/earnings/weekly", driverH.WeeklyEarnings)
@@ -371,16 +390,23 @@ func main() {
 		})
 	})
 
-	// ── Users (mode switch, saved locations) ──────────────────────────────────
+	// ── Users (mode switch, saved locations, notifications) ──────────────────
 	r.Route(apiV1Prefix+"/users", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
 
 		r.Patch("/mode", locH.SwitchMode)
 
+		r.Get("/me/ratings", ratingH.MyRatings)
+
 		r.Get("/me/saved-locations", locH.ListSavedLocations)
 		r.Post("/me/saved-locations", locH.CreateSavedLocation)
 		r.Put("/me/saved-locations/{id}", locH.UpdateSavedLocation)
 		r.Delete("/me/saved-locations/{id}", locH.DeleteSavedLocation)
+
+		r.Get("/me/notifications", notifH.List)
+		r.Get("/me/notifications/unread-count", notifH.UnreadCount)
+		r.Patch("/me/notifications/{id}/read", notifH.MarkRead)
+		r.Post("/me/notifications/mark-all-read", notifH.MarkAllRead)
 	})
 
 	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────
@@ -394,10 +420,19 @@ func main() {
 	})
 
 	r.Route(apiV1Prefix+"/uploads", func(r chi.Router) {
-		r.Use(mw.Authenticate(cfg, rdb))
+		// Public object serving (proxy/MinIO mode) so the mobile app and admin
+		// panel can render document images via a plain URL. No-op on S3/R2.
 		if uploadH != nil {
-			r.Post("/presigned-url", uploadH.PresignedURL)
+			r.Get("/objects/*", uploadH.GetObject)
 		}
+		// Authenticated: request an upload target, and (proxy mode) stream bytes.
+		r.Group(func(r chi.Router) {
+			r.Use(mw.Authenticate(cfg, rdb))
+			if uploadH != nil {
+				r.Post("/presigned-url", uploadH.PresignedURL)
+				r.Put("/objects/*", uploadH.PutObject)
+			}
+		})
 	})
 
 	// ── Locations (route cache, landmarks, suggestions) ───────────────────────

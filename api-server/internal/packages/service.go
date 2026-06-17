@@ -20,6 +20,7 @@ type Repo interface {
 	UpdatePackage(ctx context.Context, packageID string, p *UpdatePackageInput) (*Package, error)
 	SetPackageActive(ctx context.Context, packageID string, active bool) error
 	GetActiveCredit(ctx context.Context, driverUserID string) (*DriverCredit, error)
+	SumActiveCredits(ctx context.Context, driverUserID string) (int, error)
 	DeductCredit(ctx context.Context, driverUserID string) error
 	RefundCredit(ctx context.Context, driverUserID string) error
 	PurchasePackage(ctx context.Context, driverUserID, packageID, vehicleTypeID string, ridesTotal, validityDays int, isPromotional bool) (*DriverCredit, error)
@@ -83,6 +84,12 @@ func (s *Service) HasCredits(ctx context.Context, driverUserID, vehicleType stri
 		return false, err
 	}
 	return credit.VehicleTypeCode == vehicleType, nil
+}
+
+// GetTotalCredits returns the total ride credits remaining across all of the
+// driver's active grants — the number shown as "credits left".
+func (s *Service) GetTotalCredits(ctx context.Context, driverUserID string) (int, error) {
+	return s.repo.SumActiveCredits(ctx, driverUserID)
 }
 
 // DeductCredit decrements the driver's best usable credit by one.

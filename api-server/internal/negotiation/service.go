@@ -350,6 +350,127 @@ func (s *Service) notifyCallPrompt(ctx context.Context, rideID string, r *ride.R
 	}
 }
 
+// SendTextMessage persists a chat message and pushes it to the other party via WebSocket.
+func (s *Service) SendTextMessage(ctx context.Context, rideID, actorRole, actorUserID, body string) error {
+	r, err := s.findRideForActor(ctx, rideID, actorRole, actorUserID)
+	if err != nil {
+		return err
+	}
+	if r.Status != ride.StatusNegotiating {
+		return apperrors.ErrInvalidTransition
+	}
+
+	msg, err := s.repo.CreateTextMessage(ctx, rideID, actorRole, body)
+	if err != nil {
+		return fmt.Errorf("create negotiation text message: %w", err)
+	}
+
+	wsMsg := tracking.Message{
+		Type:   "negotiation_text",
+		RideID: rideID,
+		Payload: map[string]interface{}{
+			"id":      msg.ID,
+			"sender":  actorRole,
+			"body":    body,
+			"sent_at": msg.CreatedAt,
+		},
+	}
+	if actorRole == "CUSTOMER" {
+		if r.DriverID != nil {
+			s.hub.SendToDriver(*r.DriverID, wsMsg)
+		}
+	} else {
+		s.hub.SendToCustomer(rideID, wsMsg)
+	}
+
+	if s.timeoutMgr != nil {
+		s.timeoutMgr.ResetNegotiationTimeout(rideID)
+	}
+
+	return nil
+}
+
+// HistoryEntry is a unified timeline item (offer or text) for a ride's negotiation.
+type HistoryEntry struct {
+	ID        string      `json:"id"`
+	Type      string      `json:"type"` // "offer" | "text"
+	Sender    string      `json:"sender"`
+	Amount    *float64    `json:"amount,omitempty"`
+	Response  *string     `json:"response,omitempty"`
+	Text      *string     `json:"text,omitempty"`
+	IsFinal   bool        `json:"is_final,omitempty"`
+	Timestamp interface{} `json:"timestamp"`
+}
+
+// GetHistory returns the merged timeline of offers and text messages for a ride.
+func (s *Service) GetHistory(ctx context.Context, rideID, actorRole, actorUserID string) ([]HistoryEntry, error) {
+	_, err := s.findRideForActor(ctx, rideID, actorRole, actorUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	rounds, err := s.repo.ListRounds(ctx, rideID)
+	if err != nil {
+		return nil, err
+	}
+	texts, err := s.repo.ListTextMessages(ctx, rideID)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []HistoryEntry
+	ri, ti := 0, 0
+	for ri < len(rounds) || ti < len(texts) {
+		addRound := false
+		if ri < len(rounds) && ti < len(texts) {
+			addRound = rounds[ri].CreatedAt.Before(texts[ti].CreatedAt) || rounds[ri].CreatedAt.Equal(texts[ti].CreatedAt)
+		} else {
+			addRound = ri < len(rounds)
+		}
+
+		if addRound {
+			r := rounds[ri]
+			sender := "driver"
+			if r.ProposedBy == "CUSTOMER" {
+				sender = "customer"
+			}
+			amt := r.ProposedAmount
+			e := HistoryEntry{
+				ID:        r.ID,
+				Type:      "offer",
+				Sender:    sender,
+				Amount:    &amt,
+				Response:  r.Response,
+				Text:      r.Message,
+				Timestamp: r.CreatedAt,
+			}
+			if r.Response != nil && *r.Response == "ACCEPTED" {
+				e.IsFinal = true
+			}
+			entries = append(entries, e)
+			ri++
+		} else {
+			t := texts[ti]
+			sender := "driver"
+			if t.Sender == "CUSTOMER" {
+				sender = "customer"
+			} else if t.Sender == "SYSTEM" {
+				sender = "system"
+			}
+			entries = append(entries, HistoryEntry{
+				ID:        t.ID,
+				Type:      "text",
+				Sender:    sender,
+				Text:      &t.Body,
+				Timestamp: t.CreatedAt,
+			})
+			ti++
+		}
+	}
+
+	return entries, nil
+}
+
 // InitiateCall logs the call timestamp and returns the Africa's Talking masking number.
 func (s *Service) InitiateCall(ctx context.Context, rideID, driverUserID string) (string, error) {
 	// Only the assigned driver may pull the masked number for this ride.

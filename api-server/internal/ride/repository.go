@@ -17,10 +17,15 @@ type Ride struct {
 	ID         string
 	CustomerID string
 	// CustomerName and CustomerPhone are populated by driver-side queries (JOIN with users).
-	CustomerName          string
-	CustomerPhone         string
-	DriverID              *string
-	TransportType         string
+	CustomerName  string
+	CustomerPhone string
+	// DriverName, DriverPhone, DriverRating are populated by customer-side list queries.
+	DriverName    string
+	DriverPhone   string
+	DriverRating  float64
+	DriverPlate   string
+	DriverID      *string
+	TransportType string
 	Status                Status
 	PickupPoint           geo.Point
 	PickupAddress         string
@@ -55,6 +60,10 @@ type RideResponse struct {
 	CustomerName          string     `json:"customer_name,omitempty"`
 	CustomerPhone         string     `json:"customer_phone,omitempty"`
 	DriverID              *string    `json:"driver_id"`
+	DriverName            string     `json:"driver_name,omitempty"`
+	DriverPhone           string     `json:"driver_phone,omitempty"`
+	DriverRating          *float64   `json:"driver_rating,omitempty"`
+	DriverPlate           string     `json:"driver_plate,omitempty"`
 	TransportType         string     `json:"transport_type"`
 	Status                string     `json:"status"`
 	PickupLat             float64    `json:"pickup_lat"`
@@ -82,6 +91,26 @@ type RideResponse struct {
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
+type driverInfo struct {
+	Name   string
+	Phone  string
+	Rating *float64
+	Plate  string
+}
+
+func (r *Ride) driverInfoOrEmpty() driverInfo {
+	if r.DriverID == nil {
+		return driverInfo{}
+	}
+	rating := r.DriverRating
+	return driverInfo{
+		Name:   r.DriverName,
+		Phone:  r.DriverPhone,
+		Rating: &rating,
+		Plate:  r.DriverPlate,
+	}
+}
+
 // ToResponse converts the internal Ride model to the mobile-friendly API response.
 func (r *Ride) ToResponse() *RideResponse {
 	return &RideResponse{
@@ -90,6 +119,10 @@ func (r *Ride) ToResponse() *RideResponse {
 		CustomerName:          r.CustomerName,
 		CustomerPhone:         r.CustomerPhone,
 		DriverID:              r.DriverID,
+		DriverName:            r.driverInfoOrEmpty().Name,
+		DriverPhone:           r.driverInfoOrEmpty().Phone,
+		DriverRating:          r.driverInfoOrEmpty().Rating,
+		DriverPlate:           r.driverInfoOrEmpty().Plate,
 		TransportType:         r.TransportType,
 		Status:                string(r.Status),
 		PickupLat:             r.PickupPoint.Lat,
@@ -186,6 +219,71 @@ const rideSelectColsWithCustomer = `
 	COALESCE(u.phone_number, '')       AS customer_phone
 `
 
+// rideSelectColsWithDriver extends rideSelectCols with driver identity fields.
+// Used by customer-facing queries so ride history shows who drove.
+const rideSelectColsWithDriver = `
+	r.id, r.customer_id, r.driver_id, r.transport_type, r.status,
+	ST_X(r.pickup_point::geometry)      AS pickup_lng,
+	ST_Y(r.pickup_point::geometry)      AS pickup_lat,
+	r.pickup_address,
+	ST_X(r.destination_point::geometry) AS dest_lng,
+	ST_Y(r.destination_point::geometry) AS dest_lat,
+	r.destination_address,
+	r.estimated_distance_km, r.customer_initial_fare,
+	r.agreed_fare, r.fare_locked_at,
+	r.cancel_reason, r.cancelled_by_role,
+	r.driver_arrived_at, r.started_at, r.completed_at,
+	r.pricing_config_id, r.estimated_fare_rwf,
+	COALESCE(r.night_surcharge_applied, FALSE), COALESCE(r.night_surcharge_pct, 0.0),
+	COALESCE(r.waiting_seconds, 0), COALESCE(r.waiting_charge_rwf, 0.0),
+	COALESCE(r.cancellation_fee_rwf, 0.0), r.final_fare_rwf,
+	COALESCE(r.pickup_expired, FALSE),
+	r.created_at, r.updated_at,
+	COALESCE(du.full_name, '')         AS driver_name,
+	COALESCE(du.phone_number, '')      AS driver_phone,
+	COALESCE(dp.rating, 5.0)           AS driver_rating,
+	COALESCE(dp.vehicle_plate, '')     AS driver_plate
+`
+
+func scanRideWithDriver(row pgx.Row) (*Ride, error) {
+	r := &Ride{}
+	var pickupLng, pickupLat, destLng, destLat float64
+	err := row.Scan(
+		&r.ID, &r.CustomerID, &r.DriverID, &r.TransportType, &r.Status,
+		&pickupLng, &pickupLat, &r.PickupAddress,
+		&destLng, &destLat, &r.DestinationAddress,
+		&r.EstimatedDistanceKM, &r.CustomerInitialFare,
+		&r.AgreedFare, &r.FareLockedAt,
+		&r.CancelReason, &r.CancelledByRole,
+		&r.DriverArrivedAt, &r.StartedAt, &r.CompletedAt,
+		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
+		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
+		&r.PickupExpired, &r.CreatedAt, &r.UpdatedAt,
+		&r.DriverName, &r.DriverPhone, &r.DriverRating, &r.DriverPlate,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrRideNotFound
+		}
+		return nil, err
+	}
+	r.PickupPoint = geo.Point{Lat: pickupLat, Lng: pickupLng}
+	r.DestinationPoint = geo.Point{Lat: destLat, Lng: destLng}
+	return r, nil
+}
+
+func scanRidesWithDriver(rows pgx.Rows) ([]*Ride, error) {
+	var rides []*Ride
+	for rows.Next() {
+		r, err := scanRideWithDriver(rows)
+		if err != nil {
+			return nil, err
+		}
+		rides = append(rides, r)
+	}
+	return rides, rows.Err()
+}
+
 func scanRideWithCustomer(row pgx.Row) (*Ride, error) {
 	r := &Ride{}
 	var pickupLng, pickupLat, destLng, destLat float64
@@ -245,8 +343,14 @@ func (repo *Repository) FindByID(ctx context.Context, rideID string) (*Ride, err
 }
 
 func (repo *Repository) FindByIDAndCustomer(ctx context.Context, rideID, customerID string) (*Ride, error) {
-	row := repo.db.QueryRow(ctx, `SELECT `+rideSelectCols+` FROM rides WHERE id = $1 AND customer_id = $2`, rideID, customerID)
-	return scanRide(row)
+	row := repo.db.QueryRow(ctx, `
+		SELECT `+rideSelectColsWithDriver+`
+		FROM rides r
+		LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
+		LEFT JOIN users du ON du.id = dp.user_id
+		WHERE r.id = $1 AND r.customer_id = $2
+	`, rideID, customerID)
+	return scanRideWithDriver(row)
 }
 
 func (repo *Repository) FindByIDAndDriver(ctx context.Context, rideID, driverUserID string) (*Ride, error) {
@@ -466,14 +570,18 @@ func (repo *Repository) AppendEvent(ctx context.Context, rideID, eventType, acto
 
 func (repo *Repository) ListByCustomer(ctx context.Context, customerID string, limit, offset int) ([]*Ride, error) {
 	rows, err := repo.db.Query(ctx,
-		`SELECT `+rideSelectCols+` FROM rides WHERE customer_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+		`SELECT `+rideSelectColsWithDriver+`
+		 FROM rides r
+		 LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
+		 LEFT JOIN users du ON du.id = dp.user_id
+		 WHERE r.customer_id = $1 ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
 		customerID, limit, offset,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanRides(rows)
+	return scanRidesWithDriver(rows)
 }
 
 func scanRides(rows pgx.Rows) ([]*Ride, error) {

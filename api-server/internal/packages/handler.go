@@ -103,7 +103,8 @@ func (h *Handler) GetCredits(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]interface{}{"credit": credit})
+	total, _ := h.svc.GetTotalCredits(r.Context(), claims.UserID)
+	respond.OK(w, map[string]interface{}{"credit": credit, "total_remaining": total})
 }
 
 // ── Admin endpoints ───────────────────────────────────────────────────────────

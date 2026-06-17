@@ -87,6 +87,9 @@ type StorageConfig struct {
 	KeyID    string
 	Secret   string
 	CDNURL   string
+	// Endpoint overrides the S3 API host for S3-compatible stores (MinIO in dev,
+	// or any self-hosted gateway). Empty = real AWS S3 (default endpoints).
+	Endpoint string
 }
 
 type MatchingConfig struct {
@@ -186,6 +189,7 @@ func Load() (*Config, error) {
 	cfg.Storage.KeyID = getEnv("STORAGE_KEY_ID", "")
 	cfg.Storage.Secret = getEnv("STORAGE_SECRET", "")
 	cfg.Storage.CDNURL = getEnv("STORAGE_CDN_URL", "")
+	cfg.Storage.Endpoint = getEnv("STORAGE_ENDPOINT", "")
 
 	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 5000)
 	cfg.Matching.ExpandedRadiusM = getEnvInt("MATCH_RADIUS_EXPANDED_M", 10000)

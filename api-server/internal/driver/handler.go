@@ -180,12 +180,14 @@ func (h *Handler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/driver/documents
-// Accepts: document_type (LICENCE_FRONT | VEHICLE_INSURANCE | VEHICLE_AUTHORIZATION), file_url
+// Accepts a document_type from the onboarding KYC set and a stored file_url
+// (produced by the /uploads flow). Repeated uploads of the same type replace
+// the prior file (UpsertDocument), so re-taking a photo overwrites cleanly.
 func (h *Handler) UploadDocument(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		DocumentType string `json:"document_type" validate:"required,oneof=LICENCE_FRONT VEHICLE_INSURANCE VEHICLE_AUTHORIZATION"`
+		DocumentType string `json:"document_type" validate:"required,oneof=LICENCE_FRONT LICENCE_BACK NATIONAL_ID_FRONT NATIONAL_ID_BACK VEHICLE_INSURANCE VEHICLE_AUTHORIZATION SELFIE"`
 		FileURL      string `json:"file_url"      validate:"required,url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -221,12 +223,12 @@ func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/driver/earnings/daily
 func (h *Handler) DailyEarnings(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
-	total, err := h.svc.GetDailyEarnings(r.Context(), claims.UserID)
+	total, ridesToday, err := h.svc.GetDailyEarnings(r.Context(), claims.UserID)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]interface{}{"total_rwf": total, "period": "today"})
+	respond.OK(w, map[string]interface{}{"total_rwf": total, "rides_today": ridesToday, "period": "today"})
 }
 
 // GET /api/v1/driver/earnings/weekly

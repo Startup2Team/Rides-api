@@ -14,6 +14,6 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 	return s.repo.FindByID(ctx, userID)
 }
 
-func (s *Service) UpdateProfile(ctx context.Context, userID string, fullName, email, fcmToken *string) error {
-	return s.repo.UpdateProfile(ctx, userID, fullName, email, fcmToken)
+func (s *Service) UpdateProfile(ctx context.Context, userID string, fullName, email, fcmToken, profileImageURL *string) error {
+	return s.repo.UpdateProfile(ctx, userID, fullName, email, fcmToken, profileImageURL)
 }
