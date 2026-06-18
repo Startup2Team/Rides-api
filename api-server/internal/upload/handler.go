@@ -24,7 +24,7 @@ import (
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
-const maxUploadBytes = 10 * 1024 * 1024 // 10 MB
+const maxUploadBytes = 25 * 1024 * 1024 // 25 MB — headroom for full-res phone photos
 
 type Handler struct {
 	cfg       *appcfg.Config
@@ -157,7 +157,7 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	data, err := io.ReadAll(body)
 	if err != nil {
-		respond.ErrorMsg(w, http.StatusRequestEntityTooLarge, "TOO_LARGE", "file exceeds 10 MB")
+		respond.ErrorMsg(w, http.StatusRequestEntityTooLarge, "TOO_LARGE", "file exceeds 25 MB")
 		return
 	}
 
