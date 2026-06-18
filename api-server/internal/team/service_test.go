@@ -206,11 +206,14 @@ func TestListAdmins_Delegates(t *testing.T) {
 func TestInvite_Delegates(t *testing.T) {
 	repo := &mockRepo{
 		inviteFn: func(_ context.Context, name, email, roleID string) (*AdminAccount, error) {
+			_ = name
+			_ = email
+			_ = roleID
 			return &AdminAccount{ID: "new", Email: email}, nil
 		},
 	}
 	svc := newTestService(repo, newTestRedis(t))
-	a, err := svc.Invite(context.Background(), "Test", "t@test.com", "role-id")
+	a, err := svc.Invite(context.Background(), "Test", "t@test.com", "role-id", "")
 	require.NoError(t, err)
 	assert.Equal(t, "t@test.com", a.Email)
 }
@@ -417,7 +420,9 @@ func TestLogin_With2FA_ReturnsPreAuthToken(t *testing.T) {
 			return &totpSecret, nil
 		},
 	}
-	svc := newTestService(repo, newTestRedis(t))
+	// 2FA is only enforced in production (dev skips it for testing ergonomics),
+	// so exercise the pre-auth path with a production config.
+	svc := newTestServiceProduction(repo, newTestRedis(t))
 	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
 	require.NoError(t, err)
 	assert.True(t, result.TwoFactorRequired)

@@ -113,15 +113,22 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 }
 
 func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reason string) error {
-	_, err := s.db.Exec(ctx, `
+	tag, err := s.db.Exec(ctx, `
 		UPDATE driver_profiles
 		SET approval_status = 'REJECTED',
 		    approved_by = $1,
 		    rejection_reason = $2,
 		    updated_at = NOW()
-		WHERE id = $3
+		WHERE id = $3 AND approval_status = 'PENDING_REVIEW'
 	`, adminUserID, reason, profileID)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.Newf(http.StatusConflict, "INVALID_STATE",
+			"driver is not pending review or does not exist")
+	}
+	return nil
 }
 
 func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error {
@@ -234,7 +241,12 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 		SELECT dp.id, dp.user_id, u.phone_number, u.full_name,
 		       dp.transport_type, dp.vehicle_plate, dp.approval_status,
 		       dp.priority_tier, dp.total_rides, dp.acceptance_rate,
-		       dp.is_online, dp.city, dp.created_at
+		       dp.is_online, dp.city, dp.created_at,
+		       EXISTS(
+		           SELECT 1 FROM rides r
+		           WHERE r.driver_id = dp.id
+		           AND r.status IN ('CONFIRMED','DRIVER_EN_ROUTE','DRIVER_ARRIVED','IN_PROGRESS')
+		       ) AS on_trip
 		%s %s ORDER BY %s LIMIT $%d OFFSET $%d
 	`, base, where, orderBy, n, n+1), args...)
 	if err != nil {
@@ -249,10 +261,10 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 		var city *string
 		var priorityTier, totalRides int
 		var acceptanceRate float64
-		var isOnline bool
+		var isOnline, onTrip bool
 		var createdAt time.Time
 		if err := rows.Scan(&id, &userID, &phone, &fullName, &transportType, &plate,
-			&approvalStatus, &priorityTier, &totalRides, &acceptanceRate, &isOnline, &city, &createdAt); err != nil {
+			&approvalStatus, &priorityTier, &totalRides, &acceptanceRate, &isOnline, &city, &createdAt, &onTrip); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, map[string]interface{}{
@@ -260,7 +272,7 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 			"transport_type": transportType, "vehicle_plate": plate,
 			"approval_status": approvalStatus, "priority_tier": priorityTier,
 			"total_rides": totalRides, "acceptance_rate": acceptanceRate,
-			"is_online": isOnline, "city": city, "created_at": createdAt,
+			"is_online": isOnline, "on_trip": onTrip, "city": city, "created_at": createdAt,
 		})
 	}
 	return result, total, nil
@@ -936,7 +948,8 @@ func periodToInterval(period string) string {
 
 func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]interface{}, error) {
 	var id, userID, phone, tType, plate, license, city, momoCode, approvalStatus string
-	var fullName, province, district, sector, cell, village, momoProvider, suspensionReason, rejectionReason *string
+	var fullName, province, district, sector, cell, village, momoProvider, merchantPayCode, suspensionReason, rejectionReason *string
+	var profileImageURL *string
 	var passengerSeats, loadCapacityKg *int
 	var dob *time.Time
 	var acceptanceRate float64
@@ -945,24 +958,24 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 	var createdAt time.Time
 
 	err := s.db.QueryRow(ctx, `
-		SELECT dp.id, dp.user_id, u.phone_number, u.full_name,
+		SELECT dp.id, dp.user_id, u.phone_number, u.full_name, u.profile_image_url,
 		       dp.transport_type, dp.vehicle_plate, dp.license_number,
 		       dp.date_of_birth, dp.city,
 		       dp.province, dp.district, dp.sector, dp.cell, dp.village,
 		       dp.passenger_seats, dp.load_capacity_kg,
-		       dp.momo_provider, dp.momo_pay_code,
+		       dp.momo_provider, dp.momo_pay_code, dp.merchant_pay_code,
 		       dp.approval_status, dp.suspension_reason, dp.rejection_reason,
 		       dp.acceptance_rate, dp.total_rides, dp.is_online,
 		       dp.created_at
 		FROM driver_profiles dp JOIN users u ON u.id = dp.user_id
 		WHERE dp.id = $1
 	`, profileID).Scan(
-		&id, &userID, &phone, &fullName,
+		&id, &userID, &phone, &fullName, &profileImageURL,
 		&tType, &plate, &license,
 		&dob, &city,
 		&province, &district, &sector, &cell, &village,
 		&passengerSeats, &loadCapacityKg,
-		&momoProvider, &momoCode,
+		&momoProvider, &momoCode, &merchantPayCode,
 		&approvalStatus, &suspensionReason, &rejectionReason,
 		&acceptanceRate, &totalRides, &isOnline,
 		&createdAt,
@@ -976,25 +989,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 
 	// Uploaded KYC documents (licence, national ID, insurance, authorization,
 	// selfie) so the admin can review the actual photos before approving.
-	documents := []map[string]interface{}{}
-	if rows, derr := s.db.Query(ctx, `
-		SELECT document_type, file_url, uploaded_at
-		FROM driver_documents WHERE driver_id = $1
-		ORDER BY uploaded_at ASC
-	`, profileID); derr == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var docType, fileURL string
-			var uploadedAt time.Time
-			if scanErr := rows.Scan(&docType, &fileURL, &uploadedAt); scanErr == nil {
-				documents = append(documents, map[string]interface{}{
-					"document_type": docType,
-					"file_url":      fileURL,
-					"uploaded_at":   uploadedAt,
-				})
-			}
-		}
-	}
+	docs, _ := s.listDriverDocuments(ctx, id)
 
 	return map[string]interface{}{
 		"id": id, "user_id": userID, "phone": phone, "full_name": fullName,
@@ -1006,12 +1001,69 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		},
 		"passenger_seats": passengerSeats, "load_capacity_kg": loadCapacityKg,
 		"momo_provider": momoProvider, "momo_pay_code": momoCode,
+		"merchant_pay_code": merchantPayCode, "profile_image_url": profileImageURL,
 		"approval_status": approvalStatus, "suspension_reason": suspensionReason,
 		"rejection_reason": rejectionReason,
 		"acceptance_rate":  acceptanceRate, "total_rides": totalRides, "is_online": isOnline,
 		"created_at": createdAt,
-		"documents":  documents,
+		"documents":  docs,
 	}, nil
+}
+
+func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT document_type, file_url, uploaded_at
+		FROM driver_documents WHERE driver_id = $1
+		ORDER BY uploaded_at DESC
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var docType, fileURL string
+		var uploadedAt time.Time
+		if err := rows.Scan(&docType, &fileURL, &uploadedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{
+			"document_type": docType,
+			"file_url":      fileURL,
+			"uploaded_at":   uploadedAt,
+		})
+	}
+	return result, nil
+}
+
+func (s *Service) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error {
+	if !allowedDriverDocumentTypes[documentType] {
+		return apperrors.New(http.StatusBadRequest, "VALIDATION", "unsupported document_type")
+	}
+	if fileURL == "" {
+		return apperrors.ErrBadRequest
+	}
+	var exists bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE id = $1)`, profileID).Scan(&exists); err != nil || !exists {
+		return apperrors.ErrNotFound
+	}
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO driver_documents (driver_id, document_type, file_url)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (driver_id, document_type)
+		DO UPDATE SET file_url = EXCLUDED.file_url, uploaded_at = NOW()
+	`, profileID, documentType, fileURL)
+	if err != nil {
+		return err
+	}
+	if documentType == "PROFILE_SELFIE" {
+		_, _ = s.db.Exec(ctx, `
+			UPDATE users SET profile_image_url = $1, updated_at = NOW()
+			WHERE id = (SELECT user_id FROM driver_profiles WHERE id = $2)
+		`, fileURL, profileID)
+	}
+	return nil
 }
 
 func (s *Service) UpdateDriver(ctx context.Context, profileID string, fields map[string]interface{}) error {
@@ -1039,24 +1091,45 @@ func (s *Service) DeleteDriver(ctx context.Context, profileID string) error {
 	return err
 }
 
+// DriverDocumentInput represents a single document to attach during driver registration.
+type DriverDocumentInput struct {
+	DocumentType string
+	FileURL      string
+}
+
 // AdminCreateDriverInput holds the payload for admin-registered drivers.
 type AdminCreateDriverInput struct {
-	FullName       string
-	Phone          string
-	TransportType  string
-	VehiclePlate   string
-	LicenseNumber  string
-	DateOfBirth    string
-	Province       string
-	District       string
-	Sector         string
-	Cell           string
-	Village        string
-	City           string
-	MomoProvider   string
-	MomoPayCode    string
-	PassengerSeats *int
-	LoadCapacityKg *int
+	AdminUserID     string
+	FullName        string
+	Phone           string
+	TransportType   string
+	VehiclePlate    string
+	LicenseNumber   string
+	DateOfBirth     string
+	Province        string
+	District        string
+	Sector          string
+	Cell            string
+	Village         string
+	City            string
+	MomoProvider    string
+	MomoPayCode     string
+	MerchantPayCode string
+	ProfileImageURL string
+	PassengerSeats  *int
+	LoadCapacityKg  *int
+	Documents       []DriverDocumentInput
+}
+
+// Allowed driver document types (aligned with mobile onboarding + admin registration).
+var allowedDriverDocumentTypes = map[string]bool{
+	"LICENCE_FRONT":              true,
+	"LICENCE_BACK":               true,
+	"VEHICLE_INSURANCE":          true,
+	"VEHICLE_INSURANCE_BACK":     true,
+	"VEHICLE_AUTHORIZATION":      true,
+	"VEHICLE_AUTHORIZATION_BACK": true,
+	"PROFILE_SELFIE":             true,
 }
 
 // CreateDriverFromAdmin registers a new driver (user + profile) from the admin panel.
@@ -1070,13 +1143,17 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		// User not found — create one
 		err = s.db.QueryRow(ctx, `
 			INSERT INTO users (phone_number, full_name, role_state)
-			VALUES ($1, $2, 'DRIVER_PENDING')
+			VALUES ($1, $2, 'DRIVER_ACTIVE')
 			RETURNING id`,
 			in.Phone, in.FullName,
 		).Scan(&userID)
 		if err != nil {
 			return nil, fmt.Errorf("create user: %w", err)
 		}
+	} else {
+		// User exists — promote to DRIVER_ACTIVE
+		_, _ = s.db.Exec(ctx,
+			`UPDATE users SET role_state = 'DRIVER_ACTIVE', updated_at = NOW() WHERE id = $1`, userID)
 	}
 
 	dob := in.DateOfBirth
@@ -1088,24 +1165,59 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		city = "Kigali"
 	}
 
-	// 2. Create the driver profile
+	var existingProfileID string
+	if err := s.db.QueryRow(ctx,
+		`SELECT id FROM driver_profiles WHERE user_id = $1`, userID,
+	).Scan(&existingProfileID); err == nil {
+		return nil, apperrors.Newf(http.StatusConflict, "DRIVER_ALREADY_EXISTS",
+			"This phone number already has a driver registration")
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check existing driver profile: %w", err)
+	}
+
+	if in.ProfileImageURL != "" {
+		_, _ = s.db.Exec(ctx,
+			`UPDATE users SET profile_image_url = $1, updated_at = NOW() WHERE id = $2`,
+			in.ProfileImageURL, userID)
+	}
+
+	momoCode := in.MomoPayCode
+	if momoCode == "" {
+		momoCode = "—"
+	}
+	merchantCode := in.MerchantPayCode
+	momoProvider := in.MomoProvider
+	if momoProvider == "" {
+		momoProvider = "mtn"
+	}
+
+	// 2. Create the driver profile — admin registration is pre-approved
 	var profileID string
 	err = s.db.QueryRow(ctx, `
 		INSERT INTO driver_profiles (
 			user_id, transport_type, vehicle_plate, license_number,
-			date_of_birth, city, momo_provider, momo_pay_code,
-			approval_status, province, district, sector, cell, village,
+			date_of_birth, city, momo_provider, momo_pay_code, merchant_pay_code,
+			approval_status, approved_by, approved_at,
+			province, district, sector, cell, village,
 			passenger_seats, load_capacity_kg
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,'PENDING_REVIEW',$9,$10,$11,$12,$13,$14,$15
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,'APPROVED',$10,NOW(),$11,$12,$13,$14,$15,$16,$17
 		) RETURNING id`,
 		userID, in.TransportType, in.VehiclePlate, in.LicenseNumber,
-		dob, city, in.MomoProvider, in.MomoPayCode,
+		dob, city, momoProvider, momoCode, merchantCode,
+		in.AdminUserID,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 	).Scan(&profileID)
 	if err != nil {
-		return nil, fmt.Errorf("create driver profile: %w", err)
+		return nil, mapAdminCreateDriverError(err, in)
+	}
+
+	// Attach documents — mirrors mobile step 2 (license, insurance, authorization)
+	for _, doc := range in.Documents {
+		if err := s.UpsertDriverDocument(ctx, profileID, doc.DocumentType, doc.FileURL); err != nil {
+			s.log.Warn().Err(err).Str("document_type", doc.DocumentType).Msg("admin: failed to attach document during driver registration")
+		}
 	}
 
 	return map[string]interface{}{
@@ -1113,9 +1225,34 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		"user_id":         userID,
 		"transport_type":  in.TransportType,
 		"vehicle_plate":   in.VehiclePlate,
-		"approval_status": "PENDING_REVIEW",
-		"message":         "Driver registered. Pending KYC verification.",
+		"approval_status": "APPROVED",
+		"documents_saved": len(in.Documents),
+		"message":         "Driver registered and approved.",
 	}, nil
+}
+
+func mapAdminCreateDriverError(err error, in AdminCreateDriverInput) error {
+	if err == nil {
+		return apperrors.ErrInternal
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "driver_profiles_user_id_key"):
+		return apperrors.Newf(http.StatusConflict, "DRIVER_ALREADY_EXISTS",
+			"This phone number already has a driver registration")
+	case strings.Contains(msg, "driver_profiles_vehicle_plate_key"):
+		return apperrors.Newf(http.StatusConflict, "PLATE_ALREADY_EXISTS",
+			"Vehicle plate %s is already registered to another driver", in.VehiclePlate)
+	case strings.Contains(msg, "driver_profiles_license_number_key"):
+		return apperrors.Newf(http.StatusConflict, "LICENSE_ALREADY_EXISTS",
+			"Licence number %s is already registered to another driver", in.LicenseNumber)
+	case strings.Contains(msg, "23505"):
+		return apperrors.Newf(http.StatusConflict, "CONFLICT",
+			"A driver with this phone, plate, or licence number already exists")
+	default:
+		return apperrors.Newf(http.StatusInternalServerError, "INTERNAL",
+			"Could not create driver profile")
+	}
 }
 
 // ForceDriverOffline sets is_online=false for a driver.

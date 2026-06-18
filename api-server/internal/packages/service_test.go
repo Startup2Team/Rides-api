@@ -52,6 +52,15 @@ func (m *mockRepo) GetActiveCredit(_ context.Context, _ string) (*packages.Drive
 func (m *mockRepo) DeductCredit(_ context.Context, _ string) error {
 	return m.deductErr
 }
+func (m *mockRepo) RefundCredit(_ context.Context, _ string) error {
+	return nil
+}
+func (m *mockRepo) SumActiveCredits(_ context.Context, _ string) (int, error) {
+	if m.activeCredit != nil {
+		return m.activeCredit.RidesRemaining, nil
+	}
+	return 0, nil
+}
 func (m *mockRepo) PurchasePackage(_ context.Context, _, _, _ string, _, _ int, _ bool) (*packages.DriverCredit, error) {
 	return m.purchasedCredit, m.purchaseErr
 }

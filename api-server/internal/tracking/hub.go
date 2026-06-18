@@ -20,10 +20,10 @@ type Message struct {
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	UserID string
-	RideID string // set for customers tracking a specific ride
-	Role   string // "DRIVER" | "CUSTOMER"
-	Send   chan Message
+	UserID    string
+	RideID    string // set for customers tracking a specific ride
+	Role      string // "DRIVER" | "CUSTOMER"
+	Send      chan Message
 	done      chan struct{}
 	closeOnce sync.Once
 }
