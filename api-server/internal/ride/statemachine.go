@@ -39,13 +39,15 @@ var allowedTransitions = map[Status]map[Status]bool{
 	},
 	StatusConfirmed: {
 		StatusDriverEnRoute: true,
+		StatusCancelled:     true, // driver cancelled after confirming (before going en-route)
 	},
 	StatusDriverEnRoute: {
-		StatusDriverArrived: true, // triggered by server-side geofence
+		StatusDriverArrived: true,
+		StatusCancelled:     true, // customer or driver cancelled while driver is en-route
 	},
 	StatusDriverArrived: {
 		StatusInProgress: true, // driver submits Start Ride
-		StatusCancelled:  true, // customer no-show after 3 minutes
+		StatusCancelled:  true, // customer cancel after arrival, or driver no-show cancel
 	},
 	StatusInProgress: {
 		StatusCompleted: true, // driver submits Complete Ride
@@ -81,10 +83,14 @@ func ValidateTransition(from, to Status) error {
 }
 
 // CancellableStatuses are states in which a customer may cancel.
+// Cancellations during DRIVER_EN_ROUTE carry no fee; during DRIVER_ARRIVED
+// a late-cancel fee may apply (computed in CancelRide based on fare config).
 var CancellableStatuses = map[Status]bool{
-	StatusSearching:   true,
-	StatusMatched:     true,
-	StatusNegotiating: true,
+	StatusSearching:     true,
+	StatusMatched:       true,
+	StatusNegotiating:   true,
+	StatusDriverEnRoute: true, // customer can cancel while driver is en-route
+	StatusDriverArrived: true, // customer can cancel after driver arrives (fee may apply)
 }
 
 // IsTerminal returns true if the status has no outgoing transitions.

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -132,6 +133,9 @@ func (s *Service) ChangePassword(ctx context.Context, id, currentPassword, newPa
 // ── Authentication ────────────────────────────────────────────────────────
 
 func (s *Service) Login(ctx context.Context, email, password string) (*LoginResult, error) {
+	// Normalize the email — seed-admin/invite store it lowercased, and browser
+	// inputs often auto-capitalize the first letter, which would 401 otherwise.
+	email = strings.ToLower(strings.TrimSpace(email))
 	admin, hash, err := s.repo.FindByEmail(ctx, email)
 	if err != nil {
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
@@ -146,7 +150,9 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
 	}
 
-	if admin.TwoFactor {
+	// In dev we skip 2FA entirely so testing isn't gated behind authenticator
+	// codes / clock-skew. Production always enforces it.
+	if admin.TwoFactor && s.cfg.Env == "production" {
 		preAuth, err := s.issuePreAuthToken(admin.ID)
 		if err != nil {
 			return nil, apperrors.ErrInternal

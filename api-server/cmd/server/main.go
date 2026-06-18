@@ -17,11 +17,15 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5/pgxpool"
+	goredis "github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/admin"
 	"github.com/workspace/ride-platform/internal/analytics"
 	"github.com/workspace/ride-platform/internal/auth"
+	"github.com/workspace/ride-platform/internal/bonus"
 	"github.com/workspace/ride-platform/internal/customer"
 	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
@@ -35,6 +39,7 @@ import (
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
+	"github.com/workspace/ride-platform/internal/rating"
 	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
 	"github.com/workspace/ride-platform/internal/settings"
@@ -43,6 +48,7 @@ import (
 	"github.com/workspace/ride-platform/internal/tickets"
 	"github.com/workspace/ride-platform/internal/tracking"
 	"github.com/workspace/ride-platform/internal/upload"
+	"github.com/workspace/ride-platform/internal/wallet"
 	"github.com/workspace/ride-platform/pkg/adminrole"
 	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -62,6 +68,25 @@ func main() {
 
 	log := logger.New(cfg.Env)
 	log.Info().Str("env", cfg.Env).Str("port", cfg.Port).Msg("ride-platform: starting")
+
+	// ── Production safety guards ──────────────────────────────────────────────
+	// Catch dev-only flags that must never be true in production.
+	// A misconfigured deploy would silently bypass geofences or skip driver approval.
+	if cfg.Env == "production" {
+		if cfg.Ride.DevSkipGeofence {
+			log.Fatal().Msg("FATAL: DEV_SKIP_GEOFENCE=true in production — refusing to start")
+		}
+		if cfg.Driver.DevAutoApprove {
+			log.Fatal().Msg("FATAL: DEV_AUTO_APPROVE_DRIVERS=true in production — refusing to start")
+		}
+	} else {
+		if cfg.Ride.DevSkipGeofence {
+			log.Warn().Msg("⚠️  DEV_SKIP_GEOFENCE=true — geofence checks disabled (dev only)")
+		}
+		if cfg.Driver.DevAutoApprove {
+			log.Warn().Msg("⚠️  DEV_AUTO_APPROVE_DRIVERS=true — driver approval skipped (dev only)")
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -103,6 +128,8 @@ func main() {
 	negRepo := negotiation.NewRepository(db)
 	fareRepo := fare.NewRepository(db)
 	pkgRepo := packages.NewRepository(db)
+	walletRepo := wallet.NewRepository(db)
+	bonusRepo := bonus.NewRepository(db)
 
 	// ── New module repositories ───────────────────────────────────────────────
 	incidentRepo := incidents.NewRepository(db)
@@ -118,7 +145,10 @@ func main() {
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
 	driverSvc := driver.NewService(driverRepo, rdb, anaSvc, cfg, log)
+	walletSvc := wallet.NewService(walletRepo, log, cfg.Payments.Enabled)
+	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
+	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
@@ -127,6 +157,10 @@ func main() {
 	rideSvc.SetFareRepository(fareRepo)
 	negSvc.SetFareRepository(fareRepo)
 	auditLog := audit.New(db)
+	// Wire the timeout manager so negotiation activity resets the 5-minute clock.
+	negSvc.SetTimeoutManager(rideSvc)
+	notifRepo := notification.NewRepository(db)
+	notifySvc.SetRepository(notifRepo)
 	adminSvc := admin.NewService(db, log)
 	adminSvc.SetRedis(rdb)
 	locSvc := location.NewService(db, rdb, cfg, log)
@@ -144,22 +178,30 @@ func main() {
 	custSvc := customer.NewService(custRepo)
 
 	authH := auth.NewHandler(authSvc, cfg.Env)
+	authH.SetDriverService(driverSvc) // force-offline driver on logout
 	custH := customer.NewHandler(custSvc)
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
 	negH := negotiation.NewHandler(negSvc)
 	adminH := admin.NewHandler(adminSvc, authSvc, auditLog, cfg.Env)
 	anaH := analytics.NewHandler(anaRepo)
-	trackH := tracking.NewHandler(hub, driverSvc, cfg, log)
+	trackH := tracking.NewHandler(hub, driverSvc, rdb, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
 	pkgH := packages.NewHandler(pkgSvc, auditLog)
+	pkgH.SetBonus(bonusSvc) // auto-grant purchase bonuses
+	bonusH := bonus.NewHandler(bonusSvc)
+	walletH := wallet.NewHandler(walletSvc)
 	var uploadH *upload.Handler
 	if uh, err := upload.NewHandler(cfg); err != nil {
 		log.Warn().Err(err).Msg("upload: storage not configured, presign endpoint disabled")
 	} else {
 		uploadH = uh
 	}
+
+	ratingRepo := rating.NewRepository(db)
+	ratingH := rating.NewHandler(ratingRepo, log)
+	notifH := notification.NewHandler(notifRepo)
 
 	// New module handlers
 	incidentH := incidents.NewHandler(incidentSvc)
@@ -177,12 +219,40 @@ func main() {
 	consumer := analytics.NewConsumer(rdb, log)
 	go consumer.Run(bgCtx)
 
+	// ── Orphaned-ride recovery ────────────────────────────────────────────────
+	// After a crash or deploy restart, any ride in SEARCHING or NEGOTIATING
+	// has lost its in-memory goroutine/timer. We scan for these on startup and
+	// either re-queue the search or cancel + notify so customers aren't left
+	// staring at a spinner forever.
+	go recoverOrphanedRides(bgCtx, db, rdb, engine, hub, log.With().Str("component", "recovery").Logger())
+
 	// Pre-warm landmark route cache
 	locSvc.WarmLandmarkRoutes(bgCtx)
 
 	// Pre-warm dashboard cache and start background refresh
 	dashSvc.WarmCache(bgCtx)
 	go dashSvc.PollLoop(bgCtx)
+
+	// ── Dead-man finalizer ────────────────────────────────────────────────────
+	// Auto-complete rides stuck IN_PROGRESS past RIDE_MAX_IN_PROGRESS_MINUTES so
+	// a driver who started a trip then went offline doesn't leave a ghost ride
+	// (and isn't locked ON_TRIP forever). Runs every 5 minutes.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := rideSvc.FinalizeStaleInProgressRides(bgCtx); err != nil {
+					log.Error().Err(err).Msg("finalizer: failed to scan stale in-progress rides")
+				} else if n > 0 {
+					log.Warn().Int("count", n).Msg("finalizer: auto-finalized stale in-progress rides")
+				}
+			}
+		}
+	}()
 
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -203,7 +273,10 @@ func main() {
 	}))
 
 	r.Use(chimw.RequestID)
-	r.Use(chimw.RealIP)
+	// NOTE: chimw.RealIP is deliberately NOT used — it rewrites RemoteAddr from the
+	// spoofable X-Forwarded-For/X-Real-IP on EVERY request, which would let clients
+	// fake their IP for rate-limiting and logging. We use mw.trustedIP() instead,
+	// which only trusts those headers from a private/loopback peer (our edge proxy).
 	r.Use(chimw.Recoverer)
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
@@ -227,8 +300,9 @@ func main() {
 
 	// ── Public auth ───────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/auth", func(r chi.Router) {
-		r.With(mw.OTPRateLimit(rdb, 5, time.Hour)).Post("/register", authH.Register)
-		r.Post("/verify-otp", authH.VerifyOTP)
+		r.With(mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour)).Post("/register", authH.Register)
+		// verify-otp is brute-forceable (6-digit code) — cap attempts per phone too.
+		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
 		r.Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
 	})
@@ -236,6 +310,7 @@ func main() {
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.RequireNotSuspended())
 		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
 
 		r.Get("/profile", custH.GetProfile)
@@ -245,17 +320,26 @@ func main() {
 
 		r.Post("/rides", rideH.CreateRide)
 		r.Get("/rides", rideH.ListRides)
+		r.Get("/rides/active", rideH.GetActiveRideForCustomer)
 		r.Get("/rides/{ride_id}", rideH.GetRide)
 		r.Delete("/rides/{ride_id}", rideH.CancelRide)
 
 		r.Post("/rides/{ride_id}/negotiation/propose", negH.Propose("CUSTOMER"))
 		r.Post("/rides/{ride_id}/negotiation/accept", negH.Accept("CUSTOMER"))
 		r.Post("/rides/{ride_id}/negotiation/decline", negH.Decline("CUSTOMER"))
+		r.Post("/rides/{ride_id}/negotiation/message", negH.SendMessage("CUSTOMER"))
+		r.Get("/rides/{ride_id}/negotiation/history", negH.GetHistory("CUSTOMER"))
+
+		r.Post("/rides/{ride_id}/rate", ratingH.SubmitRating)
+		r.Get("/rides/{ride_id}/rating", ratingH.GetRideRating)
+
+		r.Post("/support/tickets", ticketH.SubmitTicket)
 	})
 
 	// ── Driver ────────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/driver", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.RequireNotSuspended())
 
 		r.Post("/apply", driverH.Apply)
 
@@ -272,17 +356,23 @@ func main() {
 			r.Use(mw.RequireRole(mw.RoleDriverActive))
 
 			r.Post("/availability", driverH.SetAvailability)
-			r.Post("/location", driverH.UpdateLocation)
+			// 20 req/min = 1 every 3 s. Drivers send every 5–12 s so this is
+			// headroom for bursts without blocking normal use. Returns 204 (not
+			// 429) so the app doesn't log a red error when a burst is trimmed.
+			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
+				Post("/location", driverH.UpdateLocation)
 
 			r.Get("/packages", pkgH.ListPackages)
 			r.Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/credits", pkgH.GetCredits)
+			r.Get("/bonuses", bonusH.DriverGrants)
+			r.Get("/bonuses/tiers", bonusH.ListActiveTiers)
 
 			r.Get("/rides/active", rideH.GetActiveRideForDriver)
 			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
 			r.Get("/rides/{ride_id}", rideH.GetRideForDriver)
-			r.Post("/rides/{ride_id}/cancel", driverCancelAfterPickupExpiryHandler(rideSvc))
+			r.Post("/rides/{ride_id}/cancel", driverCancelHandler(rideSvc))
 			r.Post("/rides/{ride_id}/en-route", driverEnRouteHandler(rideSvc))
 			r.Post("/rides/{ride_id}/arrive", driverArriveHandler(rideSvc))
 			r.Post("/rides/{ride_id}/start", driverStartHandler(rideSvc))
@@ -291,8 +381,13 @@ func main() {
 			r.Post("/rides/{ride_id}/negotiation/propose", negH.Propose("DRIVER"))
 			r.Post("/rides/{ride_id}/negotiation/accept", negH.Accept("DRIVER"))
 			r.Post("/rides/{ride_id}/negotiation/decline", negH.Decline("DRIVER"))
+			r.Post("/rides/{ride_id}/negotiation/message", negH.SendMessage("DRIVER"))
+			r.Get("/rides/{ride_id}/negotiation/history", negH.GetHistory("DRIVER"))
 			r.Post("/rides/{ride_id}/negotiation/lock-fare", negH.LockManualFare)
 			r.Post("/rides/{ride_id}/negotiation/initiate-call", negH.InitiateCall)
+
+			r.Post("/rides/{ride_id}/rate", ratingH.SubmitRating)
+			r.Get("/rides/{ride_id}/rating", ratingH.GetRideRating)
 
 			r.Get("/earnings/daily", driverH.DailyEarnings)
 			r.Get("/earnings/weekly", driverH.WeeklyEarnings)
@@ -300,23 +395,49 @@ func main() {
 		})
 	})
 
-	// ── Users (mode switch, saved locations) ──────────────────────────────────
+	// ── Users (mode switch, saved locations, notifications) ──────────────────
 	r.Route(apiV1Prefix+"/users", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
 
 		r.Patch("/mode", locH.SwitchMode)
 
+		r.Get("/me/ratings", ratingH.MyRatings)
+
 		r.Get("/me/saved-locations", locH.ListSavedLocations)
 		r.Post("/me/saved-locations", locH.CreateSavedLocation)
 		r.Put("/me/saved-locations/{id}", locH.UpdateSavedLocation)
 		r.Delete("/me/saved-locations/{id}", locH.DeleteSavedLocation)
+
+		r.Get("/me/notifications", notifH.List)
+		r.Get("/me/notifications/unread-count", notifH.UnreadCount)
+		r.Patch("/me/notifications/{id}/read", notifH.MarkRead)
+		r.Post("/me/notifications/mark-all-read", notifH.MarkAllRead)
+	})
+
+	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────
+	r.Route(apiV1Prefix+"/wallet", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+
+		r.Get("/", walletH.GetWallet)
+		r.Get("/transactions", walletH.GetTransactions)
+		r.Post("/top-up", walletH.TopUp)
+		r.Post("/withdraw", walletH.Withdraw)
 	})
 
 	r.Route(apiV1Prefix+"/uploads", func(r chi.Router) {
-		r.Use(mw.Authenticate(cfg, rdb))
+		// Public object serving (proxy/MinIO mode) so the mobile app and admin
+		// panel can render document images via a plain URL. No-op on S3/R2.
 		if uploadH != nil {
-			r.Post("/presigned-url", uploadH.PresignedURL)
+			r.Get("/objects/*", uploadH.GetObject)
 		}
+		// Authenticated: request an upload target, and (proxy mode) stream bytes.
+		r.Group(func(r chi.Router) {
+			r.Use(mw.Authenticate(cfg, rdb))
+			if uploadH != nil {
+				r.Post("/presigned-url", uploadH.PresignedURL)
+				r.Put("/objects/*", uploadH.PutObject)
+			}
+		})
 	})
 
 	// ── Locations (route cache, landmarks, suggestions) ───────────────────────
@@ -564,6 +685,12 @@ func main() {
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
 			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
+
+			// Bonuses — admin CRUD for bonus tiers
+			r.Get("/bonuses/tiers", bonusH.AdminListTiers)
+			r.Post("/bonuses/tiers", bonusH.AdminCreateTier)
+			r.Delete("/bonuses/tiers/{tierID}", bonusH.AdminDeactivateTier)
+			r.Put("/bonuses/tiers/{tierID}/activate", bonusH.AdminActivateTier)
 		})
 	})
 
@@ -581,6 +708,7 @@ func main() {
 	rideSvc.SetRouteFareRecorder(locSvc)
 	rideSvc.SetPackagesService(pkgSvc)
 	adminSvc.SetPackagesService(pkgSvc)
+	adminSvc.SetBonusService(bonusSvc)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// WriteTimeout must be 0 when serving WebSockets — a global write timeout
@@ -685,6 +813,31 @@ func driverDeclineHandler(engine *matching.Engine, driverSvc *driver.Service) ht
 	}
 }
 
+// driverCancelHandler handles POST /driver/rides/:id/cancel.
+// Replaces the old pickup-expiry-only handler. Drivers may now cancel from
+// CONFIRMED, DRIVER_EN_ROUTE, or DRIVER_ARRIVED (before or after expiry).
+// The customer is notified via WebSocket immediately.
+func driverCancelHandler(rideSvc *ride.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := mw.GetClaims(r)
+		rideID := chi.URLParam(r, "ride_id")
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Reason == "" {
+			body.Reason = "driver cancelled"
+		}
+		if err := rideSvc.DriverCancelRide(r.Context(), rideID, claims.UserID, body.Reason); err != nil {
+			respond.Error(w, err)
+			return
+		}
+		respond.NoContent(w)
+	}
+}
+
+// driverCancelAfterPickupExpiryHandler remains for backward-compatibility
+// admin/ops tooling. Mobile apps use /cancel instead.
 func driverCancelAfterPickupExpiryHandler(rideSvc *ride.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := mw.GetClaims(r)
@@ -763,6 +916,96 @@ func driverCompleteHandler(rideSvc *ride.Service) http.HandlerFunc {
 }
 
 const apiV1Prefix = "/api/v1"
+
+// recoverOrphanedRides runs once at startup to handle rides whose in-memory
+// goroutines or timers were lost due to a server crash or deploy restart.
+//
+//   - SEARCHING → re-queue the matching search so the customer isn't left spinning.
+//   - NEGOTIATING → cancel the ride and notify; the negotiation state is too
+//     ephemeral to safely replay (agreed-fare context is gone).
+//
+// Rides in other non-terminal states (CONFIRMED, DRIVER_EN_ROUTE, etc.) are
+// left untouched — they are handled by driver/customer re-connection or admin.
+func recoverOrphanedRides(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	rdb *goredis.Client,
+	engine *matching.Engine,
+	hub *tracking.Hub,
+	log zerolog.Logger,
+) {
+	// Small delay so all services are fully wired before we start re-queueing.
+	time.Sleep(2 * time.Second)
+
+	type orphan struct {
+		id            string
+		status        string
+		customerID    string
+		transportType string
+		pickupLat     float64
+		pickupLng     float64
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT id, status, customer_id, transport_type,
+		       ST_Y(pickup_point::geometry) AS pickup_lat,
+		       ST_X(pickup_point::geometry) AS pickup_lng
+		FROM rides
+		WHERE status IN ('SEARCHING','NEGOTIATING')
+		  AND created_at > NOW() - INTERVAL '2 hours'
+	`)
+	if err != nil {
+		log.Error().Err(err).Msg("recovery: failed to query orphaned rides")
+		return
+	}
+	defer rows.Close()
+
+	var orphans []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.id, &o.status, &o.customerID, &o.transportType, &o.pickupLat, &o.pickupLng); err != nil {
+			continue
+		}
+		orphans = append(orphans, o)
+	}
+	if rows.Err() != nil {
+		log.Error().Err(rows.Err()).Msg("recovery: row scan error")
+	}
+
+	if len(orphans) == 0 {
+		log.Info().Msg("recovery: no orphaned rides found")
+		return
+	}
+
+	log.Warn().Int("count", len(orphans)).Msg("recovery: orphaned rides found — processing")
+
+	for _, o := range orphans {
+		switch o.status {
+		case "SEARCHING":
+			// Re-queue matching — customer is still waiting.
+			log.Info().Str("ride_id", o.id).Msg("recovery: re-queuing SEARCHING ride")
+			engine.StartSearch(o.id, geo.Point{Lat: o.pickupLat, Lng: o.pickupLng}, o.transportType)
+
+		case "NEGOTIATING":
+			// Negotiation timers are in-memory; we can't safely resume. Cancel and
+			// tell the customer to request a new ride.
+			log.Info().Str("ride_id", o.id).Msg("recovery: cancelling orphaned NEGOTIATING ride")
+			_, _ = pool.Exec(ctx,
+				`UPDATE rides SET status = 'CANCELLED', cancelled_by = 'SYSTEM', cancel_reason = 'server_restart', updated_at = NOW() WHERE id = $1 AND status = 'NEGOTIATING'`,
+				o.id,
+			)
+			rdb.Del(ctx, "ride:state:"+o.id)
+			rdb.Del(ctx, "customer:active_ride:"+o.customerID)
+			hub.SendToCustomer(o.id, tracking.Message{
+				Type:   "ride_cancelled",
+				RideID: o.id,
+				Payload: map[string]interface{}{
+					"reason": "Server restarted during negotiation. Please request a new ride.",
+				},
+			})
+		}
+	}
+}
 
 const swaggerHTML = `<!DOCTYPE html>
 <html lang="en">

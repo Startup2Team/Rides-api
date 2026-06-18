@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -15,14 +16,27 @@ import (
 
 var validate = validator.New()
 
+// driverOfflineOnLogout is the subset of driver.Service needed by the logout handler.
+// Using an interface avoids an import cycle (auth → driver is fine; keeping it minimal).
+type driverOfflineOnLogout interface {
+	ForceOffline(ctx context.Context, userID string)
+}
+
 // Handler exposes auth HTTP endpoints.
 type Handler struct {
-	svc *Service
-	env string // "development" | "production"
+	svc       *Service
+	env       string // "development" | "production"
+	driverSvc driverOfflineOnLogout
 }
 
 func NewHandler(svc *Service, env string) *Handler {
 	return &Handler{svc: svc, env: env}
+}
+
+// SetDriverService wires the driver service so logout can force the driver offline.
+// Called after both services are constructed in main to avoid an import cycle.
+func (h *Handler) SetDriverService(svc driverOfflineOnLogout) {
+	h.driverSvc = svc
 }
 
 // POST /api/v1/auth/register
@@ -135,6 +149,13 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Logout(r.Context(), claims.UserID, claims.ID); err != nil {
 		respond.Error(w, err)
 		return
+	}
+
+	// If the user is a driver, force them offline and clean up Redis state.
+	// This runs even if they still have an "active" ride in Redis (stale key)
+	// so logout is never blocked by ghost Redis state.
+	if h.driverSvc != nil {
+		go h.driverSvc.ForceOffline(context.Background(), claims.UserID)
 	}
 
 	respond.NoContent(w)

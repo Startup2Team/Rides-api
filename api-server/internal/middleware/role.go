@@ -66,16 +66,21 @@ func RequireAdminRole(allowed ...string) func(http.Handler) http.Handler {
 	}
 }
 
-// RequireSuspensionCheck additionally rejects a customer whose is_suspended
-// flag is set. This is a second-pass check after JWT role validation.
-// The is_suspended field is read from the JWT for zero-DB-latency enforcement.
-// (We embed a "suspended_until" field in the token and re-issue on change.)
+// RequireNotSuspended rejects any request from a suspended account.
+// The is_suspended flag is embedded in the JWT — zero DB latency.
+// Admins revoke the session via Redis when suspending a user, so even
+// live tokens are blocked within one Redis TTL (access token lifetime).
 func RequireNotSuspended() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims := GetClaims(r)
 			if claims == nil {
 				respond.Error(w, apperrors.ErrUnauthorized)
+				return
+			}
+			if claims.IsSuspended {
+				respond.ErrorMsg(w, http.StatusForbidden, "ACCOUNT_SUSPENDED",
+					"Your account has been suspended. Contact support.")
 				return
 			}
 			next.ServeHTTP(w, r)

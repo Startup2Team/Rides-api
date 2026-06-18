@@ -166,6 +166,19 @@ func (r *Repository) GetPackageByID(ctx context.Context, packageID string) (*Pac
 	return p, nil
 }
 
+// SumActiveCredits returns the total ride credits remaining across ALL of the
+// driver's active, non-expired credit grants (a driver can hold several packages
+// at once). This is the number to show as "credits left".
+func (r *Repository) SumActiveCredits(ctx context.Context, driverUserID string) (int, error) {
+	var total int
+	err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(rides_remaining), 0)
+		FROM driver_ride_credits
+		WHERE driver_id = $1 AND is_active = TRUE AND rides_remaining > 0 AND expires_at > NOW()
+	`, driverUserID).Scan(&total)
+	return total, err
+}
+
 // GetActiveCredit returns the driver's best active credit (promos first, then earliest expiry).
 // Returns ErrNotFound if the driver has no usable credits.
 func (r *Repository) GetActiveCredit(ctx context.Context, driverUserID string) (*DriverCredit, error) {
@@ -217,6 +230,28 @@ func (r *Repository) DeductCredit(ctx context.Context, driverUserID string) erro
 	return err
 }
 
+// RefundCredit returns one ride to the driver's credit balance. It mirrors
+// DeductCredit's row selection so the ride goes back onto the same credit it
+// was most plausibly taken from, and never inflates a credit past its
+// purchased total (rides_remaining < rides_total guard).
+func (r *Repository) RefundCredit(ctx context.Context, driverUserID string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE driver_ride_credits
+		SET rides_remaining = rides_remaining + 1
+		WHERE id = (
+		    SELECT id
+		    FROM driver_ride_credits
+		    WHERE driver_id = $1
+		      AND is_active = TRUE
+		      AND rides_remaining < rides_total
+		      AND expires_at > NOW()
+		    ORDER BY is_promotional DESC, expires_at ASC
+		    LIMIT 1
+		)
+	`, driverUserID)
+	return err
+}
+
 // PurchasePackage inserts a new credit record for a driver and returns it.
 func (r *Repository) PurchasePackage(ctx context.Context, driverUserID, packageID, vehicleTypeID string, ridesTotal, validityDays int, isPromotional bool) (*DriverCredit, error) {
 	c := &DriverCredit{}
@@ -240,6 +275,8 @@ func (r *Repository) PurchasePackage(ctx context.Context, driverUserID, packageI
 	)
 	return c, err
 }
+
+// ── Admin repo methods ────────────────────────────────────────────────────────
 
 // GrantFreeTrialIfEligible grants the free-trial package for the driver's vehicle type.
 // It is idempotent: if free_trial_used is already TRUE, it silently returns.

@@ -27,6 +27,15 @@ type Config struct {
 	GPS      GPSConfig
 	Driver   DriverConfig
 	Customer CustomerConfig
+	Penalty  PenaltyConfig
+	Payments PaymentsConfig
+}
+
+// PaymentsConfig gates real-money wallet movement. Until a payment gateway
+// (MoMo collect/disburse) is wired and verified, top-up and withdraw MUST stay
+// disabled — otherwise a user could mint wallet balance with no payment captured.
+type PaymentsConfig struct {
+	Enabled bool
 }
 
 type DatabaseConfig struct {
@@ -51,6 +60,10 @@ type ATConfig struct {
 	Username      string
 	SenderID      string
 	MaskingNumber string
+	// WhatsApp fields — optional, dev convenience only.
+	// Set AT_WHATSAPP_ENABLED=true + AT_WHATSAPP_SENDER to a registered WA number.
+	WhatsAppEnabled bool
+	WhatsAppSender  string
 }
 
 type FirebaseConfig struct {
@@ -74,6 +87,9 @@ type StorageConfig struct {
 	KeyID    string
 	Secret   string
 	CDNURL   string
+	// Endpoint overrides the S3 API host for S3-compatible stores (MinIO in dev,
+	// or any self-hosted gateway). Empty = real AWS S3 (default endpoints).
+	Endpoint string
 }
 
 type MatchingConfig struct {
@@ -86,6 +102,17 @@ type MatchingConfig struct {
 type RideConfig struct {
 	StartRadiusM    int
 	CompleteRadiusM int
+	// DevSkipGeofence bypasses arrival/start/complete radius checks.
+	// NEVER set true in production.
+	DevSkipGeofence bool
+	// MaxInProgressMinutes is how long a ride may stay IN_PROGRESS before the
+	// dead-man finalizer auto-completes it (driver abandoned / went offline).
+	MaxInProgressMinutes int
+	// NoShowVerifyRadiusM: a "customer no-show" refund is only honoured if the
+	// driver's last-known location is still within this radius of the pickup. If
+	// they've driven off (toward the destination), the no-show is treated as
+	// unverified — no refund, and the ride is flagged.
+	NoShowVerifyRadiusM int
 }
 
 type GPSConfig struct {
@@ -98,12 +125,27 @@ type DriverConfig struct {
 	DeclinePriorityThreshold    int
 	DeclineAutoOfflineThreshold int
 	DevAutoApprove              bool // DEV ONLY: skip admin approval on driver registration
+	// CancelWarnThreshold / CancelBanThreshold: daily cancels at which a driver
+	// is warned, then temporarily banned.
+	CancelWarnThreshold int
+	CancelBanThreshold  int
 }
 
 type CustomerConfig struct {
 	CancelWarnThreshold    int
 	CancelSuspendThreshold int
 	CancelSuspendHours     int
+	// CancelBanThreshold: daily cancels at which a customer is temp-banned.
+	CancelBanThreshold int
+}
+
+// PenaltyConfig holds the shared cancellation-penalty escalation knobs.
+type PenaltyConfig struct {
+	// BanHours is how long a temporary cancellation ban lasts.
+	BanHours int
+	// BansBeforeSuspend: once a user has had this many temp-bans, the next
+	// threshold breach is an indefinite suspension instead of another temp-ban.
+	BansBeforeSuspend int
 }
 
 func Load() (*Config, error) {
@@ -130,6 +172,8 @@ func Load() (*Config, error) {
 	cfg.AT.Username = getEnv("AT_USERNAME", "")
 	cfg.AT.SenderID = getEnv("AT_SENDER_ID", "")
 	cfg.AT.MaskingNumber = getEnv("AT_MASKING_NUMBER", "")
+	cfg.AT.WhatsAppEnabled = getEnvBool("AT_WHATSAPP_ENABLED", false)
+	cfg.AT.WhatsAppSender = getEnv("AT_WHATSAPP_SENDER", "")
 
 	cfg.Firebase.ServiceAccountPath = getEnv("FIREBASE_SERVICE_ACCOUNT_PATH", "./firebase-service-account.json")
 
@@ -145,6 +189,7 @@ func Load() (*Config, error) {
 	cfg.Storage.KeyID = getEnv("STORAGE_KEY_ID", "")
 	cfg.Storage.Secret = getEnv("STORAGE_SECRET", "")
 	cfg.Storage.CDNURL = getEnv("STORAGE_CDN_URL", "")
+	cfg.Storage.Endpoint = getEnv("STORAGE_ENDPOINT", "")
 
 	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 5000)
 	cfg.Matching.ExpandedRadiusM = getEnvInt("MATCH_RADIUS_EXPANDED_M", 10000)
@@ -153,6 +198,9 @@ func Load() (*Config, error) {
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
+	cfg.Ride.DevSkipGeofence = getEnvBool("DEV_SKIP_GEOFENCE", false)
+	cfg.Ride.MaxInProgressMinutes = getEnvInt("RIDE_MAX_IN_PROGRESS_MINUTES", 120)
+	cfg.Ride.NoShowVerifyRadiusM = getEnvInt("NO_SHOW_VERIFY_RADIUS_M", 400)
 
 	cfg.GPS.MaxSpeedKMH = getEnvFloat("GPS_MAX_SPEED_KMH", 200.0)
 	cfg.GPS.StaleThresholdSeconds = getEnvFloat("GPS_STALE_THRESHOLD_SECONDS", 300.0)
@@ -162,9 +210,21 @@ func Load() (*Config, error) {
 	cfg.Driver.DeclineAutoOfflineThreshold = getEnvInt("DRIVER_DECLINE_AUTO_OFFLINE_THRESHOLD", 15)
 	cfg.Driver.DevAutoApprove = getEnvBool("DEV_AUTO_APPROVE_DRIVERS", false)
 
-	cfg.Customer.CancelWarnThreshold = getEnvInt("CUSTOMER_CANCEL_WARN_THRESHOLD", 5)
+	cfg.Customer.CancelWarnThreshold = getEnvInt("CUSTOMER_CANCEL_WARN_THRESHOLD", 4)
 	cfg.Customer.CancelSuspendThreshold = getEnvInt("CUSTOMER_CANCEL_SUSPEND_THRESHOLD", 8)
 	cfg.Customer.CancelSuspendHours = getEnvInt("CUSTOMER_CANCEL_SUSPEND_HOURS", 2)
+	cfg.Customer.CancelBanThreshold = getEnvInt("CUSTOMER_CANCEL_BAN_THRESHOLD", 5)
+
+	// Driver cancellation penalties: warn at 3/day, temp-ban at 4/day.
+	cfg.Driver.CancelWarnThreshold = getEnvInt("DRIVER_CANCEL_WARN_THRESHOLD", 3)
+	cfg.Driver.CancelBanThreshold = getEnvInt("DRIVER_CANCEL_BAN_THRESHOLD", 4)
+
+	// Shared escalation: a temp-ban lasts 24h; the 5th ban becomes a suspension.
+	cfg.Penalty.BanHours = getEnvInt("PENALTY_BAN_HOURS", 24)
+	cfg.Penalty.BansBeforeSuspend = getEnvInt("PENALTY_BANS_BEFORE_SUSPEND", 5)
+
+	// Real-money wallet movement stays OFF until a verified payment gateway exists.
+	cfg.Payments.Enabled = getEnvBool("PAYMENTS_ENABLED", false)
 
 	return cfg, nil
 }

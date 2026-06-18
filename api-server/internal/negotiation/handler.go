@@ -83,6 +83,49 @@ func (h *Handler) Decline(role string) http.HandlerFunc {
 	}
 }
 
+// POST /api/v1/{customer,driver}/rides/:ride_id/negotiation/message
+func (h *Handler) SendMessage(role string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := middleware.GetClaims(r)
+		rideID := chi.URLParam(r, "ride_id")
+
+		var body struct {
+			Text string `json:"text" validate:"required,min=1,max=500"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			respond.Error(w, apperrors.ErrBadRequest)
+			return
+		}
+		if err := validate.Struct(body); err != nil {
+			respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
+
+		if err := h.svc.SendTextMessage(r.Context(), rideID, role, claims.UserID, body.Text); err != nil {
+			respond.Error(w, err)
+			return
+		}
+
+		respond.NoContent(w)
+	}
+}
+
+// GET /api/v1/{customer,driver}/rides/:ride_id/negotiation/history
+func (h *Handler) GetHistory(role string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := middleware.GetClaims(r)
+		rideID := chi.URLParam(r, "ride_id")
+
+		entries, err := h.svc.GetHistory(r.Context(), rideID, role, claims.UserID)
+		if err != nil {
+			respond.Error(w, err)
+			return
+		}
+
+		respond.OK(w, entries)
+	}
+}
+
 // POST /api/v1/driver/rides/:ride_id/negotiation/lock-fare
 func (h *Handler) LockManualFare(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
