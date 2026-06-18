@@ -23,6 +23,7 @@ type Repo interface {
 	AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error)
 	AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error)
 	AdminTogglePackage(ctx context.Context, id string, isActive bool) error
+	AdminDeletePackage(ctx context.Context, id string) error
 }
 
 // ErrNoCredits is returned when a driver tries to accept a ride with no credits left.
@@ -77,6 +78,14 @@ func (s *Service) AdminUpdatePackage(ctx context.Context, id string, name *strin
 
 func (s *Service) AdminTogglePackage(ctx context.Context, id string, isActive bool) error {
 	return s.repo.AdminTogglePackage(ctx, id, isActive)
+}
+
+func (s *Service) GetPackageByID(ctx context.Context, id string) (*Package, error) {
+	return s.repo.GetPackageByID(ctx, id)
+}
+
+func (s *Service) AdminDeletePackage(ctx context.Context, id string) error {
+	return s.repo.AdminDeletePackage(ctx, id)
 }
 
 // GetCredits returns the driver's current best active credit, or nil if none.

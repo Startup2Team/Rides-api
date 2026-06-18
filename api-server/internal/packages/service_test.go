@@ -59,6 +59,9 @@ func (m *mockRepo) AdminUpdatePackage(_ context.Context, _ string, _ *string, _,
 func (m *mockRepo) AdminTogglePackage(_ context.Context, _ string, _ bool) error {
 	return nil
 }
+func (m *mockRepo) AdminDeletePackage(_ context.Context, _ string) error {
+	return nil
+}
 
 func newSvc(repo packages.Repo) *packages.Service {
 	return packages.NewService(repo, zerolog.Nop())

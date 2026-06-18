@@ -194,3 +194,32 @@ func (h *Handler) AdminTogglePackage(w http.ResponseWriter, r *http.Request) {
 
 	respond.OK(w, map[string]string{"status": "success"})
 }
+
+// DELETE /api/v1/admin/packages/{id}
+func (h *Handler) AdminDeletePackage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "id path parameter is required")
+		return
+	}
+
+	// Fetch name first for audit logging
+	pkg, err := h.svc.GetPackageByID(r.Context(), id)
+	var pkgName string
+	if err == nil && pkg != nil {
+		pkgName = pkg.Name
+	} else {
+		pkgName = id
+	}
+
+	err = h.svc.AdminDeletePackage(r.Context(), id)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "package.delete", "ride_packages", id, fmt.Sprintf("Soft-deleted package %s", pkgName), map[string]any{"package_id": id})
+
+	respond.OK(w, map[string]string{"status": "success"})
+}

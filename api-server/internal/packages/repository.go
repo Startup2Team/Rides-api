@@ -24,11 +24,12 @@ func (r *Repository) ListPackages(ctx context.Context, vehicleTypeCode string) (
 	rows, err := r.db.Query(ctx, `
 		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
 		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
-		       rp.is_promotional, rp.is_active, rp.created_at
+		       rp.is_promotional, rp.is_active, rp.created_at, rp.deleted_at
 		FROM ride_packages rp
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
 		WHERE vt.code = $1
 		  AND rp.is_active = TRUE
+		  AND rp.deleted_at IS NULL
 		ORDER BY rp.price_rwf ASC
 	`, vehicleTypeCode)
 	if err != nil {
@@ -42,7 +43,7 @@ func (r *Repository) ListPackages(ctx context.Context, vehicleTypeCode string) (
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.VehicleTypeID, &p.VehicleTypeCode,
 			&p.RideCount, &p.BonusRides, &p.ValidityDays, &p.PriceRWF,
-			&p.IsPromotional, &p.IsActive, &p.CreatedAt,
+			&p.IsPromotional, &p.IsActive, &p.CreatedAt, &p.DeletedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -57,11 +58,12 @@ func (r *Repository) AdminListPackages(ctx context.Context) ([]*Package, error) 
 	rows, err := r.db.Query(ctx, `
 		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
 		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
-		       rp.is_promotional, rp.is_active, rp.created_at
+		       rp.is_promotional, rp.is_active, rp.created_at, rp.deleted_at
 		FROM ride_packages rp
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
+		WHERE rp.deleted_at IS NULL
 		ORDER BY rp.created_at DESC
-	`)
+	`);
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +75,7 @@ func (r *Repository) AdminListPackages(ctx context.Context) ([]*Package, error) 
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.VehicleTypeID, &p.VehicleTypeCode,
 			&p.RideCount, &p.BonusRides, &p.ValidityDays, &p.PriceRWF,
-			&p.IsPromotional, &p.IsActive, &p.CreatedAt,
+			&p.IsPromotional, &p.IsActive, &p.CreatedAt, &p.DeletedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -96,10 +98,10 @@ func (r *Repository) AdminCreatePackage(ctx context.Context, name, vehicleTypeCo
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO ride_packages (name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional, is_active, created_at
+		RETURNING id, name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional, is_active, created_at, deleted_at
 	`, name, vehicleTypeID, rideCount, bonusRides, validityDays, priceRWF, isPromotional).Scan(
 		&p.ID, &p.Name, &p.VehicleTypeID, &p.RideCount, &p.BonusRides,
-		&p.ValidityDays, &p.PriceRWF, &p.IsPromotional, &p.IsActive, &p.CreatedAt,
+		&p.ValidityDays, &p.PriceRWF, &p.IsPromotional, &p.IsActive, &p.CreatedAt, &p.DeletedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -134,20 +136,26 @@ func (r *Repository) AdminTogglePackage(ctx context.Context, id string, isActive
 	return err
 }
 
+// AdminDeletePackage soft-deletes a package by setting its deleted_at timestamp.
+func (r *Repository) AdminDeletePackage(ctx context.Context, id string) error {
+	_, err := r.db.Exec(ctx, `UPDATE ride_packages SET deleted_at = NOW(), is_active = FALSE WHERE id = $1`, id)
+	return err
+}
+
 // GetPackageByID returns a single package by its ID.
 func (r *Repository) GetPackageByID(ctx context.Context, packageID string) (*Package, error) {
 	p := &Package{}
 	err := r.db.QueryRow(ctx, `
 		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
 		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
-		       rp.is_promotional, rp.is_active, rp.created_at
+		       rp.is_promotional, rp.is_active, rp.created_at, rp.deleted_at
 		FROM ride_packages rp
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
 		WHERE rp.id = $1
 	`, packageID).Scan(
 		&p.ID, &p.Name, &p.VehicleTypeID, &p.VehicleTypeCode,
 		&p.RideCount, &p.BonusRides, &p.ValidityDays, &p.PriceRWF,
-		&p.IsPromotional, &p.IsActive, &p.CreatedAt,
+		&p.IsPromotional, &p.IsActive, &p.CreatedAt, &p.DeletedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

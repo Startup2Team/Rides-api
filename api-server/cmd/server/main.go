@@ -563,6 +563,7 @@ func main() {
 			r.Post("/packages", pkgH.AdminCreatePackage)
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
+			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
 		})
 	})
 

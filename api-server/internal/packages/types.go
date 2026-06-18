@@ -16,17 +16,18 @@ type VehicleType struct {
 }
 
 type Package struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	VehicleTypeID   string    `json:"vehicle_type_id"`
-	VehicleTypeCode string    `json:"vehicle_type_code"`
-	RideCount       int       `json:"ride_count"`
-	BonusRides      int       `json:"bonus_rides"`
-	ValidityDays    int       `json:"validity_days"`
-	PriceRWF        int       `json:"price_rwf"`
-	IsPromotional   bool      `json:"is_promotional"`
-	IsActive        bool      `json:"is_active"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	VehicleTypeID   string     `json:"vehicle_type_id"`
+	VehicleTypeCode string     `json:"vehicle_type_code"`
+	RideCount       int        `json:"ride_count"`
+	BonusRides      int        `json:"bonus_rides"`
+	ValidityDays    int        `json:"validity_days"`
+	PriceRWF        int        `json:"price_rwf"`
+	IsPromotional   bool       `json:"is_promotional"`
+	IsActive        bool       `json:"is_active"`
+	CreatedAt       time.Time  `json:"created_at"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
 }
 
 type DriverCredit struct {
