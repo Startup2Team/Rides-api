@@ -24,9 +24,10 @@ const (
 
 // Claims are the JWT payload fields embedded in every access token.
 type Claims struct {
-	UserID    string `json:"user_id"`
-	RoleState string `json:"role_state"`
-	TokenType string `json:"token_type"` // "access" | "refresh"
+	UserID      string `json:"user_id"`
+	RoleState   string `json:"role_state"`
+	TokenType   string `json:"token_type"`   // "access" | "refresh"
+	IsSuspended bool   `json:"is_suspended"` // embedded so suspension is enforced without a DB hit
 	jwt.RegisteredClaims
 }
 

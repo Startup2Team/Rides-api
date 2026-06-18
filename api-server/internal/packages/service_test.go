@@ -31,6 +31,18 @@ type mockRepo struct {
 func (m *mockRepo) ListPackages(_ context.Context, _ string) ([]*packages.Package, error) {
 	return nil, nil
 }
+func (m *mockRepo) ListAllPackages(_ context.Context) ([]*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) CreatePackage(_ context.Context, _ *packages.CreatePackageInput) (*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) UpdatePackage(_ context.Context, _ string, _ *packages.UpdatePackageInput) (*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) SetPackageActive(_ context.Context, _ string, _ bool) error {
+	return nil
+}
 func (m *mockRepo) GetPackageByID(_ context.Context, _ string) (*packages.Package, error) {
 	return m.pkgByID, m.pkgByIDErr
 }
@@ -39,6 +51,15 @@ func (m *mockRepo) GetActiveCredit(_ context.Context, _ string) (*packages.Drive
 }
 func (m *mockRepo) DeductCredit(_ context.Context, _ string) error {
 	return m.deductErr
+}
+func (m *mockRepo) RefundCredit(_ context.Context, _ string) error {
+	return nil
+}
+func (m *mockRepo) SumActiveCredits(_ context.Context, _ string) (int, error) {
+	if m.activeCredit != nil {
+		return m.activeCredit.RidesRemaining, nil
+	}
+	return 0, nil
 }
 func (m *mockRepo) PurchasePackage(_ context.Context, _, _, _ string, _, _ int, _ bool) (*packages.DriverCredit, error) {
 	return m.purchasedCredit, m.purchaseErr
@@ -139,7 +160,7 @@ func TestBuyPackage_Succeeds_ForValidActivePackage(t *testing.T) {
 	}
 	svc := newSvc(repo)
 
-	credit, err := svc.BuyPackage(context.Background(), "driver-1", "pkg-1")
+	credit, err := svc.BuyPackageFromWallet(context.Background(), "driver-1", "pkg-1")
 	require.NoError(t, err)
 	assert.Equal(t, want.ID, credit.ID)
 }
@@ -150,7 +171,7 @@ func TestBuyPackage_Fails_WhenPackageInactive(t *testing.T) {
 	}
 	svc := newSvc(repo)
 
-	_, err := svc.BuyPackage(context.Background(), "driver-1", "pkg-1")
+	_, err := svc.BuyPackageFromWallet(context.Background(), "driver-1", "pkg-1")
 	require.Error(t, err)
 	var ae *apperrors.AppError
 	require.ErrorAs(t, err, &ae)
@@ -163,7 +184,7 @@ func TestBuyPackage_Fails_WhenPackageIsPromotional(t *testing.T) {
 	}
 	svc := newSvc(repo)
 
-	_, err := svc.BuyPackage(context.Background(), "driver-1", "pkg-free")
+	_, err := svc.BuyPackageFromWallet(context.Background(), "driver-1", "pkg-free")
 	require.Error(t, err)
 	var ae *apperrors.AppError
 	require.ErrorAs(t, err, &ae)
@@ -174,7 +195,7 @@ func TestBuyPackage_Fails_WhenPackageNotFound(t *testing.T) {
 	repo := &mockRepo{pkgByIDErr: apperrors.ErrNotFound}
 	svc := newSvc(repo)
 
-	_, err := svc.BuyPackage(context.Background(), "driver-1", "nonexistent")
+	_, err := svc.BuyPackageFromWallet(context.Background(), "driver-1", "nonexistent")
 	assert.ErrorIs(t, err, apperrors.ErrNotFound)
 }
 

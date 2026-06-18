@@ -49,6 +49,7 @@ var (
 	ErrAcceptExpired         = &AppError{StatusCode: http.StatusConflict, Code: "ACCEPT_EXPIRED", Message: "ride request has expired"}
 	ErrCustomerSuspended     = &AppError{StatusCode: http.StatusForbidden, Code: "CUSTOMER_SUSPENDED", Message: "booking is temporarily suspended"}
 	ErrNegotiationRoundLimit = &AppError{StatusCode: http.StatusConflict, Code: "NEGOTIATION_ROUND_LIMIT", Message: "maximum negotiation rounds reached"}
+	ErrRideAlreadyActive     = &AppError{StatusCode: http.StatusConflict, Code: "RIDE_ALREADY_ACTIVE", Message: "you already have an active ride in progress"}
 
 	// GPS
 	ErrGPSPlausibility = &AppError{StatusCode: http.StatusUnprocessableEntity, Code: "GPS_PLAUSIBILITY", Message: "GPS update rejected: speed implausible"}

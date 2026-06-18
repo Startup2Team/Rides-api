@@ -172,3 +172,11 @@ func (r *Repository) FlagUserForReview(ctx context.Context, userID string) error
 	)
 	return err
 }
+
+// ClearSuspension lifts a suspension (used to auto-expire temporary bans).
+func (r *Repository) ClearSuspension(ctx context.Context, userID string) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE users SET is_suspended = FALSE, suspension_until = NULL, updated_at = NOW() WHERE id = $1`, userID,
+	)
+	return err
+}
