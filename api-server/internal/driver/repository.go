@@ -60,6 +60,7 @@ type NearbyDriver struct {
 	DistanceM     float64 `json:"distance_m"`
 	ApproxLat     float64 `json:"approx_lat"`
 	ApproxLng     float64 `json:"approx_lng"`
+	ETAMinutes    int     `json:"eta_minutes"`
 }
 
 // NearbyCandidate is used internally by the matching engine.
@@ -385,17 +386,20 @@ func (r *Repository) UpdateUserRoleState(ctx context.Context, userID, roleState 
 	return err
 }
 
-func (r *Repository) GetEarnings(ctx context.Context, driverUserID string, interval string) (float64, error) {
+// GetEarnings returns the gross fare total AND the number of completed rides for
+// the driver within the interval (e.g. "1 day", "7 days").
+func (r *Repository) GetEarnings(ctx context.Context, driverUserID string, interval string) (float64, int, error) {
 	var total float64
+	var count int
 	err := r.db.QueryRow(ctx, `
-		SELECT COALESCE(SUM(r.agreed_fare), 0)
+		SELECT COALESCE(SUM(r.agreed_fare), 0), COUNT(*)
 		FROM rides r
 		JOIN driver_profiles dp ON dp.id = r.driver_id
 		WHERE dp.user_id = $1
 		  AND r.status = 'COMPLETED'
 		  AND r.completed_at >= NOW() - ($2 || '')::INTERVAL
-	`, driverUserID, interval).Scan(&total)
-	return total, err
+	`, driverUserID, interval).Scan(&total, &count)
+	return total, count, err
 }
 
 func (r *Repository) GetCompletionRate(ctx context.Context, driverProfileID string) (float64, error) {
@@ -407,4 +411,17 @@ func (r *Repository) GetCompletionRate(ctx context.Context, driverProfileID stri
 		FROM rides WHERE driver_id = $1
 	`, driverProfileID).Scan(&rate)
 	return rate, err
+}
+
+// HasActiveRide returns true if the driver has a ride in a non-terminal state in the DB.
+// Used to cross-check a stale Redis driver:active_ride key before blocking offline transitions.
+func (r *Repository) HasActiveRide(ctx context.Context, driverUserID string) bool {
+	var count int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM rides r
+		JOIN driver_profiles dp ON dp.id = r.driver_id
+		WHERE dp.user_id = $1
+		  AND r.status NOT IN ('COMPLETED','CANCELLED')
+	`, driverUserID).Scan(&count)
+	return err == nil && count > 0
 }

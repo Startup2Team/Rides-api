@@ -24,6 +24,11 @@ type DBTX interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
+// BonusService grants the registration bonus when a driver is approved.
+type BonusService interface {
+	GrantRegistrationBonus(ctx context.Context, driverID, vehicleTypeID string) (any, error)
+}
+
 // PackagesService grants the free-trial credit when a driver is first approved.
 type PackagesService interface {
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
@@ -34,15 +39,15 @@ type Service struct {
 	db       DBTX
 	log      zerolog.Logger
 	packages PackagesService
+	bonus    BonusService
 }
 
 func NewService(db DBTX, log zerolog.Logger) *Service {
 	return &Service{db: db, log: log}
 }
 
-func (s *Service) SetPackagesService(svc PackagesService) {
-	s.packages = svc
-}
+func (s *Service) SetPackagesService(svc PackagesService) { s.packages = svc }
+func (s *Service) SetBonusService(svc BonusService)       { s.bonus = svc }
 
 // ── Driver management ─────────────────────────────────────────────────────
 
@@ -90,6 +95,18 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 				Str("driver_user_id", driverUserID).
 				Str("transport_type", transportType).
 				Msg("admin: free trial grant failed after approval")
+		}
+	}
+
+	// Grant the 30-ride registration bonus (separate from the free-trial package credit).
+	if s.bonus != nil {
+		// Look up the vehicle_type_id for the transport_type code.
+		var vehicleTypeID string
+		_ = s.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, transportType).Scan(&vehicleTypeID)
+		if vehicleTypeID != "" {
+			if _, err := s.bonus.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID); err != nil {
+				s.log.Warn().Err(err).Str("driver_user_id", driverUserID).Msg("admin: registration bonus grant failed")
+			}
 		}
 	}
 	return nil
@@ -970,6 +987,8 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		return nil, err
 	}
 
+	// Uploaded KYC documents (licence, national ID, insurance, authorization,
+	// selfie) so the admin can review the actual photos before approving.
 	docs, _ := s.listDriverDocuments(ctx, id)
 
 	return map[string]interface{}{
@@ -1072,8 +1091,15 @@ func (s *Service) DeleteDriver(ctx context.Context, profileID string) error {
 	return err
 }
 
+// DriverDocumentInput represents a single document to attach during driver registration.
+type DriverDocumentInput struct {
+	DocumentType string
+	FileURL      string
+}
+
 // AdminCreateDriverInput holds the payload for admin-registered drivers.
 type AdminCreateDriverInput struct {
+	AdminUserID     string
 	FullName        string
 	Phone           string
 	TransportType   string
@@ -1092,6 +1118,7 @@ type AdminCreateDriverInput struct {
 	ProfileImageURL string
 	PassengerSeats  *int
 	LoadCapacityKg  *int
+	Documents       []DriverDocumentInput
 }
 
 // Allowed driver document types (aligned with mobile onboarding + admin registration).
@@ -1116,13 +1143,17 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		// User not found — create one
 		err = s.db.QueryRow(ctx, `
 			INSERT INTO users (phone_number, full_name, role_state)
-			VALUES ($1, $2, 'DRIVER_PENDING')
+			VALUES ($1, $2, 'DRIVER_ACTIVE')
 			RETURNING id`,
 			in.Phone, in.FullName,
 		).Scan(&userID)
 		if err != nil {
 			return nil, fmt.Errorf("create user: %w", err)
 		}
+	} else {
+		// User exists — promote to DRIVER_ACTIVE
+		_, _ = s.db.Exec(ctx,
+			`UPDATE users SET role_state = 'DRIVER_ACTIVE', updated_at = NOW() WHERE id = $1`, userID)
 	}
 
 	dob := in.DateOfBirth
@@ -1160,19 +1191,21 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		momoProvider = "mtn"
 	}
 
-	// 2. Create the driver profile
+	// 2. Create the driver profile — admin registration is pre-approved
 	var profileID string
 	err = s.db.QueryRow(ctx, `
 		INSERT INTO driver_profiles (
 			user_id, transport_type, vehicle_plate, license_number,
 			date_of_birth, city, momo_provider, momo_pay_code, merchant_pay_code,
-			approval_status, province, district, sector, cell, village,
+			approval_status, approved_by, approved_at,
+			province, district, sector, cell, village,
 			passenger_seats, load_capacity_kg
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,'PENDING_REVIEW',$10,$11,$12,$13,$14,$15,$16
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,'APPROVED',$10,NOW(),$11,$12,$13,$14,$15,$16,$17
 		) RETURNING id`,
 		userID, in.TransportType, in.VehiclePlate, in.LicenseNumber,
 		dob, city, momoProvider, momoCode, merchantCode,
+		in.AdminUserID,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 	).Scan(&profileID)
@@ -1180,13 +1213,21 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		return nil, mapAdminCreateDriverError(err, in)
 	}
 
+	// Attach documents — mirrors mobile step 2 (license, insurance, authorization)
+	for _, doc := range in.Documents {
+		if err := s.UpsertDriverDocument(ctx, profileID, doc.DocumentType, doc.FileURL); err != nil {
+			s.log.Warn().Err(err).Str("document_type", doc.DocumentType).Msg("admin: failed to attach document during driver registration")
+		}
+	}
+
 	return map[string]interface{}{
 		"id":              profileID,
 		"user_id":         userID,
 		"transport_type":  in.TransportType,
 		"vehicle_plate":   in.VehiclePlate,
-		"approval_status": "PENDING_REVIEW",
-		"message":         "Driver registered. Pending KYC verification.",
+		"approval_status": "APPROVED",
+		"documents_saved": len(in.Documents),
+		"message":         "Driver registered and approved.",
 	}, nil
 }
 

@@ -35,16 +35,17 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		FullName *string `json:"full_name"`
-		Email    *string `json:"email"`
-		FCMToken *string `json:"fcm_token"`
+		FullName        *string `json:"full_name"`
+		Email           *string `json:"email"`
+		FCMToken        *string `json:"fcm_token"`
+		ProfileImageURL *string `json:"profile_image_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
 
-	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.FullName, body.Email, body.FCMToken); err != nil {
+	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.FullName, body.Email, body.FCMToken, body.ProfileImageURL); err != nil {
 		respond.Error(w, err)
 		return
 	}

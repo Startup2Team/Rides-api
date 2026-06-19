@@ -1,7 +1,9 @@
 package telephony
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,7 +31,10 @@ func New(cfg *config.Config, log zerolog.Logger) *Service {
 	}
 }
 
-const atSMSEndpoint = "https://api.africastalking.com/version1/messaging"
+const (
+	atSMSEndpoint      = "https://api.africastalking.com/version1/messaging"
+	atWhatsAppEndpoint = "https://content.africastalking.com/version1/messaging/whatsapp"
+)
 
 // SendOTP sends a 6-digit OTP to the given E.164 phone number via Africa's Talking.
 func (s *Service) SendOTP(ctx context.Context, phone, otp string) error {
@@ -65,6 +70,60 @@ func (s *Service) SendOTP(ctx context.Context, phone, otp string) error {
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("telephony: AT error %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// SendOTPWhatsApp delivers an OTP message via Africa's Talking WhatsApp Business API.
+// Only used as a dev-mode fallback — requires AT_WHATSAPP_ENABLED=true and a
+// registered AT_WHATSAPP_SENDER number. Failures are non-fatal in non-production.
+func (s *Service) SendOTPWhatsApp(ctx context.Context, phone, otp string) error {
+	if s.cfg.AT.APIKey == "" || s.cfg.AT.Username == "" {
+		s.log.Warn().Msg("Africa's Talking credentials not configured — skipping WhatsApp OTP")
+		return nil
+	}
+
+	message := fmt.Sprintf("Your Taravelis verification code is: *%s*\n\nValid for 10 minutes. Do not share it.", otp)
+
+	// AT WhatsApp API uses JSON body, not form-encoded.
+	type waBody struct {
+		Username    string `json:"username"`
+		PhoneNumber string `json:"phoneNumber"`
+		Message     string `json:"message"`
+		From        string `json:"from,omitempty"`
+	}
+	body := waBody{
+		Username:    s.cfg.AT.Username,
+		PhoneNumber: phone,
+		Message:     message,
+	}
+	if s.cfg.AT.WhatsAppSender != "" {
+		body.From = s.cfg.AT.WhatsAppSender
+	}
+
+	jsonBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("telephony: marshal whatsapp body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, atWhatsAppEndpoint, bytes.NewReader(jsonBytes))
+	if err != nil {
+		return fmt.Errorf("telephony: build whatsapp request: %w", err)
+	}
+	req.Header.Set("apiKey", s.cfg.AT.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telephony: send whatsapp: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("telephony: AT WhatsApp error %d: %s", resp.StatusCode, string(b))
 	}
 
 	return nil

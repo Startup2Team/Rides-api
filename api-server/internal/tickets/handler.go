@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
@@ -78,6 +79,34 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		body.Type = "OTHER"
 	}
 	t, err := h.svc.Create(r.Context(), body.Subject, body.Type, body.Priority, body.FromRole, body.FromUserID, body.RideID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.Created(w, t)
+}
+
+// POST /api/v1/customer/support/tickets — user-facing ticket submission
+func (h *Handler) SubmitTicket(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	var body struct {
+		Subject string  `json:"subject"`
+		Type    string  `json:"type"`
+		RideID  *string `json:"ride_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Subject == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "subject is required")
+		return
+	}
+	if body.Type == "" {
+		body.Type = "OTHER"
+	}
+	fromRole := "CUSTOMER"
+	if claims.RoleState == "DRIVER_APPROVED" {
+		fromRole = "DRIVER"
+	}
+	userID := claims.UserID
+	t, err := h.svc.Create(r.Context(), body.Subject, body.Type, "MEDIUM", fromRole, &userID, body.RideID)
 	if err != nil {
 		respond.Error(w, err)
 		return

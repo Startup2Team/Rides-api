@@ -1,0 +1,37 @@
+# Fly.io config for Rides API — deploy from this directory (api-server).
+# Docs: api-server/docs/devops/FLY_DEPLOY.md
+
+app = 'rides-api'
+primary_region = 'jnb'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  PORT = '8080'
+  ENV = 'production'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 500
+    soft_limit = 400
+
+[[http_service.checks]]
+  grace_period = '20s'
+  interval = '15s'
+  method = 'GET'
+  path = '/health'
+  timeout = '5s'
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
