@@ -143,6 +143,12 @@ func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reas
 func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error {
 	suspendedUntil := time.Now().Add(time.Duration(durationHours) * time.Hour)
 
+	var transportType string
+	err := s.db.QueryRow(ctx, `SELECT transport_type FROM driver_profiles WHERE id = $1`, profileID).Scan(&transportType)
+	if err != nil {
+		return err
+	}
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -174,7 +180,17 @@ func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 		return err
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	// Force offline in Redis
+	if s.rdb != nil {
+		s.rdb.Set(ctx, rkeys.K.DriverState(profileID), "OFFLINE", 0)
+		s.rdb.ZRem(ctx, rkeys.K.DriverGeoIndex(transportType), profileID)
+	}
+
+	return nil
 }
 
 func (s *Service) ReinstateDriver(ctx context.Context, profileID string) error {
@@ -186,7 +202,7 @@ func (s *Service) ReinstateDriver(ctx context.Context, profileID string) error {
 
 	_, err = tx.Exec(ctx, `
 		UPDATE driver_profiles
-		SET approval_status = 'ACTIVE', suspension_reason = NULL, updated_at = NOW()
+		SET approval_status = 'APPROVED', suspension_reason = NULL, updated_at = NOW()
 		WHERE id = $1
 	`, profileID)
 	if err != nil {
@@ -1079,6 +1095,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 	var profileImageURL *string
 	var passengerSeats, loadCapacityKg *int
 	var dob *time.Time
+	var licenseExpiryDate, insuranceExpiryDate, authorizationExpiryDate *time.Time
 	var acceptanceRate float64
 	var totalRides int
 	var isOnline bool
@@ -1093,6 +1110,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		       dp.momo_provider, dp.momo_pay_code, dp.merchant_pay_code,
 		       dp.approval_status, dp.suspension_reason, dp.rejection_reason,
 		       dp.acceptance_rate, dp.total_rides, dp.is_online,
+		       dp.license_expiry_date, dp.insurance_expiry_date, dp.authorization_expiry_date,
 		       dp.created_at
 		FROM driver_profiles dp JOIN users u ON u.id = dp.user_id
 		WHERE dp.id = $1
@@ -1105,6 +1123,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		&momoProvider, &momoCode, &merchantPayCode,
 		&approvalStatus, &suspensionReason, &rejectionReason,
 		&acceptanceRate, &totalRides, &isOnline,
+		&licenseExpiryDate, &insuranceExpiryDate, &authorizationExpiryDate,
 		&createdAt,
 	)
 	if err != nil {
@@ -1130,8 +1149,11 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		"approval_status": approvalStatus, "suspension_reason": suspensionReason,
 		"rejection_reason": rejectionReason,
 		"acceptance_rate":  acceptanceRate, "total_rides": totalRides, "is_online": isOnline,
-		"created_at": createdAt,
-		"documents":  docs,
+		"license_expiry_date":       licenseExpiryDate,
+		"insurance_expiry_date":     insuranceExpiryDate,
+		"authorization_expiry_date": authorizationExpiryDate,
+		"created_at":                createdAt,
+		"documents":                 docs,
 	}, nil
 }
 

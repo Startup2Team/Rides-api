@@ -286,6 +286,9 @@ func TestRejectDriver_DBError(t *testing.T) {
 func TestSuspendDriver_Success(t *testing.T) {
 	tx := &mockTx{}
 	svc := newTestService(&mockDB{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			return scanRow("MOTO_BIKE")
+		},
 		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
 	})
 	err := svc.SuspendDriver(context.Background(), "profile-xyz", "admin-uuid", "fraud", 48)
@@ -297,6 +300,9 @@ func TestSuspendDriver_TxExecError(t *testing.T) {
 	dbErr := errors.New("tx exec failed")
 	tx := &mockTx{execErr: dbErr}
 	svc := newTestService(&mockDB{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			return scanRow("MOTO_BIKE")
+		},
 		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
 	})
 	err := svc.SuspendDriver(context.Background(), "profile-xyz", "admin-uuid", "fraud", 24)
@@ -306,6 +312,9 @@ func TestSuspendDriver_TxExecError(t *testing.T) {
 func TestSuspendDriver_BeginError(t *testing.T) {
 	dbErr := errors.New("begin failed")
 	svc := newTestService(&mockDB{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			return scanRow("MOTO_BIKE")
+		},
 		beginFn: func(_ context.Context) (pgx.Tx, error) { return nil, dbErr },
 	})
 	err := svc.SuspendDriver(context.Background(), "profile-xyz", "admin-uuid", "reason", 24)

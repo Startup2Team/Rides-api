@@ -23,7 +23,7 @@ func (r *Repository) Overview(ctx context.Context) (map[string]interface{}, erro
 	var totalRevenueToday float64
 
 	_ = r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM driver_profiles WHERE is_online = TRUE AND approval_status = 'ACTIVE'
+		SELECT COUNT(*) FROM driver_profiles WHERE is_online = TRUE AND approval_status = 'APPROVED'
 	`).Scan(&activeDrivers)
 
 	_ = r.db.QueryRow(ctx, `
@@ -127,7 +127,7 @@ func (r *Repository) DriverPerformance(ctx context.Context, limit int) ([]map[st
 		FROM driver_profiles dp
 		JOIN users u ON u.id = dp.user_id
 		LEFT JOIN rides ri ON ri.driver_id = dp.id AND ri.completed_at >= NOW() - INTERVAL '30 days'
-		WHERE dp.approval_status = 'ACTIVE'
+		WHERE dp.approval_status = 'APPROVED'
 		GROUP BY dp.id, u.phone_number, u.full_name, dp.transport_type, dp.total_rides, dp.acceptance_rate, dp.priority_tier
 		ORDER BY earnings_30d DESC
 		LIMIT $1

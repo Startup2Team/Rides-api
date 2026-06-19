@@ -88,7 +88,7 @@ func (s *Service) compute(ctx context.Context, w Window) (*Snapshot, error) {
 	// onlineDrivers — drivers marked online
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM driver_profiles
-		WHERE is_online = TRUE AND approval_status = 'ACTIVE'
+		WHERE is_online = TRUE AND approval_status = 'APPROVED'
 	`).Scan(&snap.OnlineDrivers)
 
 	// openTickets — support tickets not resolved/closed
@@ -438,7 +438,7 @@ func (s *Service) DriverStatusSnapshot(ctx context.Context) (*DriverStatus, erro
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM driver_profiles dp
 		WHERE dp.is_online = TRUE
-		  AND dp.approval_status = 'ACTIVE'
+		  AND dp.approval_status = 'APPROVED'
 		  AND NOT EXISTS (
 		    SELECT 1 FROM rides r
 		    WHERE r.driver_id = dp.id AND r.status IN `+inFlightStatusList+`
@@ -447,7 +447,7 @@ func (s *Service) DriverStatusSnapshot(ctx context.Context) (*DriverStatus, erro
 
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM driver_profiles
-		WHERE is_online = FALSE AND approval_status = 'ACTIVE'
+		WHERE is_online = FALSE AND approval_status = 'APPROVED'
 	`).Scan(&out.Offline)
 
 	return out, nil
@@ -480,7 +480,7 @@ func (s *Service) TopDrivers(ctx context.Context, w Window, limit int) ([]TopDri
 		JOIN users u ON u.id = dp.user_id
 		LEFT JOIN rides r ON r.driver_id = dp.id
 		  AND r.completed_at >= $1 AND r.completed_at < $2
-		WHERE dp.approval_status = 'ACTIVE'
+		WHERE dp.approval_status = 'APPROVED'
 		GROUP BY dp.id, u.full_name, dp.is_online
 		HAVING COUNT(r.id) FILTER (WHERE r.status='COMPLETED') > 0
 		ORDER BY rides DESC, dp.id
@@ -544,7 +544,7 @@ func (s *Service) LiveMap(ctx context.Context) (*LiveMap, error) {
 
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM driver_profiles
-		WHERE is_online = TRUE AND approval_status = 'ACTIVE'
+		WHERE is_online = TRUE AND approval_status = 'APPROVED'
 	`).Scan(&out.OnlineDrivers)
 
 	// Driver positions — last 15 minutes only, capped to 200
@@ -558,7 +558,7 @@ func (s *Service) LiveMap(ctx context.Context) (*LiveMap, error) {
 		       ) AS on_trip
 		FROM driver_profiles dp
 		JOIN driver_locations dl ON dl.driver_id = dp.id
-		WHERE dp.approval_status = 'ACTIVE'
+		WHERE dp.approval_status = 'APPROVED'
 		  AND dl.updated_at > NOW() - INTERVAL '15 minutes'
 		LIMIT 200
 	`)

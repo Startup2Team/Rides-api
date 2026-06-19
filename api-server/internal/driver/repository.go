@@ -14,36 +14,39 @@ import (
 
 // Profile is the driver_profiles view.
 type Profile struct {
-	ID               string     `json:"id"`
-	UserID           string     `json:"user_id"`
-	TransportType    string     `json:"transport_type"`
-	VehiclePlate     string     `json:"vehicle_plate"`
-	LicenseNumber    string     `json:"license_number"`
-	DateOfBirth      time.Time  `json:"date_of_birth"`
-	City             string     `json:"city"`
-	MomoPayCode      string     `json:"momo_pay_code"`
-	MomoProvider     string     `json:"momo_provider"`
-	Province         string     `json:"province"`
-	District         string     `json:"district"`
-	Sector           string     `json:"sector"`
-	Cell             string     `json:"cell"`
-	Village          string     `json:"village"`
-	PassengerSeats   *int       `json:"passenger_seats,omitempty"`
-	LoadCapacityKg   *int       `json:"load_capacity_kg,omitempty"`
-	ApprovalStatus   string     `json:"approval_status"`
-	ApprovedBy       *string    `json:"approved_by,omitempty"`
-	ApprovedAt       *time.Time `json:"approved_at,omitempty"`
-	RejectionReason  *string    `json:"rejection_reason,omitempty"`
-	SuspensionReason *string    `json:"suspension_reason,omitempty"`
-	IsOnline         bool       `json:"is_online"`
-	PriorityTier     int        `json:"priority_tier"`
-	OfflineAt        *time.Time `json:"offline_at,omitempty"`
-	AcceptanceRate   float64    `json:"acceptance_rate"`
-	TotalRides       int        `json:"total_rides"`
-	PolicyAccepted   bool       `json:"policy_accepted"`
-	FCMToken         *string    `json:"fcm_token,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ID                      string     `json:"id"`
+	UserID                  string     `json:"user_id"`
+	TransportType           string     `json:"transport_type"`
+	VehiclePlate            string     `json:"vehicle_plate"`
+	LicenseNumber           string     `json:"license_number"`
+	DateOfBirth             time.Time  `json:"date_of_birth"`
+	City                    string     `json:"city"`
+	MomoPayCode             string     `json:"momo_pay_code"`
+	MomoProvider            string     `json:"momo_provider"`
+	Province                string     `json:"province"`
+	District                string     `json:"district"`
+	Sector                  string     `json:"sector"`
+	Cell                    string     `json:"cell"`
+	Village                 string     `json:"village"`
+	PassengerSeats          *int       `json:"passenger_seats,omitempty"`
+	LoadCapacityKg          *int       `json:"load_capacity_kg,omitempty"`
+	ApprovalStatus          string     `json:"approval_status"`
+	ApprovedBy              *string    `json:"approved_by,omitempty"`
+	ApprovedAt              *time.Time `json:"approved_at,omitempty"`
+	RejectionReason         *string    `json:"rejection_reason,omitempty"`
+	SuspensionReason        *string    `json:"suspension_reason,omitempty"`
+	IsOnline                bool       `json:"is_online"`
+	PriorityTier            int        `json:"priority_tier"`
+	OfflineAt               *time.Time `json:"offline_at,omitempty"`
+	AcceptanceRate          float64    `json:"acceptance_rate"`
+	TotalRides              int        `json:"total_rides"`
+	PolicyAccepted          bool       `json:"policy_accepted"`
+	FCMToken                *string    `json:"fcm_token,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	LicenseExpiryDate       *time.Time `json:"license_expiry_date,omitempty"`
+	InsuranceExpiryDate     *time.Time `json:"insurance_expiry_date,omitempty"`
+	AuthorizationExpiryDate *time.Time `json:"authorization_expiry_date,omitempty"`
 }
 
 // Document is a driver_documents row.
@@ -98,6 +101,7 @@ const profileSelectCols = `
 	dp.acceptance_rate, dp.total_rides,
 	COALESCE(dp.policy_accepted, FALSE),
 	u.fcm_token,
+	dp.license_expiry_date, dp.insurance_expiry_date, dp.authorization_expiry_date,
 	dp.created_at, dp.updated_at
 `
 
@@ -115,6 +119,7 @@ func scanProfile(row pgx.Row) (*Profile, error) {
 		&p.AcceptanceRate, &p.TotalRides,
 		&p.PolicyAccepted,
 		&p.FCMToken,
+		&p.LicenseExpiryDate, &p.InsuranceExpiryDate, &p.AuthorizationExpiryDate,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
@@ -193,14 +198,16 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 			user_id, transport_type, vehicle_plate, license_number, date_of_birth,
 			city, momo_pay_code, momo_provider,
 			province, district, sector, cell, village,
-			passenger_seats, load_capacity_kg
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			passenger_seats, load_capacity_kg,
+			license_expiry_date, insurance_expiry_date, authorization_expiry_date
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id
 	`,
 		in.UserID, in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
 		in.City, in.MomoPayCode, in.MomoProvider,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
+		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
@@ -425,3 +432,39 @@ func (r *Repository) HasActiveRide(ctx context.Context, driverUserID string) boo
 	`, driverUserID).Scan(&count)
 	return err == nil && count > 0
 }
+
+func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyInput) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE driver_profiles
+		SET transport_type = $1,
+		    vehicle_plate = $2,
+		    license_number = $3,
+		    date_of_birth = $4,
+		    city = $5,
+		    momo_pay_code = $6,
+		    momo_provider = $7,
+		    province = $8,
+		    district = $9,
+		    sector = $10,
+		    cell = $11,
+		    village = $12,
+		    passenger_seats = $13,
+		    load_capacity_kg = $14,
+		    license_expiry_date = $15,
+		    insurance_expiry_date = $16,
+		    authorization_expiry_date = $17,
+		    approval_status = 'PENDING_REVIEW',
+		    rejection_reason = NULL,
+		    updated_at = NOW()
+		WHERE user_id = $18
+	`,
+		in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
+		in.City, in.MomoPayCode, in.MomoProvider,
+		in.Province, in.District, in.Sector, in.Cell, in.Village,
+		in.PassengerSeats, in.LoadCapacityKg,
+		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
+		in.UserID,
+	)
+	return err
+}
+

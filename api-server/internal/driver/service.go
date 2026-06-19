@@ -35,21 +35,24 @@ type LocationUpdate struct {
 
 // ApplyInput holds all fields for a driver application.
 type ApplyInput struct {
-	UserID         string
-	TransportType  string
-	VehiclePlate   string
-	LicenseNumber  string
-	DateOfBirth    time.Time
-	City           string
-	MomoPayCode    string
-	MomoProvider   string
-	Province       string
-	District       string
-	Sector         string
-	Cell           string
-	Village        string
-	PassengerSeats *int
-	LoadCapacityKg *int
+	UserID                  string
+	TransportType           string
+	VehiclePlate            string
+	LicenseNumber           string
+	DateOfBirth             time.Time
+	City                    string
+	MomoPayCode             string
+	MomoProvider            string
+	Province                string
+	District                string
+	Sector                  string
+	Cell                    string
+	Village                 string
+	PassengerSeats          *int
+	LoadCapacityKg          *int
+	LicenseExpiryDate       *time.Time
+	InsuranceExpiryDate     *time.Time
+	AuthorizationExpiryDate *time.Time
 }
 
 // Service handles driver business logic.
@@ -73,6 +76,31 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
 	if err == nil {
 		// Profile already exists.
+		if existing.ApprovalStatus == "REJECTED" {
+			// Profile was previously rejected; allow resubmission.
+			if rerr := s.repo.UpdateProfileForResubmission(ctx, in); rerr != nil {
+				if isUniqueViolation(rerr) {
+					return nil, apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
+				}
+				return nil, rerr
+			}
+
+			if s.cfg.Driver.DevAutoApprove {
+				if aerr := s.repo.SetApprovalStatus(ctx, existing.ID, "APPROVED", "dev-auto-approve", nil); aerr != nil {
+					return nil, fmt.Errorf("dev auto-approve: %w", aerr)
+				}
+				if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); aerr != nil {
+					return nil, fmt.Errorf("update role state: %w", aerr)
+				}
+				s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: resubmitted driver approved instantly")
+			} else {
+				if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_PENDING"); aerr != nil {
+					return nil, fmt.Errorf("update role state: %w", aerr)
+				}
+			}
+			return s.repo.FindProfileByUserID(ctx, in.UserID)
+		}
+
 		if s.cfg.Driver.DevAutoApprove && existing.ApprovalStatus != "APPROVED" {
 			// Dev shortcut: approve the pending profile so the caller can proceed.
 			if aerr := s.repo.SetApprovalStatus(ctx, existing.ID, "APPROVED", "", nil); aerr != nil {
@@ -175,6 +203,9 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 	}
 
 	if isOnline {
+		if profile.ApprovalStatus != "APPROVED" {
+			return apperrors.ErrDriverNotActive
+		}
 		offlineKey := rkeys.K.DriverOfflineAt(profile.ID)
 		_, redisErr := s.redis.Get(ctx, offlineKey).Result()
 		if redisErr == nil {
@@ -235,6 +266,10 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		return err
+	}
+
+	if !profile.IsOnline || profile.ApprovalStatus != "APPROVED" {
+		return apperrors.ErrDriverNotActive
 	}
 
 	if anomaly, speed := s.checkGPSPlausibility(ctx, profile.ID, newPoint); anomaly {
