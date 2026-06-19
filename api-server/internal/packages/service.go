@@ -37,8 +37,6 @@ type WalletDeductor interface {
 // ErrNoCredits is returned when a driver tries to accept a ride with no credits left.
 var ErrNoCredits = apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding.")
 
-
-
 // Service handles credit and package business logic.
 type Service struct {
 	repo   Repo
@@ -185,4 +183,3 @@ func (s *Service) GrantFreeTrialIfEligible(ctx context.Context, driverUserID, ve
 		Msg("packages: free trial granted")
 	return nil
 }
-

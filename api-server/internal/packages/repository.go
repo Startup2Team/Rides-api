@@ -63,7 +63,7 @@ func (r *Repository) AdminListPackages(ctx context.Context) ([]*Package, error) 
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
 		WHERE rp.deleted_at IS NULL
 		ORDER BY rp.created_at DESC
-	`);
+	`)
 	if err != nil {
 		return nil, err
 	}

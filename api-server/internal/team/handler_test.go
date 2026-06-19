@@ -138,6 +138,7 @@ func (m *mockSvc) ListAuditLog(ctx context.Context, actor, action, targetType, f
 }
 
 type dummyDB struct{}
+
 func (d dummyDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	return pgconn.CommandTag{}, nil
 }

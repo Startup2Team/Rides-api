@@ -55,10 +55,10 @@ type mockSvc struct {
 	listLiveRidesFn         func(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error)
 	getLiveRideFn           func(ctx context.Context, rideID string) (map[string]interface{}, error)
 	interveneRideFn         func(ctx context.Context, rideID, action, reason string) error
-	clearGPSFlagsFn          func(ctx context.Context, profileID string) error
-	clearOTPLockoutFn        func(ctx context.Context, userID string) error
-	clearDeviceCollisionFn   func(ctx context.Context, userID, deviceID string) error
-	getAccountTimelineFn     func(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
+	clearGPSFlagsFn         func(ctx context.Context, profileID string) error
+	clearOTPLockoutFn       func(ctx context.Context, userID string) error
+	clearDeviceCollisionFn  func(ctx context.Context, userID, deviceID string) error
+	getAccountTimelineFn    func(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
@@ -311,6 +311,7 @@ func noAuthRouter(h *admin.Handler) *chi.Mux {
 }
 
 type dummyDB struct{}
+
 func (d dummyDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	return pgconn.CommandTag{}, nil
 }

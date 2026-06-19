@@ -32,8 +32,8 @@ func New(cfg *config.Config, log zerolog.Logger) *Service {
 }
 
 const (
-	atSMSEndpoint       = "https://api.africastalking.com/version1/messaging"
-	atWhatsAppEndpoint  = "https://content.africastalking.com/version1/messaging/whatsapp"
+	atSMSEndpoint      = "https://api.africastalking.com/version1/messaging"
+	atWhatsAppEndpoint = "https://content.africastalking.com/version1/messaging/whatsapp"
 )
 
 // SendOTP sends a 6-digit OTP to the given E.164 phone number via Africa's Talking.

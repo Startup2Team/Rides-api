@@ -19,24 +19,24 @@ import (
 // ── Mock repo ─────────────────────────────────────────────────────────────
 
 type mockRepo struct {
-	findByEmailFn     func(ctx context.Context, email string) (*AdminAccount, *string, error)
-	findByIDFn        func(ctx context.Context, id string) (*AdminAccount, *string, error)
-	touchLastActiveFn func(ctx context.Context, id string)
-	listAdminsFn      func(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
-	inviteFn          func(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
-	updateRoleFn      func(ctx context.Context, id, roleID string) error
-	updateStatusFn    func(ctx context.Context, id, status string) error
-	deleteFn          func(ctx context.Context, id string) error
-	updateNameFn      func(ctx context.Context, id, name string) error
-	setPasswordFn     func(ctx context.Context, id, hash string) error
-	getTOTPSecretFn   func(ctx context.Context, id string) (*string, error)
-	saveTOTPFn        func(ctx context.Context, id, secret string) error
-	clearTOTPFn       func(ctx context.Context, id string) error
-	getBackupCodesFn  func(ctx context.Context, id string) ([]BackupCode, error)
-	saveBackupCodesFn func(ctx context.Context, id string, codes []BackupCode) error
-	listRolesFn       func(ctx context.Context) ([]*Role, error)
-	createRoleFn      func(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
-	updateRoleByIDFn  func(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
+	findByEmailFn       func(ctx context.Context, email string) (*AdminAccount, *string, error)
+	findByIDFn          func(ctx context.Context, id string) (*AdminAccount, *string, error)
+	touchLastActiveFn   func(ctx context.Context, id string)
+	listAdminsFn        func(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
+	inviteFn            func(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
+	updateRoleFn        func(ctx context.Context, id, roleID string) error
+	updateStatusFn      func(ctx context.Context, id, status string) error
+	deleteFn            func(ctx context.Context, id string) error
+	updateNameFn        func(ctx context.Context, id, name string) error
+	setPasswordFn       func(ctx context.Context, id, hash string) error
+	getTOTPSecretFn     func(ctx context.Context, id string) (*string, error)
+	saveTOTPFn          func(ctx context.Context, id, secret string) error
+	clearTOTPFn         func(ctx context.Context, id string) error
+	getBackupCodesFn    func(ctx context.Context, id string) ([]BackupCode, error)
+	saveBackupCodesFn   func(ctx context.Context, id string, codes []BackupCode) error
+	listRolesFn         func(ctx context.Context) ([]*Role, error)
+	createRoleFn        func(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
+	updateRoleByIDFn    func(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
 	deleteRoleByIDFn    func(ctx context.Context, roleID string) error
 	logActionFn         func(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error
 	getMemberActivityFn func(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)

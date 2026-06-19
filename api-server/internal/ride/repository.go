@@ -20,12 +20,12 @@ type Ride struct {
 	CustomerName  string
 	CustomerPhone string
 	// DriverName, DriverPhone, DriverRating are populated by customer-side list queries.
-	DriverName    string
-	DriverPhone   string
-	DriverRating  float64
-	DriverPlate   string
-	DriverID      *string
-	TransportType string
+	DriverName            string
+	DriverPhone           string
+	DriverRating          float64
+	DriverPlate           string
+	DriverID              *string
+	TransportType         string
 	Status                Status
 	PickupPoint           geo.Point
 	PickupAddress         string

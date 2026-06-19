@@ -467,4 +467,3 @@ func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyI
 	)
 	return err
 }
-
