@@ -99,7 +99,15 @@ func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
 	// over ngrok. The client PUTs the bytes to upload_url; this API streams them
 	// into MinIO server-side. file_url serves them back the same way.
 	if h.proxy {
-		base := strings.TrimRight(h.cfg.Storage.CDNURL, "/") + "/" + objectKey
+		cdnURL := h.cfg.Storage.CDNURL
+		if r.Host != "" {
+			if strings.Contains(cdnURL, "localhost:8080") {
+				cdnURL = strings.Replace(cdnURL, "localhost:8080", r.Host, 1)
+			} else if strings.Contains(cdnURL, "127.0.0.1:8080") {
+				cdnURL = strings.Replace(cdnURL, "127.0.0.1:8080", r.Host, 1)
+			}
+		}
+		base := strings.TrimRight(cdnURL, "/") + "/" + objectKey
 		respond.OK(w, map[string]any{
 			"upload_url": base,
 			"file_url":   base,

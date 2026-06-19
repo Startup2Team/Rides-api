@@ -10,11 +10,13 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	mw "github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/internal/team"
+	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -44,6 +46,7 @@ type mockSvc struct {
 	updateNameFn       func(ctx context.Context, id, name string) error
 	changePasswordFn   func(ctx context.Context, id, current, newPw string) error
 	setPasswordFn      func(ctx context.Context, id, password string) error
+	listAuditLogFn     func(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]team.AuditEntry, int, error)
 }
 
 func (m *mockSvc) Login(ctx context.Context, email, password string) (*team.LoginResult, error) {
@@ -126,6 +129,22 @@ func (m *mockSvc) ChangePassword(ctx context.Context, id, current, newPw string)
 }
 func (m *mockSvc) SetPassword(ctx context.Context, id, password string) error {
 	return m.setPasswordFn(ctx, id, password)
+}
+func (m *mockSvc) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]team.AuditEntry, int, error) {
+	if m.listAuditLogFn != nil {
+		return m.listAuditLogFn(ctx, actor, action, targetType, from, to, limit, offset)
+	}
+	return nil, 0, nil
+}
+
+type dummyDB struct{}
+
+func (d dummyDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func newHandler(svc team.TeamService) *team.Handler {
+	return team.NewHandler(svc, audit.New(dummyDB{}))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -222,7 +241,7 @@ func TestLogin_HappyPath_No2FA(t *testing.T) {
 		},
 	}
 	r := chi.NewRouter()
-	r.Post("/admin/auth/login", team.NewHandler(mock).Login)
+	r.Post("/admin/auth/login", newHandler(mock).Login)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/login",
 		jsonBody(t, map[string]string{"email": "admin@test.com", "password": "secret123"}))
@@ -243,7 +262,7 @@ func TestLogin_HappyPath_Requires2FA(t *testing.T) {
 		},
 	}
 	r := chi.NewRouter()
-	r.Post("/admin/auth/login", team.NewHandler(mock).Login)
+	r.Post("/admin/auth/login", newHandler(mock).Login)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/login",
 		jsonBody(t, map[string]string{"email": "admin@test.com", "password": "secret123"}))
@@ -265,7 +284,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 		},
 	}
 	r := chi.NewRouter()
-	r.Post("/admin/auth/login", team.NewHandler(mock).Login)
+	r.Post("/admin/auth/login", newHandler(mock).Login)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/login",
 		jsonBody(t, map[string]string{"email": "admin@test.com", "password": "wrong"}))
@@ -283,7 +302,7 @@ func TestLogin_UnknownEmail(t *testing.T) {
 		},
 	}
 	r := chi.NewRouter()
-	r.Post("/admin/auth/login", team.NewHandler(mock).Login)
+	r.Post("/admin/auth/login", newHandler(mock).Login)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/login",
 		jsonBody(t, map[string]string{"email": "nobody@test.com", "password": "pass"}))
@@ -296,7 +315,7 @@ func TestLogin_UnknownEmail(t *testing.T) {
 
 func TestLogin_MissingFields(t *testing.T) {
 	r := chi.NewRouter()
-	r.Post("/admin/auth/login", team.NewHandler(&mockSvc{}).Login)
+	r.Post("/admin/auth/login", newHandler(&mockSvc{}).Login)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/login",
 		jsonBody(t, map[string]string{"email": "admin@test.com"}))
@@ -315,7 +334,7 @@ func TestVerify2FA_ValidCode(t *testing.T) {
 			return &team.LoginResult{AccessToken: "admin-jwt"}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/2fa/verify",
 		jsonBody(t, map[string]string{"pre_auth_token": "pre-tok", "code": "123456"}))
@@ -335,7 +354,7 @@ func TestVerify2FA_WrongCode(t *testing.T) {
 			return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "invalid TOTP code")
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/2fa/verify",
 		jsonBody(t, map[string]string{"pre_auth_token": "pre-tok", "code": "000000"}))
@@ -347,7 +366,7 @@ func TestVerify2FA_WrongCode(t *testing.T) {
 }
 
 func TestVerify2FA_MissingFields(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/2fa/verify",
 		jsonBody(t, map[string]string{"pre_auth_token": "pre-tok"}))
@@ -359,7 +378,7 @@ func TestVerify2FA_MissingFields(t *testing.T) {
 }
 
 func TestVerify2FA_NoAuth(t *testing.T) {
-	r := noAuthRouter(team.NewHandler(&mockSvc{}))
+	r := noAuthRouter(newHandler(&mockSvc{}))
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/2fa/verify",
 		jsonBody(t, map[string]string{"pre_auth_token": "x", "code": "123456"}))
 	rr := httptest.NewRecorder()
@@ -375,7 +394,7 @@ func TestVerifyBackupCode_Valid(t *testing.T) {
 			return &team.LoginResult{AccessToken: "admin-jwt"}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/2fa/backup",
 		jsonBody(t, map[string]string{"pre_auth_token": "pre-tok", "backup_code": "ab1cd-ef2gh"}))
@@ -392,7 +411,7 @@ func TestVerifyBackupCode_AlreadyUsed(t *testing.T) {
 			return nil, apperrors.New(http.StatusUnauthorized, "BACKUP_CODE_USED", "backup code already used")
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/2fa/backup",
 		jsonBody(t, map[string]string{"pre_auth_token": "pre-tok", "backup_code": "used-code"}))
@@ -404,7 +423,7 @@ func TestVerifyBackupCode_AlreadyUsed(t *testing.T) {
 }
 
 func TestVerifyBackupCode_MissingFields(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/2fa/backup",
 		jsonBody(t, map[string]string{"pre_auth_token": "pre-tok"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -424,7 +443,7 @@ func TestLogout_InvalidatesSession(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/logout", nil)
 	rr := httptest.NewRecorder()
@@ -440,10 +459,10 @@ func TestLogout_InvalidatesSession(t *testing.T) {
 func TestSetup2FA_ReturnsSecretAndURL(t *testing.T) {
 	mock := &mockSvc{
 		setup2FAFn: func(_ context.Context, _ string) (string, string, error) {
-			return "BASE32SECRET", "otpauth://totp/Taravelis:admin@test.com?secret=BASE32SECRET", nil
+			return "BASE32SECRET", "otpauth://totp/Rides:admin@test.com?secret=BASE32SECRET", nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/account/2fa/setup", nil)
 	rr := httptest.NewRecorder()
@@ -457,7 +476,7 @@ func TestSetup2FA_ReturnsSecretAndURL(t *testing.T) {
 }
 
 func TestSetup2FA_NoAuth(t *testing.T) {
-	r := noAuthRouter(team.NewHandler(&mockSvc{}))
+	r := noAuthRouter(newHandler(&mockSvc{}))
 	req := httptest.NewRequest(http.MethodGet, "/admin/account/2fa/setup", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -473,7 +492,7 @@ func TestEnable2FA_ReturnsBackupCodes(t *testing.T) {
 			return codes, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/account/2fa/enable",
 		jsonBody(t, map[string]string{"secret": "BASE32SECRET", "code": "123456"}))
@@ -494,7 +513,7 @@ func TestEnable2FA_InvalidCode(t *testing.T) {
 			return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "invalid TOTP code")
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/account/2fa/enable",
 		jsonBody(t, map[string]string{"secret": "BASE32SECRET", "code": "000000"}))
@@ -506,7 +525,7 @@ func TestEnable2FA_InvalidCode(t *testing.T) {
 }
 
 func TestEnable2FA_MissingFields(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/account/2fa/enable",
 		jsonBody(t, map[string]string{"secret": "BASE32SECRET"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -521,7 +540,7 @@ func TestDisable2FA_Success(t *testing.T) {
 	mock := &mockSvc{
 		disable2FAFn: func(_ context.Context, _, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/account/2fa/disable",
 		jsonBody(t, map[string]string{"password": "mypassword"}))
@@ -536,7 +555,7 @@ func TestDisable2FA_Success(t *testing.T) {
 }
 
 func TestDisable2FA_MissingPassword(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/account/2fa/disable",
 		jsonBody(t, map[string]string{}))
 	req.Header.Set("Content-Type", "application/json")
@@ -553,7 +572,7 @@ func TestResetTOTP_Success(t *testing.T) {
 			return "NEW_SECRET", "otpauth://...", []string{"code-1", "code-2"}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/totp/reset",
 		jsonBody(t, map[string]string{"code": "123456"}))
@@ -574,7 +593,7 @@ func TestResetTOTP_WrongCode(t *testing.T) {
 			return "", "", nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "invalid code")
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/totp/reset",
 		jsonBody(t, map[string]string{"code": "000000"}))
@@ -586,7 +605,7 @@ func TestResetTOTP_WrongCode(t *testing.T) {
 }
 
 func TestResetTOTP_MissingCode(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/auth/totp/reset",
 		jsonBody(t, map[string]string{}))
 	req.Header.Set("Content-Type", "application/json")
@@ -603,7 +622,7 @@ func TestListAdmins_HappyPath(t *testing.T) {
 			return []*team.AdminAccount{{ID: "a1", Email: "admin@test.com"}}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/team", nil)
 	rr := httptest.NewRecorder()
@@ -616,7 +635,7 @@ func TestListAdmins_HappyPath(t *testing.T) {
 }
 
 func TestListAdmins_NoAuth(t *testing.T) {
-	r := noAuthRouter(team.NewHandler(&mockSvc{}))
+	r := noAuthRouter(newHandler(&mockSvc{}))
 	req := httptest.NewRequest(http.MethodGet, "/admin/team", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -629,7 +648,7 @@ func TestInvite_HappyPath(t *testing.T) {
 			return &team.AdminAccount{ID: "new-admin", Email: email}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/invite",
 		jsonBody(t, map[string]string{"name": "New Admin", "email": "new@test.com", "role_id": "role-uuid"}))
@@ -646,7 +665,7 @@ func TestInvite_DuplicateEmail(t *testing.T) {
 			return nil, apperrors.ErrConflict
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/invite",
 		jsonBody(t, map[string]string{"name": "Dup", "email": "exists@test.com", "role_id": "role-uuid"}))
@@ -658,7 +677,7 @@ func TestInvite_DuplicateEmail(t *testing.T) {
 }
 
 func TestInvite_MissingFields(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/invite",
 		jsonBody(t, map[string]string{"name": "No Role"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -674,7 +693,7 @@ func TestListRoles_HappyPath(t *testing.T) {
 			return []*team.Role{{ID: "r1", Name: "Super Admin", Description: &desc}}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/team/roles", nil)
 	rr := httptest.NewRecorder()
@@ -693,7 +712,7 @@ func TestSuspend_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/member-uuid/suspend", nil)
 	rr := httptest.NewRecorder()
@@ -705,7 +724,7 @@ func TestSuspend_HappyPath(t *testing.T) {
 
 func TestSuspend_SelfSuspend(t *testing.T) {
 	// adminID == member id → SELF_ACTION forbidden
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/"+adminID+"/suspend", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -716,7 +735,7 @@ func TestReinstate_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		reinstateFn: func(_ context.Context, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/member-uuid/reinstate", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -727,7 +746,7 @@ func TestRemove_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		removeFn: func(_ context.Context, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/member-uuid/remove", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -735,7 +754,7 @@ func TestRemove_HappyPath(t *testing.T) {
 }
 
 func TestRemove_SelfRemove(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/"+adminID+"/remove", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -748,7 +767,7 @@ func TestUpdateRole_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		updateRoleFn: func(_ context.Context, _, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/member-uuid/role",
 		jsonBody(t, map[string]string{"role_id": "new-role-uuid"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -758,7 +777,7 @@ func TestUpdateRole_HappyPath(t *testing.T) {
 }
 
 func TestUpdateRole_MissingRoleID(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/member-uuid/role",
 		jsonBody(t, map[string]string{}))
 	req.Header.Set("Content-Type", "application/json")
@@ -771,7 +790,7 @@ func TestSetPassword_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		setPasswordFn: func(_ context.Context, _, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/member-uuid/set-password",
 		jsonBody(t, map[string]string{"password": "newpassword123"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -781,7 +800,7 @@ func TestSetPassword_HappyPath(t *testing.T) {
 }
 
 func TestSetPassword_TooShort(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/member-uuid/set-password",
 		jsonBody(t, map[string]string{"password": "short"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -798,7 +817,7 @@ func TestCreateRole_HappyPath(t *testing.T) {
 			return &team.Role{ID: "new-role", Name: name}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/roles",
 		jsonBody(t, map[string]interface{}{"name": "Finance", "permissions": []string{"/admin/revenue"}}))
 	req.Header.Set("Content-Type", "application/json")
@@ -808,7 +827,7 @@ func TestCreateRole_HappyPath(t *testing.T) {
 }
 
 func TestCreateRole_MissingName(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/roles",
 		jsonBody(t, map[string]interface{}{"permissions": []string{}}))
 	req.Header.Set("Content-Type", "application/json")
@@ -823,7 +842,7 @@ func TestDeleteRoleByID_SystemRole(t *testing.T) {
 			return errors.New("cannot_delete_system_role")
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/team/roles/system-role-id", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -834,7 +853,7 @@ func TestDeleteRoleByID_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		deleteRoleByIDFn: func(_ context.Context, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/team/roles/custom-role-id", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -850,7 +869,7 @@ func TestUpdateAccount_HappyPath(t *testing.T) {
 			return []*team.AdminAccount{{ID: adminID, Name: "Old Name"}}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPut, "/admin/account",
 		jsonBody(t, map[string]string{"name": "New Name"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -860,7 +879,7 @@ func TestUpdateAccount_HappyPath(t *testing.T) {
 }
 
 func TestUpdateAccount_MissingName(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPut, "/admin/account",
 		jsonBody(t, map[string]string{}))
 	req.Header.Set("Content-Type", "application/json")
@@ -873,7 +892,7 @@ func TestChangePassword_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		changePasswordFn: func(_ context.Context, _, _, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/account/password",
 		jsonBody(t, map[string]string{"current_password": "old123", "new_password": "newpass123"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -883,7 +902,7 @@ func TestChangePassword_HappyPath(t *testing.T) {
 }
 
 func TestChangePassword_TooShort(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/account/password",
 		jsonBody(t, map[string]string{"current_password": "old", "new_password": "short"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -900,7 +919,7 @@ func TestGetAccount_Found(t *testing.T) {
 			return []*team.AdminAccount{{ID: adminID, Email: "admin@test.com"}}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/account", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -913,7 +932,7 @@ func TestGetAccount_NotFound(t *testing.T) {
 			return []*team.AdminAccount{{ID: "other-admin"}}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/account", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -923,7 +942,7 @@ func TestGetAccount_NotFound(t *testing.T) {
 // ── Sessions ──────────────────────────────────────────────────────────────
 
 func TestGetSessions_ReturnsCurrent(t *testing.T) {
-	r := newRouter(team.NewHandler(&mockSvc{}), adminID)
+	r := newRouter(newHandler(&mockSvc{}), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/account/sessions", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -937,7 +956,7 @@ func TestRevokeSession_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		logoutFn: func(_ context.Context, _, _ string) error { return nil },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/account/sessions/session-abc", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -953,7 +972,7 @@ func TestUpdateRoleByID_HappyPath(t *testing.T) {
 			return &team.Role{ID: roleID, Name: "Updated Role", Description: &desc}, nil
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/team/roles/role-uuid",
 		jsonBody(t, map[string]interface{}{"name": "Updated Role", "permissions": []string{}}))
 	req.Header.Set("Content-Type", "application/json")
@@ -968,7 +987,7 @@ func TestUpdateRoleByID_SystemRole(t *testing.T) {
 			return nil, errors.New("cannot_delete_system_role")
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/team/roles/system-role",
 		jsonBody(t, map[string]interface{}{"name": "Super Admin"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -983,7 +1002,7 @@ func TestReinstate_NotFound(t *testing.T) {
 	mock := &mockSvc{
 		reinstateFn: func(_ context.Context, _ string) error { return apperrors.ErrNotFound },
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/team/members/unknown/reinstate", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -998,7 +1017,7 @@ func TestListRoles_ServiceError(t *testing.T) {
 			return nil, apperrors.ErrInternal
 		},
 	}
-	r := newRouter(team.NewHandler(mock), adminID)
+	r := newRouter(newHandler(mock), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/team/roles", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)

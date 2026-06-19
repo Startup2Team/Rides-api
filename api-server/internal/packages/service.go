@@ -14,17 +14,18 @@ import (
 // tests can provide a lightweight mock instead.
 type Repo interface {
 	ListPackages(ctx context.Context, vehicleTypeCode string) ([]*Package, error)
-	ListAllPackages(ctx context.Context) ([]*Package, error)
 	GetPackageByID(ctx context.Context, packageID string) (*Package, error)
-	CreatePackage(ctx context.Context, p *CreatePackageInput) (*Package, error)
-	UpdatePackage(ctx context.Context, packageID string, p *UpdatePackageInput) (*Package, error)
-	SetPackageActive(ctx context.Context, packageID string, active bool) error
 	GetActiveCredit(ctx context.Context, driverUserID string) (*DriverCredit, error)
 	SumActiveCredits(ctx context.Context, driverUserID string) (int, error)
 	DeductCredit(ctx context.Context, driverUserID string) error
 	RefundCredit(ctx context.Context, driverUserID string) error
 	PurchasePackage(ctx context.Context, driverUserID, packageID, vehicleTypeID string, ridesTotal, validityDays int, isPromotional bool) (*DriverCredit, error)
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
+	AdminListPackages(ctx context.Context) ([]*Package, error)
+	AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error)
+	AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error)
+	AdminTogglePackage(ctx context.Context, id string, isActive bool) error
+	AdminDeletePackage(ctx context.Context, id string) error
 }
 
 // WalletDeductor is the wallet.Service method subset needed by this package.
@@ -35,27 +36,6 @@ type WalletDeductor interface {
 
 // ErrNoCredits is returned when a driver tries to accept a ride with no credits left.
 var ErrNoCredits = apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding.")
-
-// CreatePackageInput is the admin request body for creating a new package.
-type CreatePackageInput struct {
-	Name            string `json:"name"`
-	VehicleTypeCode string `json:"vehicle_type_code"`
-	RideCount       int    `json:"ride_count"`
-	ValidityDays    int    `json:"validity_days"`
-	PriceRWF        int    `json:"price_rwf"`
-	CostPerRideRWF  int    `json:"cost_per_ride_rwf"`
-	IsPromotional   bool   `json:"is_promotional"`
-}
-
-// UpdatePackageInput contains the fields admin can change after creation.
-type UpdatePackageInput struct {
-	Name           *string `json:"name,omitempty"`
-	RideCount      *int    `json:"ride_count,omitempty"`
-	ValidityDays   *int    `json:"validity_days,omitempty"`
-	PriceRWF       *int    `json:"price_rwf,omitempty"`
-	CostPerRideRWF *int    `json:"cost_per_ride_rwf,omitempty"`
-	IsPromotional  *bool   `json:"is_promotional,omitempty"`
-}
 
 // Service handles credit and package business logic.
 type Service struct {
@@ -112,6 +92,30 @@ func (s *Service) ListPackages(ctx context.Context, vehicleTypeCode string) ([]*
 	return s.repo.ListPackages(ctx, vehicleTypeCode)
 }
 
+func (s *Service) AdminListPackages(ctx context.Context) ([]*Package, error) {
+	return s.repo.AdminListPackages(ctx)
+}
+
+func (s *Service) AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error) {
+	return s.repo.AdminCreatePackage(ctx, name, vehicleTypeCode, rideCount, bonusRides, validityDays, priceRWF, isPromotional)
+}
+
+func (s *Service) AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error) {
+	return s.repo.AdminUpdatePackage(ctx, id, name, rideCount, bonusRides, validityDays, priceRWF)
+}
+
+func (s *Service) AdminTogglePackage(ctx context.Context, id string, isActive bool) error {
+	return s.repo.AdminTogglePackage(ctx, id, isActive)
+}
+
+func (s *Service) GetPackageByID(ctx context.Context, id string) (*Package, error) {
+	return s.repo.GetPackageByID(ctx, id)
+}
+
+func (s *Service) AdminDeletePackage(ctx context.Context, id string) error {
+	return s.repo.AdminDeletePackage(ctx, id)
+}
+
 // GetCredits returns the driver's current best active credit, or nil if none.
 func (s *Service) GetCredits(ctx context.Context, driverUserID string) (*DriverCredit, error) {
 	credit, err := s.repo.GetActiveCredit(ctx, driverUserID)
@@ -147,7 +151,8 @@ func (s *Service) BuyPackageFromWallet(ctx context.Context, driverUserID, packag
 		}
 	}
 
-	credit, err := s.repo.PurchasePackage(ctx, driverUserID, packageID, pkg.VehicleTypeID, pkg.RideCount, pkg.ValidityDays, false)
+	ridesTotal := pkg.RideCount + pkg.BonusRides
+	credit, err := s.repo.PurchasePackage(ctx, driverUserID, packageID, pkg.VehicleTypeID, ridesTotal, pkg.ValidityDays, pkg.IsPromotional)
 	if err != nil {
 		return nil, err
 	}
@@ -156,9 +161,9 @@ func (s *Service) BuyPackageFromWallet(ctx context.Context, driverUserID, packag
 		Str("driver_id", driverUserID).
 		Str("package_id", packageID).
 		Str("vehicle_type", pkg.VehicleTypeCode).
-		Int("rides", pkg.RideCount).
+		Int("rides", ridesTotal).
 		Int("price_rwf", pkg.PriceRWF).
-		Msg("packages: purchased from wallet")
+		Msg("packages: package purchased")
 
 	return credit, nil
 }
@@ -177,46 +182,4 @@ func (s *Service) GrantFreeTrialIfEligible(ctx context.Context, driverUserID, ve
 		Str("vehicle_type", vehicleTypeCode).
 		Msg("packages: free trial granted")
 	return nil
-}
-
-// ── Admin-facing ──────────────────────────────────────────────────────────────
-
-// AdminListPackages returns all packages (active + inactive) for the admin panel.
-func (s *Service) AdminListPackages(ctx context.Context) ([]*Package, error) {
-	return s.repo.ListAllPackages(ctx)
-}
-
-// AdminCreatePackage creates a new package. Admin sets all pricing.
-func (s *Service) AdminCreatePackage(ctx context.Context, input *CreatePackageInput) (*Package, error) {
-	if input.Name == "" || input.VehicleTypeCode == "" {
-		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "name and vehicle_type_code are required")
-	}
-	if input.RideCount <= 0 {
-		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "ride_count must be positive")
-	}
-	if input.PriceRWF < 0 {
-		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "price_rwf must be >= 0")
-	}
-	if input.ValidityDays <= 0 {
-		input.ValidityDays = 30
-	}
-	if input.CostPerRideRWF <= 0 {
-		input.CostPerRideRWF = 30 // default platform cost per ride
-	}
-	return s.repo.CreatePackage(ctx, input)
-}
-
-// AdminUpdatePackage updates mutable fields of a package.
-func (s *Service) AdminUpdatePackage(ctx context.Context, packageID string, input *UpdatePackageInput) (*Package, error) {
-	return s.repo.UpdatePackage(ctx, packageID, input)
-}
-
-// AdminDeactivatePackage soft-deletes a package (drivers can no longer see or buy it).
-func (s *Service) AdminDeactivatePackage(ctx context.Context, packageID string) error {
-	return s.repo.SetPackageActive(ctx, packageID, false)
-}
-
-// AdminActivatePackage re-enables a previously deactivated package.
-func (s *Service) AdminActivatePackage(ctx context.Context, packageID string) error {
-	return s.repo.SetPackageActive(ctx, packageID, true)
 }

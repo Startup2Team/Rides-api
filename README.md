@@ -1,6 +1,6 @@
-# Taravelis — Ride-Hailing Backend API
+# Rides — Ride-Hailing Backend API
 
-Go backend for the Taravelis ride-hailing platform (Kigali, Rwanda).
+Go backend for the Rides ride-hailing platform (Kigali, Rwanda).
 Supports motos, cabs, hilux pickups, and fuso trucks.
 
 ---

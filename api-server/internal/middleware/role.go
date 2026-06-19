@@ -43,6 +43,29 @@ func RequireRole(allowed ...string) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireAdminRole gates routes to admins whose JWT admin_role is in the allowed set.
+// Must be used inside a route group that already applies RequireRole(RoleAdmin).
+func RequireAdminRole(allowed ...string) func(http.Handler) http.Handler {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, r := range allowed {
+		allowedSet[r] = true
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims := GetClaims(r)
+			if claims == nil {
+				respond.Error(w, apperrors.ErrUnauthorized)
+				return
+			}
+			if !allowedSet[claims.AdminRole] {
+				respond.Error(w, apperrors.ErrForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RequireNotSuspended rejects any request from a suspended account.
 // The is_suspended flag is embedded in the JWT — zero DB latency.
 // Admins revoke the session via Redis when suspending a user, so even

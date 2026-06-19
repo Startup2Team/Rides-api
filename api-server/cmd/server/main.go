@@ -49,6 +49,8 @@ import (
 	"github.com/workspace/ride-platform/internal/tracking"
 	"github.com/workspace/ride-platform/internal/upload"
 	"github.com/workspace/ride-platform/internal/wallet"
+	"github.com/workspace/ride-platform/pkg/adminrole"
+	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	"github.com/workspace/ride-platform/pkg/logger"
@@ -154,11 +156,13 @@ func main() {
 	negSvc := negotiation.NewService(negRepo, rideRepo, rdb, hub, telSvc, anaSvc, cfg, log)
 	rideSvc.SetFareRepository(fareRepo)
 	negSvc.SetFareRepository(fareRepo)
+	auditLog := audit.New(db)
 	// Wire the timeout manager so negotiation activity resets the 5-minute clock.
 	negSvc.SetTimeoutManager(rideSvc)
 	notifRepo := notification.NewRepository(db)
 	notifySvc.SetRepository(notifRepo)
 	adminSvc := admin.NewService(db, log)
+	adminSvc.SetRedis(rdb)
 	locSvc := location.NewService(db, rdb, cfg, log)
 
 	// ── New module services ───────────────────────────────────────────────────
@@ -179,12 +183,12 @@ func main() {
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
 	negH := negotiation.NewHandler(negSvc)
-	adminH := admin.NewHandler(adminSvc, authSvc, cfg.Env)
+	adminH := admin.NewHandler(adminSvc, authSvc, auditLog, cfg.Env)
 	anaH := analytics.NewHandler(anaRepo)
 	trackH := tracking.NewHandler(hub, driverSvc, rdb, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
-	pkgH := packages.NewHandler(pkgSvc)
+	pkgH := packages.NewHandler(pkgSvc, auditLog)
 	pkgH.SetBonus(bonusSvc) // auto-grant purchase bonuses
 	bonusH := bonus.NewHandler(bonusSvc)
 	walletH := wallet.NewHandler(walletSvc)
@@ -205,7 +209,7 @@ func main() {
 	inboxH := inbox.NewHandler(inboxSvc)
 	reportH := reports.NewHandler(reportSvc)
 	settingsH := settings.NewHandler(settingsSvc)
-	teamH := team.NewHandler(teamSvc)
+	teamH := team.NewHandler(teamSvc, auditLog)
 	dashH := dashboard.NewHandler(dashSvc)
 
 	// ── Background goroutines ─────────────────────────────────────────────────
@@ -462,22 +466,12 @@ func main() {
 		r.Use(mw.Authenticate(cfg, rdb))
 		r.Use(mw.RequireRole(mw.RoleAdmin))
 
-		// Auth (protected actions)
+		// Auth (protected actions) - My Account (unrestricted admin roles)
 		r.Post("/auth/logout", teamH.Logout)
 		r.Post("/auth/2fa/reissue", teamH.Reissue2FAChallenge)
 		r.Post("/auth/totp/reset", teamH.ResetTOTP)
 
-		// Dashboard
-		r.Get("/dashboard", dashH.Get)
-		r.Get("/dashboard/revenue-series", dashH.RevenueSeries)
-		r.Get("/dashboard/rides-series", dashH.RidesSeries)
-		r.Get("/dashboard/driver-status", dashH.DriverStatusSnapshot)
-		r.Get("/dashboard/top-drivers", dashH.TopDrivers)
-		r.Get("/dashboard/recent-activity", dashH.RecentActivity)
-		r.Get("/dashboard/alerts", dashH.Alerts)
-		r.Get("/dashboard/live-map", dashH.LiveMap)
-
-		// Account (self)
+		// Account (self) - My Account (unrestricted admin roles)
 		r.Get("/account", teamH.GetAccount)
 		r.Get("/account/me", teamH.GetAccount)
 		r.Put("/account", teamH.UpdateAccount)
@@ -490,179 +484,214 @@ func main() {
 		r.Post("/account/2fa/enable", teamH.Enable2FA)
 		r.Post("/account/2fa/disable", teamH.Disable2FA)
 
-		// Drivers
-		r.Post("/drivers/send-otp", adminH.SendDriverOTP)
-		r.Post("/drivers/verify-otp", adminH.VerifyDriverOTP)
-		r.Get("/drivers", adminH.ListDrivers)
-		r.Post("/drivers", adminH.CreateDriver)
-		r.Get("/drivers/overview", adminH.DriverOverview)
-		r.Get("/drivers/{id}", adminH.GetDriver)
-		r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
-		r.Patch("/drivers/{id}", adminH.UpdateDriver)
-		r.Delete("/drivers/{id}", adminH.DeleteDriver)
-		r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
-		r.Post("/drivers/{id}/reject", adminH.RejectDriver)
-		r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
-		r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
-		r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
-		r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
-		r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)
-		r.Post("/uploads/file", adminH.UploadDriverFile)
-		if uploadH != nil {
-			r.Post("/uploads/presigned-url", uploadH.PresignedURL)
-		}
+		// --- Operations Bucket (Super Admin, Operations Manager, Support Staff) ---
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.OpsManager, adminrole.SupportStaff))
 
-		// Customers
-		r.Get("/customers", adminH.ListCustomers)
-		r.Get("/customers/overview", adminH.CustomerOverview)
-		r.Get("/customers/{id}", adminH.GetCustomer)
-		r.Patch("/customers/{id}", adminH.UpdateCustomer)
-		r.Patch("/customers/{id}/ban", adminH.BanCustomer)
-		r.Post("/customers/{id}/suspend", adminH.SuspendUser)
-		r.Post("/customers/{id}/reinstate", adminH.ReinstateUser)
+			// Dashboard
+			r.Get("/dashboard", dashH.Get)
+			r.Get("/dashboard/revenue-series", dashH.RevenueSeries)
+			r.Get("/dashboard/rides-series", dashH.RidesSeries)
+			r.Get("/dashboard/driver-status", dashH.DriverStatusSnapshot)
+			r.Get("/dashboard/top-drivers", dashH.TopDrivers)
+			r.Get("/dashboard/recent-activity", dashH.RecentActivity)
+			r.Get("/dashboard/alerts", dashH.Alerts)
+			r.Get("/dashboard/live-map", dashH.LiveMap)
 
-		// Users (backwards compat)
-		r.Get("/users", adminH.ListUsers)
-		r.Post("/users/{id}/suspend", adminH.SuspendUser)
+			// Drivers
+			r.Post("/drivers/send-otp", adminH.SendDriverOTP)
+			r.Post("/drivers/verify-otp", adminH.VerifyDriverOTP)
+			r.Get("/drivers", adminH.ListDrivers)
+			r.Post("/drivers", adminH.CreateDriver)
+			r.Get("/drivers/overview", adminH.DriverOverview)
+			r.Get("/drivers/{id}", adminH.GetDriver)
+			r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
+			r.Patch("/drivers/{id}", adminH.UpdateDriver)
+			// r.Delete("/drivers/{id}", adminH.DeleteDriver) REMOVED - suspend/reinstate only
+			r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
+			r.Post("/drivers/{id}/reject", adminH.RejectDriver)
+			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
+			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
+			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
+			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
+			r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)
+			r.Post("/uploads/file", adminH.UploadDriverFile)
+			if uploadH != nil {
+				r.Post("/uploads/presigned-url", uploadH.PresignedURL)
+			}
 
-		// Safety flags
-		r.Get("/flags/gps-anomalies", adminH.GPSAnomalies)
-		r.Get("/flags/device-collisions", adminH.DeviceCollisions)
+			// Customers
+			r.Get("/customers", adminH.ListCustomers)
+			r.Get("/customers/overview", adminH.CustomerOverview)
+			r.Get("/customers/{id}", adminH.GetCustomer)
+			r.Patch("/customers/{id}", adminH.UpdateCustomer)
+			r.Patch("/customers/{id}/ban", adminH.BanCustomer)
+			r.Post("/customers/{id}/suspend", adminH.SuspendUser)
+			r.Post("/customers/{id}/reinstate", adminH.ReinstateUser)
 
-		// Live rides
-		r.Get("/rides/live/stats", adminH.LiveRidesStats)
-		r.Get("/rides/live", adminH.ListLiveRides)
-		r.Get("/rides/live/{id}", adminH.GetLiveRide)
-		r.Post("/rides/live/{id}/intervene", adminH.InterveneRide)
+			// Users (backwards compat)
+			r.Get("/users", adminH.ListUsers)
+			r.Post("/users/{id}/suspend", adminH.SuspendUser)
 
-		// All rides (history)
-		r.Get("/rides", adminH.ListRides)
-		r.Get("/rides/{id}", adminH.GetRide)
-		r.Get("/pricing", fareH.ListActivePricing)
-		r.Get("/pricing/{vehicle_type_code}", fareH.GetActivePricingByType)
-		r.Get("/pricing/{vehicle_type_code}/history", fareH.GetPricingHistory)
-		r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
+			// Safety flags
+			r.Get("/flags/gps-anomalies", adminH.GPSAnomalies)
+			r.Get("/flags/device-collisions", adminH.DeviceCollisions)
 
-		// Pricing
-		r.Get("/pricing", fareH.ListActivePricing)
-		r.Get("/pricing/{vehicle_type_code}", fareH.GetActivePricingByType)
-		r.Get("/pricing/{vehicle_type_code}/history", fareH.GetPricingHistory)
-		r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
+			// Live rides
+			r.Get("/rides/live/stats", adminH.LiveRidesStats)
+			r.Get("/rides/live", adminH.ListLiveRides)
+			r.Get("/rides/live/{id}", adminH.GetLiveRide)
+			r.Post("/rides/live/{id}/intervene", adminH.InterveneRide)
 
-		// Negotiations
-		r.Get("/negotiations/stats", adminH.NegotiationsStats)
-		r.Get("/negotiations", adminH.ListNegotiations)
-		r.Get("/negotiations/{id}", adminH.GetNegotiation)
+			// All rides (history)
+			r.Get("/rides", adminH.ListRides)
+			r.Get("/rides/{id}", adminH.GetRide)
 
-		// Revenue
-		r.Get("/revenue", adminH.Revenue)
-		r.Get("/revenue/kpis", adminH.RevenueKPIs)
-		r.Get("/revenue/transactions", adminH.ListTransactions)
-		r.Post("/revenue/payouts/disburse", adminH.DisbursePayouts)
+			// Negotiations
+			r.Get("/negotiations/stats", adminH.NegotiationsStats)
+			r.Get("/negotiations", adminH.ListNegotiations)
+			r.Get("/negotiations/{id}", adminH.GetNegotiation)
 
-		// Analytics
-		r.Get("/analytics/overview", anaH.Overview)
-		r.Get("/analytics/rides/daily", anaH.DailyRides)
-		r.Get("/analytics/rides/weekly", anaH.WeeklyRides)
-		r.Get("/analytics/revenue/breakdown", anaH.RevenueBreakdown)
-		r.Get("/analytics/drivers/performance", anaH.DriverPerformance)
-		r.Get("/analytics/negotiation/stats", anaH.NegotiationStats)
-		r.Get("/analytics/heatmap", anaH.Heatmap)
-		r.Get("/analytics/heatmap/zones", anaH.HeatmapZones)
-		r.Get("/analytics/cancellations", anaH.Cancellations)
-		r.Get("/analytics/funnel", anaH.Funnel)
-		r.Get("/analytics/vehicle-mix", anaH.VehicleMix)
-		r.Get("/analytics/activity-heatmap", anaH.ActivityHeatmap)
-		r.Get("/analytics/satisfaction", anaH.Satisfaction)
+			// Safety incidents
+			r.Get("/incidents/stats", incidentH.Stats)
+			r.Get("/incidents", incidentH.List)
+			r.Post("/incidents", incidentH.Create)
+			r.Get("/incidents/{id}", incidentH.Get)
+			r.Patch("/incidents/{id}/status", incidentH.UpdateStatus)
+			r.Post("/incidents/{id}/acknowledge", incidentH.Acknowledge)
+			r.Post("/incidents/{id}/escalate", incidentH.Escalate)
+			r.Post("/incidents/{id}/resolve", incidentH.Resolve)
+			r.Post("/incidents/{id}/message", incidentH.Message)
 
-		// Safety incidents
-		r.Get("/incidents/stats", incidentH.Stats)
-		r.Get("/incidents", incidentH.List)
-		r.Post("/incidents", incidentH.Create)
-		r.Get("/incidents/{id}", incidentH.Get)
-		r.Patch("/incidents/{id}/status", incidentH.UpdateStatus)
-		r.Post("/incidents/{id}/acknowledge", incidentH.Acknowledge)
-		r.Post("/incidents/{id}/escalate", incidentH.Escalate)
-		r.Post("/incidents/{id}/resolve", incidentH.Resolve)
-		r.Post("/incidents/{id}/message", incidentH.Message)
+			// Support tickets
+			r.Get("/support/tickets/stats", ticketH.Stats)
+			r.Get("/support/tickets", ticketH.List)
+			r.Post("/support/tickets", ticketH.Create)
+			r.Get("/support/tickets/{id}", ticketH.Get)
+			r.Post("/support/tickets/{id}/reply", ticketH.Reply)
+			r.Post("/support/tickets/{id}/assign", ticketH.Assign)
+			r.Post("/support/tickets/{id}/resolve", ticketH.Resolve)
+			r.Patch("/support/tickets/{id}", ticketH.Patch)
+			// Keep old paths for compatibility
+			r.Get("/tickets", ticketH.List)
+			r.Post("/tickets", ticketH.Create)
+			r.Get("/tickets/{id}", ticketH.Get)
+			r.Post("/tickets/{id}/reply", ticketH.Reply)
+			r.Post("/tickets/{id}/assign", ticketH.Assign)
+			r.Post("/tickets/{id}/resolve", ticketH.Resolve)
 
-		// Support tickets
-		r.Get("/support/tickets/stats", ticketH.Stats)
-		r.Get("/support/tickets", ticketH.List)
-		r.Post("/support/tickets", ticketH.Create)
-		r.Get("/support/tickets/{id}", ticketH.Get)
-		r.Post("/support/tickets/{id}/reply", ticketH.Reply)
-		r.Post("/support/tickets/{id}/assign", ticketH.Assign)
-		r.Post("/support/tickets/{id}/resolve", ticketH.Resolve)
-		r.Patch("/support/tickets/{id}", ticketH.Patch)
-		// Keep old paths for compatibility
-		r.Get("/tickets", ticketH.List)
-		r.Post("/tickets", ticketH.Create)
-		r.Get("/tickets/{id}", ticketH.Get)
-		r.Post("/tickets/{id}/reply", ticketH.Reply)
-		r.Post("/tickets/{id}/assign", ticketH.Assign)
-		r.Post("/tickets/{id}/resolve", ticketH.Resolve)
+			// Inbox
+			r.Get("/inbox/stats", inboxH.Stats)
+			r.Get("/inbox", inboxH.List)
+			r.Get("/inbox/{id}", inboxH.Get)
+			r.Post("/inbox/{id}/reply", inboxH.Reply)
+			r.Patch("/inbox/{id}", inboxH.UpdateStatus)
+			r.Delete("/inbox/{id}", inboxH.Delete)
+			r.Post("/inbox/{id}/archive", inboxH.Archive)
+			r.Post("/inbox/{id}/spam", inboxH.Spam)
 
-		// Inbox
-		r.Get("/inbox/stats", inboxH.Stats)
-		r.Get("/inbox", inboxH.List)
-		r.Get("/inbox/{id}", inboxH.Get)
-		r.Post("/inbox/{id}/reply", inboxH.Reply)
-		r.Patch("/inbox/{id}", inboxH.UpdateStatus)
-		r.Delete("/inbox/{id}", inboxH.Delete)
-		r.Post("/inbox/{id}/archive", inboxH.Archive)
-		r.Post("/inbox/{id}/spam", inboxH.Spam)
+			// Account Assist tools (clear OTP lockouts, clear GPS flags, etc.)
+			r.Post("/customers/{id}/clear-otp-lockout", adminH.ClearOTPLockout)
+			r.Post("/drivers/{id}/clear-gps-flags", adminH.ClearGPSFlags)
+			r.Post("/users/{id}/clear-device-collision", adminH.ClearDeviceCollisionFlag)
+			r.Get("/users/{id}/timeline", adminH.GetAccountTimeline)
+		})
 
-		// Reports
-		r.Get("/reports/stats", reportH.Stats)
-		r.Get("/reports", reportH.List)
-		r.Post("/reports", reportH.Generate)
-		r.Post("/reports/generate", reportH.Generate)
-		r.Get("/reports/scheduled", reportH.ListScheduled)
-		r.Post("/reports/scheduled", reportH.CreateScheduled)
-		r.Post("/reports/scheduled/{id}/toggle", reportH.ToggleScheduled)
-		r.Get("/reports/{id}", reportH.Get)
-		r.Get("/reports/{id}/download", reportH.Download)
-		r.Delete("/reports/{id}", reportH.Delete)
-		r.Delete("/reports/{id}", reportH.Delete)
+		// --- Finance Bucket (Super Admin, Finance Manager, Analytics Staff) ---
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager, adminrole.AnalyticsStaff))
 
-		// Bonuses — admin CRUD for bonus tiers
-		r.Get("/bonuses/tiers", bonusH.AdminListTiers)
-		r.Post("/bonuses/tiers", bonusH.AdminCreateTier)
-		r.Delete("/bonuses/tiers/{tierID}", bonusH.AdminDeactivateTier)
-		r.Put("/bonuses/tiers/{tierID}/activate", bonusH.AdminActivateTier)
+			// Revenue (read)
+			r.Get("/revenue", adminH.Revenue)
+			r.Get("/revenue/kpis", adminH.RevenueKPIs)
+			r.Get("/revenue/transactions", adminH.ListTransactions)
 
-		// Packages — admin CRUD
-		r.Get("/packages", pkgH.AdminListPackages)
-		r.Post("/packages", pkgH.AdminCreatePackage)
-		r.Patch("/packages/{packageID}", pkgH.AdminUpdatePackage)
-		r.Delete("/packages/{packageID}", pkgH.AdminDeactivatePackage)
-		r.Put("/packages/{packageID}/activate", pkgH.AdminActivatePackage)
+			// Analytics
+			r.Get("/analytics/overview", anaH.Overview)
+			r.Get("/analytics/rides/daily", anaH.DailyRides)
+			r.Get("/analytics/rides/weekly", anaH.WeeklyRides)
+			r.Get("/analytics/revenue/breakdown", anaH.RevenueBreakdown)
+			r.Get("/analytics/drivers/performance", anaH.DriverPerformance)
+			r.Get("/analytics/negotiation/stats", anaH.NegotiationStats)
+			r.Get("/analytics/heatmap", anaH.Heatmap)
+			r.Get("/analytics/heatmap/zones", anaH.HeatmapZones)
+			r.Get("/analytics/cancellations", anaH.Cancellations)
+			r.Get("/analytics/funnel", anaH.Funnel)
+			r.Get("/analytics/vehicle-mix", anaH.VehicleMix)
+			r.Get("/analytics/activity-heatmap", anaH.ActivityHeatmap)
+			r.Get("/analytics/satisfaction", anaH.Satisfaction)
 
-		// Settings
-		r.Get("/settings", settingsH.GetAll)
-		r.Put("/settings/commission", settingsH.UpdateCommission)
-		r.Put("/settings/negotiation", settingsH.UpdateNegotiation)
-		r.Put("/settings/fares", settingsH.UpdateFares)
-		r.Put("/settings/integrations", settingsH.UpdateIntegrations)
-		r.Put("/settings/notifications", settingsH.UpdateNotifications)
-		r.Post("/settings/regions", settingsH.CreateRegion)
-		r.Put("/settings/regions/{id}", settingsH.UpdateRegion)
-		r.Patch("/settings/regions/{id}", settingsH.UpdateRegion)
-		r.Delete("/settings/regions/{id}", settingsH.DeleteRegion)
+			// Reports
+			r.Get("/reports/stats", reportH.Stats)
+			r.Get("/reports", reportH.List)
+			r.Post("/reports", reportH.Generate)
+			r.Post("/reports/generate", reportH.Generate)
+			r.Get("/reports/scheduled", reportH.ListScheduled)
+			r.Post("/reports/scheduled", reportH.CreateScheduled)
+			r.Post("/reports/scheduled/{id}/toggle", reportH.ToggleScheduled)
+			r.Get("/reports/{id}", reportH.Get)
+			r.Get("/reports/{id}/download", reportH.Download)
+			r.Delete("/reports/{id}", reportH.Delete)
+		})
 
-		// Team / admin accounts
-		r.Get("/team", teamH.List)
-		r.Post("/team/invite", teamH.Invite)
-		r.Get("/team/roles", teamH.ListRoles)
-		r.Post("/team/roles", teamH.CreateRole)
-		r.Patch("/team/roles/{roleId}", teamH.UpdateRoleByID)
-		r.Delete("/team/roles/{roleId}", teamH.DeleteRoleByID)
-		r.Post("/team/members/{id}/role", teamH.UpdateRole)
-		r.Post("/team/members/{id}/suspend", teamH.Suspend)
-		r.Post("/team/members/{id}/reinstate", teamH.Reinstate)
-		r.Post("/team/members/{id}/remove", teamH.Remove)
-		r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+		// --- Finance Write Bucket (Super Admin, Finance Manager) ---
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager))
+
+			r.Post("/revenue/payouts/disburse", adminH.DisbursePayouts)
+		})
+
+		// --- Super Admin Only ---
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireAdminRole(adminrole.SuperAdmin))
+
+			// Pricing
+			r.Get("/pricing", fareH.ListActivePricing)
+			r.Get("/pricing/{vehicle_type_code}", fareH.GetActivePricingByType)
+			r.Get("/pricing/{vehicle_type_code}/history", fareH.GetPricingHistory)
+			r.Post("/pricing/{vehicle_type_code}", fareH.CreatePricing)
+
+			// Settings
+			r.Get("/settings", settingsH.GetAll)
+			r.Put("/settings/commission", settingsH.UpdateCommission)
+			r.Put("/settings/negotiation", settingsH.UpdateNegotiation)
+			r.Put("/settings/fares", settingsH.UpdateFares)
+			r.Put("/settings/integrations", settingsH.UpdateIntegrations)
+			r.Put("/settings/notifications", settingsH.UpdateNotifications)
+			r.Post("/settings/regions", settingsH.CreateRegion)
+			r.Put("/settings/regions/{id}", settingsH.UpdateRegion)
+			r.Patch("/settings/regions/{id}", settingsH.UpdateRegion)
+			r.Delete("/settings/regions/{id}", settingsH.DeleteRegion)
+
+			// Team / admin accounts
+			r.Get("/team", teamH.List)
+			r.Post("/team/invite", teamH.Invite)
+			r.Get("/team/roles", teamH.ListRoles)
+			r.Post("/team/roles", teamH.CreateRole)
+			r.Patch("/team/roles/{roleId}", teamH.UpdateRoleByID)
+			r.Delete("/team/roles/{roleId}", teamH.DeleteRoleByID)
+			r.Post("/team/members/{id}/role", teamH.UpdateRole)
+			r.Post("/team/members/{id}/suspend", teamH.Suspend)
+			r.Post("/team/members/{id}/reinstate", teamH.Reinstate)
+			// r.Post("/team/members/{id}/remove", teamH.Remove) REMOVED - suspend/reinstate only
+			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+
+			// Audit Log
+			r.Get("/audit", teamH.ListAuditLog)
+
+			// Packages admin CRUD
+			r.Get("/packages", pkgH.AdminListPackages)
+			r.Post("/packages", pkgH.AdminCreatePackage)
+			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
+			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
+			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
+
+			// Bonuses — admin CRUD for bonus tiers
+			r.Get("/bonuses/tiers", bonusH.AdminListTiers)
+			r.Post("/bonuses/tiers", bonusH.AdminCreateTier)
+			r.Delete("/bonuses/tiers/{tierID}", bonusH.AdminDeactivateTier)
+			r.Put("/bonuses/tiers/{tierID}/activate", bonusH.AdminActivateTier)
+		})
 	})
 
 	// ── WebSocket ─────────────────────────────────────────────────────────────
@@ -982,7 +1011,7 @@ const swaggerHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Taravelis API - Swagger UI</title>
+  <title>Rides API - Swagger UI</title>
   <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
   <style>
     html { box-sizing: border-box; overflow-y: scroll; }

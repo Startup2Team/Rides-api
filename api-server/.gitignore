@@ -25,6 +25,7 @@ logs/
 .cache/
 *.log
 *.env
+
 # Local pgAdmin dev artifacts (contains a password)
 pgadmin-pgpass
 pgadmin-servers.json

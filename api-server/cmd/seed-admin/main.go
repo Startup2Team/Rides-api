@@ -2,7 +2,7 @@
 // Run once after starting the server for the first time.
 //
 // Usage:
-//   go run ./cmd/seed-admin --email admin@taravelis.com --password Admin1234!
+//   go run ./cmd/seed-admin --email admin@rides.com --password Admin1234!
 //
 // The password must be at least 8 characters.
 // If the email already exists, the command exits cleanly without error.
@@ -22,7 +22,7 @@ import (
 )
 
 func main() {
-	email := flag.String("email", "admin@taravelis.com", "Admin email address")
+	email := flag.String("email", "admin@rides.com", "Admin email address")
 	name := flag.String("name", "Super Admin", "Admin display name")
 	password := flag.String("password", "", "Admin password (min 8 chars)")
 	flag.Parse()

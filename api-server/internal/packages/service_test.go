@@ -31,18 +31,6 @@ type mockRepo struct {
 func (m *mockRepo) ListPackages(_ context.Context, _ string) ([]*packages.Package, error) {
 	return nil, nil
 }
-func (m *mockRepo) ListAllPackages(_ context.Context) ([]*packages.Package, error) {
-	return nil, nil
-}
-func (m *mockRepo) CreatePackage(_ context.Context, _ *packages.CreatePackageInput) (*packages.Package, error) {
-	return nil, nil
-}
-func (m *mockRepo) UpdatePackage(_ context.Context, _ string, _ *packages.UpdatePackageInput) (*packages.Package, error) {
-	return nil, nil
-}
-func (m *mockRepo) SetPackageActive(_ context.Context, _ string, _ bool) error {
-	return nil
-}
 func (m *mockRepo) GetPackageByID(_ context.Context, _ string) (*packages.Package, error) {
 	return m.pkgByID, m.pkgByIDErr
 }
@@ -67,6 +55,21 @@ func (m *mockRepo) PurchasePackage(_ context.Context, _, _, _ string, _, _ int, 
 func (m *mockRepo) GrantFreeTrialIfEligible(_ context.Context, _, _ string) error {
 	m.grantCalled++
 	return m.grantErr
+}
+func (m *mockRepo) AdminListPackages(_ context.Context) ([]*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) AdminCreatePackage(_ context.Context, _, _ string, _, _, _, _ int, _ bool) (*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) AdminUpdatePackage(_ context.Context, _ string, _ *string, _, _, _, _ *int) (*packages.Package, error) {
+	return nil, nil
+}
+func (m *mockRepo) AdminTogglePackage(_ context.Context, _ string, _ bool) error {
+	return nil
+}
+func (m *mockRepo) AdminDeletePackage(_ context.Context, _ string) error {
+	return nil
 }
 
 func newSvc(repo packages.Repo) *packages.Service {

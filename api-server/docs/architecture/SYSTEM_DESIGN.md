@@ -2,7 +2,7 @@
 
 ## Architecture Style
 
-Taravelis backend uses a modular monolith architecture.
+Rides backend uses a modular monolith architecture.
 
 Why this fits the MVP:
 

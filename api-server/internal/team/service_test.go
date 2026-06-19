@@ -19,25 +19,28 @@ import (
 // ── Mock repo ─────────────────────────────────────────────────────────────
 
 type mockRepo struct {
-	findByEmailFn     func(ctx context.Context, email string) (*AdminAccount, *string, error)
-	findByIDFn        func(ctx context.Context, id string) (*AdminAccount, *string, error)
-	touchLastActiveFn func(ctx context.Context, id string)
-	listAdminsFn      func(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
-	inviteFn          func(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
-	updateRoleFn      func(ctx context.Context, id, roleID string) error
-	updateStatusFn    func(ctx context.Context, id, status string) error
-	deleteFn          func(ctx context.Context, id string) error
-	updateNameFn      func(ctx context.Context, id, name string) error
-	setPasswordFn     func(ctx context.Context, id, hash string) error
-	getTOTPSecretFn   func(ctx context.Context, id string) (*string, error)
-	saveTOTPFn        func(ctx context.Context, id, secret string) error
-	clearTOTPFn       func(ctx context.Context, id string) error
-	getBackupCodesFn  func(ctx context.Context, id string) ([]BackupCode, error)
-	saveBackupCodesFn func(ctx context.Context, id string, codes []BackupCode) error
-	listRolesFn       func(ctx context.Context) ([]*Role, error)
-	createRoleFn      func(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
-	updateRoleByIDFn  func(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
-	deleteRoleByIDFn  func(ctx context.Context, roleID string) error
+	findByEmailFn       func(ctx context.Context, email string) (*AdminAccount, *string, error)
+	findByIDFn          func(ctx context.Context, id string) (*AdminAccount, *string, error)
+	touchLastActiveFn   func(ctx context.Context, id string)
+	listAdminsFn        func(ctx context.Context, status, roleID, search string) ([]*AdminAccount, error)
+	inviteFn            func(ctx context.Context, name, email, roleID string) (*AdminAccount, error)
+	updateRoleFn        func(ctx context.Context, id, roleID string) error
+	updateStatusFn      func(ctx context.Context, id, status string) error
+	deleteFn            func(ctx context.Context, id string) error
+	updateNameFn        func(ctx context.Context, id, name string) error
+	setPasswordFn       func(ctx context.Context, id, hash string) error
+	getTOTPSecretFn     func(ctx context.Context, id string) (*string, error)
+	saveTOTPFn          func(ctx context.Context, id, secret string) error
+	clearTOTPFn         func(ctx context.Context, id string) error
+	getBackupCodesFn    func(ctx context.Context, id string) ([]BackupCode, error)
+	saveBackupCodesFn   func(ctx context.Context, id string, codes []BackupCode) error
+	listRolesFn         func(ctx context.Context) ([]*Role, error)
+	createRoleFn        func(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
+	updateRoleByIDFn    func(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
+	deleteRoleByIDFn    func(ctx context.Context, roleID string) error
+	logActionFn         func(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error
+	getMemberActivityFn func(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
+	listAuditLogFn      func(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error)
 }
 
 func (m *mockRepo) FindByEmail(ctx context.Context, email string) (*AdminAccount, *string, error) {
@@ -152,6 +155,24 @@ func (m *mockRepo) DeleteRoleByID(ctx context.Context, roleID string) error {
 		return m.deleteRoleByIDFn(ctx, roleID)
 	}
 	return nil
+}
+func (m *mockRepo) LogAction(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error {
+	if m.logActionFn != nil {
+		return m.logActionFn(ctx, adminID, action, targetType, targetID, detail, ip)
+	}
+	return nil
+}
+func (m *mockRepo) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error) {
+	if m.getMemberActivityFn != nil {
+		return m.getMemberActivityFn(ctx, adminID, limit)
+	}
+	return nil, nil
+}
+func (m *mockRepo) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error) {
+	if m.listAuditLogFn != nil {
+		return m.listAuditLogFn(ctx, actor, action, targetType, from, to, limit, offset)
+	}
+	return nil, 0, nil
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -420,9 +441,11 @@ func TestLogin_With2FA_ReturnsPreAuthToken(t *testing.T) {
 			return &totpSecret, nil
 		},
 	}
+
 	// 2FA is only enforced in production (dev skips it for testing ergonomics),
 	// so exercise the pre-auth path with a production config.
 	svc := newTestServiceProduction(repo, newTestRedis(t))
+
 	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
 	require.NoError(t, err)
 	assert.True(t, result.TwoFactorRequired)

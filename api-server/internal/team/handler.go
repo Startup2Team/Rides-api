@@ -3,19 +3,30 @@ package team
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
 	mw "github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/pkg/audit"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
 type Handler struct {
-	svc TeamService
+	svc   TeamService
+	audit *audit.Logger
 }
 
-func NewHandler(svc TeamService) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc TeamService, auditLog *audit.Logger) *Handler {
+	return &Handler{svc: svc, audit: auditLog}
+}
+
+func adminCtx(r *http.Request) (id, role string) {
+	claims := mw.GetClaims(r)
+	if claims == nil {
+		return "", ""
+	}
+	return claims.UserID, claims.AdminRole
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────
@@ -256,6 +267,8 @@ func (h *Handler) Invite(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "admin.invite", "admin", admin.ID, "Invited new admin: "+admin.Email, map[string]any{"role_id": body.RoleID})
 	respond.Created(w, admin)
 }
 
@@ -283,6 +296,8 @@ func (h *Handler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "admin.role_changed", "admin", id, "Changed admin role", map[string]any{"new_role_id": body.RoleID})
 	respond.NoContent(w)
 }
 
@@ -298,6 +313,8 @@ func (h *Handler) Suspend(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "admin.suspend", "admin", id, "Suspended admin account", nil)
 	respond.NoContent(w)
 }
 
@@ -308,6 +325,8 @@ func (h *Handler) Reinstate(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "admin.reinstate", "admin", id, "Reinstated admin account", nil)
 	respond.NoContent(w)
 }
 
@@ -476,4 +495,30 @@ func (h *Handler) DeleteRoleByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, map[string]string{"message": "deleted"})
+}
+
+// GET /api/v1/admin/audit
+// Super Admin only. Filters: actor, action, target_type, from, to (RFC3339), limit, offset.
+func (h *Handler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 50
+	offset := 0
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	if o := q.Get("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	entries, total, err := h.svc.ListAuditLog(r.Context(),
+		q.Get("actor"), q.Get("action"), q.Get("target_type"), q.Get("from"), q.Get("to"),
+		limit, offset)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"entries": entries, "total": total, "limit": limit, "offset": offset})
 }

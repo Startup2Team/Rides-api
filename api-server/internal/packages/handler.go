@@ -3,6 +3,7 @@ package packages
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/go-playground/validator/v10"
 
 	"github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
@@ -24,11 +26,12 @@ type BonusAfterPurchase interface {
 // Handler exposes package and credit HTTP endpoints.
 type Handler struct {
 	svc   *Service
+	audit *audit.Logger
 	bonus BonusAfterPurchase // optional; nil = bonus disabled
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, auditLog *audit.Logger) *Handler {
+	return &Handler{svc: svc, audit: auditLog}
 }
 
 // SetBonus wires the bonus service so purchases automatically trigger bonus grants.
@@ -109,6 +112,15 @@ func (h *Handler) GetCredits(w http.ResponseWriter, r *http.Request) {
 
 // ── Admin endpoints ───────────────────────────────────────────────────────────
 
+// adminCtx pulls the admin id + role off the request claims for audit entries.
+func adminCtx(r *http.Request) (id, role string) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		return "", ""
+	}
+	return claims.UserID, claims.AdminRole
+}
+
 // GET /api/v1/admin/packages
 func (h *Handler) AdminListPackages(w http.ResponseWriter, r *http.Request) {
 	pkgs, err := h.svc.AdminListPackages(r.Context())
@@ -116,68 +128,120 @@ func (h *Handler) AdminListPackages(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]interface{}{"packages": pkgs})
+	respond.OK(w, pkgs)
 }
 
 // POST /api/v1/admin/packages
-// Body: { "name": "Moto Starter", "vehicle_type_code": "MOTO_BIKE",
-//
-//	"ride_count": 20, "validity_days": 30, "price_rwf": 600,
-//	"cost_per_ride_rwf": 30, "is_promotional": false }
 func (h *Handler) AdminCreatePackage(w http.ResponseWriter, r *http.Request) {
-	var input CreatePackageInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	var body struct {
+		Name            string `json:"name" validate:"required"`
+		VehicleTypeCode string `json:"vehicle_type_code" validate:"required"`
+		RideCount       int    `json:"ride_count" validate:"required,min=1"`
+		BonusRides      int    `json:"bonus_rides" validate:"min=0"`
+		ValidityDays    int    `json:"validity_days" validate:"required,min=1"`
+		PriceRWF        int    `json:"price_rwf" validate:"min=0"`
+		IsPromotional   bool   `json:"is_promotional"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-	pkg, err := h.svc.AdminCreatePackage(r.Context(), &input)
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	pkg, err := h.svc.AdminCreatePackage(r.Context(), body.Name, body.VehicleTypeCode, body.RideCount, body.BonusRides, body.ValidityDays, body.PriceRWF, body.IsPromotional)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
+
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "package.create", "ride_packages", pkg.ID, fmt.Sprintf("Created package %s (price: %d RWF)", pkg.Name, pkg.PriceRWF), map[string]any{"package": pkg})
+
 	respond.Created(w, pkg)
 }
 
-// PATCH /api/v1/admin/packages/{packageID}
-// Body: any subset of { "name", "ride_count", "validity_days", "price_rwf",
-//
-//	"cost_per_ride_rwf", "is_promotional" }
+// PATCH /api/v1/admin/packages/{id}
 func (h *Handler) AdminUpdatePackage(w http.ResponseWriter, r *http.Request) {
-	packageID := chi.URLParam(r, "packageID")
-	if packageID == "" {
-		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "packageID required")
-		return
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Name         *string `json:"name"`
+		RideCount    *int    `json:"ride_count"`
+		BonusRides   *int    `json:"bonus_rides"`
+		ValidityDays *int    `json:"validity_days"`
+		PriceRWF     *int    `json:"price_rwf"`
 	}
-	var input UpdatePackageInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-	pkg, err := h.svc.AdminUpdatePackage(r.Context(), packageID, &input)
+
+	pkg, err := h.svc.AdminUpdatePackage(r.Context(), id, body.Name, body.RideCount, body.BonusRides, body.ValidityDays, body.PriceRWF)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
+
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "package.update", "ride_packages", pkg.ID, fmt.Sprintf("Updated package %s", pkg.Name), map[string]any{"updates": body})
+
 	respond.OK(w, pkg)
 }
 
-// DELETE /api/v1/admin/packages/{packageID}
-// Soft-deactivates the package (drivers can no longer see or buy it).
-func (h *Handler) AdminDeactivatePackage(w http.ResponseWriter, r *http.Request) {
-	packageID := chi.URLParam(r, "packageID")
-	if err := h.svc.AdminDeactivatePackage(r.Context(), packageID); err != nil {
+// POST /api/v1/admin/packages/{id}/toggle
+func (h *Handler) AdminTogglePackage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		IsActive bool `json:"is_active"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+
+	err := h.svc.AdminTogglePackage(r.Context(), id, body.IsActive)
+	if err != nil {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]string{"status": "deactivated"})
+
+	adminID, role := adminCtx(r)
+	action := "package.deactivate"
+	if body.IsActive {
+		action = "package.activate"
+	}
+	h.audit.Record(r.Context(), adminID, role, action, "ride_packages", id, fmt.Sprintf("Toggled package active status to %t", body.IsActive), map[string]any{"is_active": body.IsActive})
+
+	respond.OK(w, map[string]string{"status": "success"})
 }
 
-// PUT /api/v1/admin/packages/{packageID}/activate
-func (h *Handler) AdminActivatePackage(w http.ResponseWriter, r *http.Request) {
-	packageID := chi.URLParam(r, "packageID")
-	if err := h.svc.AdminActivatePackage(r.Context(), packageID); err != nil {
+// DELETE /api/v1/admin/packages/{id}
+func (h *Handler) AdminDeletePackage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "id path parameter is required")
+		return
+	}
+
+	// Fetch name first for audit logging
+	pkg, err := h.svc.GetPackageByID(r.Context(), id)
+	var pkgName string
+	if err == nil && pkg != nil {
+		pkgName = pkg.Name
+	} else {
+		pkgName = id
+	}
+
+	err = h.svc.AdminDeletePackage(r.Context(), id)
+	if err != nil {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]string{"status": "activated"})
+
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "package.delete", "ride_packages", id, fmt.Sprintf("Soft-deleted package %s", pkgName), map[string]any{"package_id": id})
+
+	respond.OK(w, map[string]string{"status": "success"})
 }

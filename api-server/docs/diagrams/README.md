@@ -9,7 +9,7 @@ flowchart LR
   Customer["Customer Mobile App"]
   Driver["Driver Mobile App"]
   Admin["Admin Dashboard"]
-  API["Taravelis Go API"]
+  API["Rides Go API"]
   Postgres[("PostgreSQL + PostGIS")]
   Redis[("Redis")]
   ObjectStore[("MinIO / CDN")]

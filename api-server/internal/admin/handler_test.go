@@ -9,11 +9,13 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/workspace/ride-platform/internal/admin"
 	mw "github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -53,6 +55,10 @@ type mockSvc struct {
 	listLiveRidesFn         func(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error)
 	getLiveRideFn           func(ctx context.Context, rideID string) (map[string]interface{}, error)
 	interveneRideFn         func(ctx context.Context, rideID, action, reason string) error
+	clearGPSFlagsFn         func(ctx context.Context, profileID string) error
+	clearOTPLockoutFn       func(ctx context.Context, userID string) error
+	clearDeviceCollisionFn  func(ctx context.Context, userID, deviceID string) error
+	getAccountTimelineFn    func(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
@@ -172,6 +178,30 @@ func (m *mockSvc) UpsertDriverDocument(ctx context.Context, profileID, documentT
 func (m *mockSvc) InterveneRide(ctx context.Context, rideID, action, reason string) error {
 	return m.interveneRideFn(ctx, rideID, action, reason)
 }
+func (m *mockSvc) ClearGPSFlags(ctx context.Context, profileID string) error {
+	if m.clearGPSFlagsFn != nil {
+		return m.clearGPSFlagsFn(ctx, profileID)
+	}
+	return nil
+}
+func (m *mockSvc) ClearOTPLockout(ctx context.Context, userID string) error {
+	if m.clearOTPLockoutFn != nil {
+		return m.clearOTPLockoutFn(ctx, userID)
+	}
+	return nil
+}
+func (m *mockSvc) ClearDeviceCollisionFlag(ctx context.Context, userID, deviceID string) error {
+	if m.clearDeviceCollisionFn != nil {
+		return m.clearDeviceCollisionFn(ctx, userID, deviceID)
+	}
+	return nil
+}
+func (m *mockSvc) GetAccountTimeline(ctx context.Context, userID string, limit int) (map[string]interface{}, error) {
+	if m.getAccountTimelineFn != nil {
+		return m.getAccountTimelineFn(ctx, userID, limit)
+	}
+	return map[string]interface{}{}, nil
+}
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -280,6 +310,16 @@ func noAuthRouter(h *admin.Handler) *chi.Mux {
 	return r
 }
 
+type dummyDB struct{}
+
+func (d dummyDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func newAdminHandler(svc admin.AdminService, auth admin.AuthService, env string) *admin.Handler {
+	return admin.NewHandler(svc, auth, audit.New(dummyDB{}), env)
+}
+
 const adminID = "admin-uuid-001"
 
 // ── GROUP G: Admin Drivers ────────────────────────────────────────────────
@@ -290,7 +330,7 @@ func TestListDrivers_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"id": "d1", "full_name": "Alice"}}, 1, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers", nil)
 	rr := httptest.NewRecorder()
@@ -307,7 +347,7 @@ func TestListDrivers_HappyPath(t *testing.T) {
 }
 
 func TestListDrivers_NoAuth(t *testing.T) {
-	r := noAuthRouter(admin.NewHandler(&mockSvc{}, nil, "test"))
+	r := noAuthRouter(newAdminHandler(&mockSvc{}, nil, "test"))
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -322,7 +362,7 @@ func TestListDrivers_StatusFilter(t *testing.T) {
 			return nil, 0, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers?status=PENDING_REVIEW", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -336,7 +376,7 @@ func TestDriverOverview_HappyPath(t *testing.T) {
 			return map[string]interface{}{"total": 50, "active": 30}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers/overview", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -352,7 +392,7 @@ func TestGetDriver_HappyPath(t *testing.T) {
 			return map[string]interface{}{"id": profileID, "full_name": "Bob"}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers/profile-abc", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -365,7 +405,7 @@ func TestGetDriver_NotFound(t *testing.T) {
 			return nil, apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers/unknown-id", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -381,7 +421,7 @@ func TestApproveDriver_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/approve", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -391,7 +431,7 @@ func TestApproveDriver_HappyPath(t *testing.T) {
 }
 
 func TestApproveDriver_NoAuth(t *testing.T) {
-	r := noAuthRouter(admin.NewHandler(&mockSvc{}, nil, "test"))
+	r := noAuthRouter(newAdminHandler(&mockSvc{}, nil, "test"))
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/approve", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -404,7 +444,7 @@ func TestApproveDriver_SelfApprovalForbidden(t *testing.T) {
 			return apperrors.ErrSelfApproval
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/own-profile/approve", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -417,7 +457,7 @@ func TestApproveDriver_AlreadyApproved(t *testing.T) {
 			return apperrors.ErrConflict
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/approve", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -432,7 +472,7 @@ func TestRejectDriver_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/reject",
 		jsonBody(t, map[string]string{"reason": "incomplete documents"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -443,7 +483,7 @@ func TestRejectDriver_HappyPath(t *testing.T) {
 }
 
 func TestRejectDriver_NoAuth(t *testing.T) {
-	r := noAuthRouter(admin.NewHandler(&mockSvc{}, nil, "test"))
+	r := noAuthRouter(newAdminHandler(&mockSvc{}, nil, "test"))
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/reject",
 		jsonBody(t, map[string]string{"reason": "bad docs"}))
 	rr := httptest.NewRecorder()
@@ -459,7 +499,7 @@ func TestSuspendDriver_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/suspend",
 		jsonBody(t, map[string]interface{}{"reason": "fraud", "duration_hours": 48}))
 	req.Header.Set("Content-Type", "application/json")
@@ -471,7 +511,7 @@ func TestSuspendDriver_HappyPath(t *testing.T) {
 
 func TestSuspendDriver_MissingDuration(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/suspend",
 		jsonBody(t, map[string]interface{}{"reason": "fraud"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -481,7 +521,7 @@ func TestSuspendDriver_MissingDuration(t *testing.T) {
 }
 
 func TestSuspendDriver_NoAuth(t *testing.T) {
-	r := noAuthRouter(admin.NewHandler(&mockSvc{}, nil, "test"))
+	r := noAuthRouter(newAdminHandler(&mockSvc{}, nil, "test"))
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/suspend",
 		jsonBody(t, map[string]interface{}{"duration_hours": 24}))
 	rr := httptest.NewRecorder()
@@ -497,7 +537,7 @@ func TestReinstateDriver_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/profile-xyz/reinstate", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -511,7 +551,7 @@ func TestReinstateDriver_NotFound(t *testing.T) {
 			return apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/drivers/unknown/reinstate", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -526,7 +566,7 @@ func TestVerifyDriver_Approve(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/verify",
 		jsonBody(t, map[string]string{"action": "approve"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -538,7 +578,7 @@ func TestVerifyDriver_Approve(t *testing.T) {
 
 func TestVerifyDriver_RejectRequiresReason(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/verify",
 		jsonBody(t, map[string]string{"action": "reject"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -549,7 +589,7 @@ func TestVerifyDriver_RejectRequiresReason(t *testing.T) {
 
 func TestVerifyDriver_InvalidAction(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/verify",
 		jsonBody(t, map[string]string{"action": "delete"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -566,7 +606,7 @@ func TestUpdateDriverStatus_Suspend(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/status",
 		jsonBody(t, map[string]interface{}{"status": "Suspended", "duration_hours": 24}))
 	req.Header.Set("Content-Type", "application/json")
@@ -584,7 +624,7 @@ func TestUpdateDriverStatus_Reinstate(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/status",
 		jsonBody(t, map[string]string{"status": "Active"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -596,7 +636,7 @@ func TestUpdateDriverStatus_Reinstate(t *testing.T) {
 
 func TestUpdateDriverStatus_InvalidStatus(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/status",
 		jsonBody(t, map[string]string{"status": "Deleted"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -611,7 +651,7 @@ func TestUpdateDriver_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz",
 		jsonBody(t, map[string]interface{}{"vehicle_plate": "RAD 001 A"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -622,7 +662,7 @@ func TestUpdateDriver_HappyPath(t *testing.T) {
 
 func TestUpdateDriver_EmptyBody(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz",
 		jsonBody(t, map[string]interface{}{}))
 	req.Header.Set("Content-Type", "application/json")
@@ -635,7 +675,7 @@ func TestDeleteDriver_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		deleteDriverFn: func(_ context.Context, _ string) error { return nil },
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/drivers/profile-xyz", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -650,7 +690,7 @@ func TestListCustomers_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"id": "c1"}, {"id": "c2"}}, 2, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/customers", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -663,7 +703,7 @@ func TestListCustomers_HappyPath(t *testing.T) {
 }
 
 func TestListCustomers_NoAuth(t *testing.T) {
-	r := noAuthRouter(admin.NewHandler(&mockSvc{}, nil, "test"))
+	r := noAuthRouter(newAdminHandler(&mockSvc{}, nil, "test"))
 	req := httptest.NewRequest(http.MethodGet, "/admin/customers", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -676,7 +716,7 @@ func TestGetCustomer_HappyPath(t *testing.T) {
 			return map[string]interface{}{"id": userID, "full_name": "Test User"}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/customers/user-abc", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -689,7 +729,7 @@ func TestGetCustomer_NotFound(t *testing.T) {
 			return nil, apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/customers/unknown", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -704,7 +744,7 @@ func TestSuspendUser_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/users/user-abc/suspend",
 		jsonBody(t, map[string]int{"duration_hours": 72}))
 	req.Header.Set("Content-Type", "application/json")
@@ -716,7 +756,7 @@ func TestSuspendUser_HappyPath(t *testing.T) {
 
 func TestSuspendUser_MissingDuration(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/users/user-abc/suspend",
 		jsonBody(t, map[string]string{"reason": "spam"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -733,7 +773,7 @@ func TestReinstateUser_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/customers/user-abc/reinstate", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -745,7 +785,7 @@ func TestBanCustomer_HappyPath(t *testing.T) {
 	mock := &mockSvc{
 		banCustomerFn: func(_ context.Context, _, _ string) error { return nil },
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/customers/user-abc/ban",
 		jsonBody(t, map[string]string{"reason": "repeated fraud"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -756,7 +796,7 @@ func TestBanCustomer_HappyPath(t *testing.T) {
 
 func TestBanCustomer_MissingReason(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/customers/user-abc/ban",
 		jsonBody(t, map[string]string{}))
 	req.Header.Set("Content-Type", "application/json")
@@ -773,7 +813,7 @@ func TestListRides_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"id": "r1"}, {"id": "r2"}, {"id": "r3"}}, 3, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/rides", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -786,7 +826,7 @@ func TestListRides_HappyPath(t *testing.T) {
 }
 
 func TestListRides_NoAuth(t *testing.T) {
-	r := noAuthRouter(admin.NewHandler(&mockSvc{}, nil, "test"))
+	r := noAuthRouter(newAdminHandler(&mockSvc{}, nil, "test"))
 	req := httptest.NewRequest(http.MethodGet, "/admin/rides", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -799,7 +839,7 @@ func TestGetRide_HappyPath(t *testing.T) {
 			return map[string]interface{}{"id": rideID, "status": "COMPLETED"}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/rides/ride-abc", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -812,7 +852,7 @@ func TestGetRide_NotFound(t *testing.T) {
 			return nil, apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/rides/unknown", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -825,7 +865,7 @@ func TestListLiveRides_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"id": "lr1", "status": "IN_PROGRESS"}}, 1, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/rides/live", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -840,7 +880,7 @@ func TestInterveneRide_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/rides/live/ride-abc/intervene",
 		jsonBody(t, map[string]string{"action": "cancel", "reason": "admin intervention"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -852,7 +892,7 @@ func TestInterveneRide_HappyPath(t *testing.T) {
 
 func TestInterveneRide_MissingAction(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/rides/live/ride-abc/intervene",
 		jsonBody(t, map[string]string{"reason": "intervention"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -867,7 +907,7 @@ func TestInterveneRide_CompletedRide(t *testing.T) {
 			return apperrors.ErrInvalidTransition
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/rides/live/ride-abc/intervene",
 		jsonBody(t, map[string]string{"action": "cancel", "reason": "test"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -882,7 +922,7 @@ func TestGPSAnomalies_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"driver_id": "d1", "computed_speed_kmh": 250}}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/flags/gps-anomalies", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -895,7 +935,7 @@ func TestDeviceCollisions_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"device_id": "dev1", "user_count": 3}}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/flags/device-collisions", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -910,7 +950,7 @@ func TestListNegotiations_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"ride_id": "r1", "status": "Agreed"}}, 1, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/negotiations", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -923,7 +963,7 @@ func TestGetNegotiation_HappyPath(t *testing.T) {
 			return map[string]interface{}{"ride_id": rideID, "rounds": 2}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/negotiations/ride-abc", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -938,7 +978,7 @@ func TestRevenueKPIs_HappyPath(t *testing.T) {
 			return map[string]interface{}{"total_revenue_rwf": 500000, "period": period}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/revenue/kpis?period=week", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -949,7 +989,7 @@ func TestRevenueKPIs_HappyPath(t *testing.T) {
 }
 
 func TestRevenueKPIs_NoAuth(t *testing.T) {
-	r := noAuthRouter(admin.NewHandler(&mockSvc{}, nil, "test"))
+	r := noAuthRouter(newAdminHandler(&mockSvc{}, nil, "test"))
 	req := httptest.NewRequest(http.MethodGet, "/admin/revenue/kpis", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -964,7 +1004,7 @@ func TestRevenueKPIs_DefaultPeriod(t *testing.T) {
 			return map[string]interface{}{}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/revenue/kpis", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -978,7 +1018,7 @@ func TestListTransactions_HappyPath(t *testing.T) {
 			return []map[string]interface{}{{"id": "tx1", "amount_rwf": 3000}}, 1, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/revenue/transactions", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -993,7 +1033,7 @@ func TestRevenue_DefaultPeriod(t *testing.T) {
 			return map[string]interface{}{}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/revenue", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1007,7 +1047,7 @@ func TestDisbursePayouts_HappyPath(t *testing.T) {
 			return len(ids), 12000, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/revenue/payouts/disburse",
 		jsonBody(t, map[string]interface{}{"transactionIds": []string{"tx1", "tx2"}}))
 	req.Header.Set("Content-Type", "application/json")
@@ -1021,7 +1061,7 @@ func TestDisbursePayouts_HappyPath(t *testing.T) {
 
 func TestDisbursePayouts_EmptyList(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/revenue/payouts/disburse",
 		jsonBody(t, map[string]interface{}{"transactionIds": []string{}}))
 	req.Header.Set("Content-Type", "application/json")
@@ -1040,7 +1080,7 @@ func TestListUsers_DelegatesToListCustomers(t *testing.T) {
 			return []map[string]interface{}{{"id": "u1"}}, 1, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1056,7 +1096,7 @@ func TestUpdateCustomer_HappyPath(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/customers/user-abc",
 		jsonBody(t, map[string]string{"status": "Active", "notes": "reviewed"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -1072,7 +1112,7 @@ func TestUpdateCustomer_ServiceError(t *testing.T) {
 			return apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/customers/unknown",
 		jsonBody(t, map[string]string{"status": "Active"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -1087,7 +1127,7 @@ func TestGetLiveRide_HappyPath(t *testing.T) {
 			return map[string]interface{}{"id": rideID, "status": "IN_PROGRESS"}, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/rides/live/ride-abc", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1103,7 +1143,7 @@ func TestGetLiveRide_NotFound(t *testing.T) {
 			return nil, apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/rides/live/unknown", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1116,7 +1156,7 @@ func TestDriverOverview_ServiceError(t *testing.T) {
 			return nil, apperrors.ErrInternal
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers/overview", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1129,7 +1169,7 @@ func TestGPSAnomalies_ServiceError(t *testing.T) {
 			return nil, apperrors.ErrInternal
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/flags/gps-anomalies", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1142,7 +1182,7 @@ func TestDeviceCollisions_ServiceError(t *testing.T) {
 			return nil, apperrors.ErrInternal
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/flags/device-collisions", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1155,7 +1195,7 @@ func TestDeleteDriver_ServiceError(t *testing.T) {
 			return apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodDelete, "/admin/drivers/unknown", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1168,7 +1208,7 @@ func TestReinstateUser_ServiceError(t *testing.T) {
 			return apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/customers/unknown/reinstate", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1181,7 +1221,7 @@ func TestGetNegotiation_NotFound(t *testing.T) {
 			return nil, apperrors.ErrNotFound
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/negotiations/unknown", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1197,7 +1237,7 @@ func TestVerifyDriver_RejectWithReason(t *testing.T) {
 			return nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/verify",
 		jsonBody(t, map[string]string{"action": "reject", "reason": "missing license"}))
 	req.Header.Set("Content-Type", "application/json")
@@ -1209,7 +1249,7 @@ func TestVerifyDriver_RejectWithReason(t *testing.T) {
 
 func TestVerifyDriver_MissingAction(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/verify",
 		jsonBody(t, map[string]string{}))
 	req.Header.Set("Content-Type", "application/json")
@@ -1227,7 +1267,7 @@ func TestPaginate_CustomLimitOffset(t *testing.T) {
 			return nil, 0, nil
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/drivers?limit=10&offset=20", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1242,7 +1282,7 @@ func TestRevenueKPIs_ServiceError(t *testing.T) {
 			return nil, apperrors.ErrInternal
 		},
 	}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodGet, "/admin/revenue/kpis", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -1251,7 +1291,7 @@ func TestRevenueKPIs_ServiceError(t *testing.T) {
 
 func TestUpdateDriverStatus_MissingStatus(t *testing.T) {
 	mock := &mockSvc{}
-	r := newRouter(admin.NewHandler(mock, nil, "test"), adminID)
+	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/drivers/profile-xyz/status",
 		jsonBody(t, map[string]string{}))
 	req.Header.Set("Content-Type", "application/json")

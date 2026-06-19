@@ -1,4 +1,4 @@
-# Backend Testing Guide — Taravelis API
+# Backend Testing Guide — Rides API
 
 **Assignee:** @salomonPr  
 **Branch:** always pull from `dev` before starting  

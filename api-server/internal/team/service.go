@@ -17,12 +17,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/workspace/ride-platform/config"
+	"github.com/workspace/ride-platform/pkg/adminrole"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
 const (
-	totpIssuer       = "Taravelis Admin"
+	totpIssuer       = "Rides Admin"
 	preAuthTokenType = "pre_auth"
 	preAuthExpiry    = 15 * time.Minute
 	backupCodeCount  = 10
@@ -162,7 +163,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 		}, nil
 	}
 
-	token, err := s.issueAccessToken(ctx, admin.ID)
+	token, err := s.issueAccessToken(ctx, admin.ID, admin.RoleName)
 	if err != nil {
 		return nil, apperrors.ErrInternal
 	}
@@ -194,7 +195,7 @@ func (s *Service) Verify2FA(ctx context.Context, preAuthToken, code string) (*Lo
 		return nil, apperrors.ErrNotFound
 	}
 
-	token, err := s.issueAccessToken(ctx, adminID)
+	token, err := s.issueAccessToken(ctx, adminID, admin.RoleName)
 	if err != nil {
 		return nil, apperrors.ErrInternal
 	}
@@ -241,7 +242,7 @@ func (s *Service) VerifyBackupCode(ctx context.Context, preAuthToken, rawCode st
 		return nil, apperrors.ErrNotFound
 	}
 
-	token, err := s.issueAccessToken(ctx, adminID)
+	token, err := s.issueAccessToken(ctx, adminID, admin.RoleName)
 	if err != nil {
 		return nil, apperrors.ErrInternal
 	}
@@ -400,11 +401,14 @@ func (s *Service) ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, curren
 // ── JWT helpers ───────────────────────────────────────────────────────────
 
 // issueAccessToken creates a full admin access token and stores the session in Redis.
-func (s *Service) issueAccessToken(ctx context.Context, adminID string) (string, error) {
+// roleName is the human-readable role from admin_roles.name; it is converted to
+// the stable enum code (e.g. "Super Admin" → "SUPER_ADMIN") embedded in the JWT.
+func (s *Service) issueAccessToken(ctx context.Context, adminID, roleName string) (string, error) {
 	jti := uuid.NewString()
 	claims := jwt.MapClaims{
 		"user_id":    adminID,
 		"role_state": "ADMIN",
+		"admin_role": adminrole.FromRoleName(roleName),
 		"token_type": "access",
 		"jti":        jti,
 		"exp":        time.Now().Add(s.cfg.JWT.AccessExpiry).Unix(),
@@ -494,4 +498,37 @@ func generateBackupCodes() (plain []string, hashed []BackupCode, err error) {
 		hashed = append(hashed, BackupCode{Hash: string(h), Used: false})
 	}
 	return plain, hashed, nil
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────────
+
+// AuditEntry is one row from admin_audit_log.
+type AuditEntry struct {
+	ID         int64          `json:"id"`
+	AdminID    string         `json:"admin_id,omitempty"`
+	AdminName  string         `json:"admin_name,omitempty"`
+	AdminRole  string         `json:"admin_role,omitempty"`
+	Action     string         `json:"action"`
+	TargetType string         `json:"target_type,omitempty"`
+	TargetID   string         `json:"target_id,omitempty"`
+	Detail     string         `json:"detail,omitempty"`
+	IP         string         `json:"ip,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	OccurredAt time.Time      `json:"occurred_at"`
+}
+
+// LogAction inserts one audit entry. Errors are non-fatal — callers ignore them.
+func (s *Service) LogAction(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) {
+	_ = s.repo.LogAction(ctx, adminID, action, targetType, targetID, detail, ip)
+}
+
+// GetMemberActivity returns the most recent audit entries for a given admin.
+func (s *Service) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error) {
+	return s.repo.GetMemberActivity(ctx, adminID, limit)
+}
+
+// ListAuditLog returns the platform-wide admin audit trail, newest first.
+// Restricted to Super Admin at the route level.
+func (s *Service) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error) {
+	return s.repo.ListAuditLog(ctx, actor, action, targetType, from, to, limit, offset)
 }

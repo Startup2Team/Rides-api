@@ -27,6 +27,7 @@ type Claims struct {
 	UserID      string `json:"user_id"`
 	RoleState   string `json:"role_state"`
 	TokenType   string `json:"token_type"`   // "access" | "refresh"
+	AdminRole   string `json:"admin_role"`   // set only for admin tokens: SUPER_ADMIN, OPS_MANAGER, etc.
 	IsSuspended bool   `json:"is_suspended"` // embedded so suspension is enforced without a DB hit
 	jwt.RegisteredClaims
 }

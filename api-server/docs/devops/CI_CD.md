@@ -59,7 +59,7 @@ jobs:
       - run: go test ./... -coverprofile=coverage.out
       - run: go tool cover -func=coverage.out | tail -n 1
       - run: jq empty config/openapi.json
-      - run: docker build -t taravelis-api:${{ github.sha }} .
+      - run: docker build -t rides-api:${{ github.sha }} .
 ```
 
 ## CD Pipeline
@@ -89,7 +89,7 @@ Production:
 | Tests | `go test ./...` |
 | Coverage | `go test ./... -coverprofile=coverage.out` |
 | Swagger | `jq empty config/openapi.json` |
-| Docker | `docker build -t taravelis-api .` |
+| Docker | `docker build -t rides-api .` |
 
 ## Secrets
 
@@ -123,7 +123,7 @@ Each release should produce:
 Rollback should use image tags:
 
 ```text
-taravelis-api:previous-sha
+rides-api:previous-sha
 ```
 
 Keep at least the last 5 deployable images.
