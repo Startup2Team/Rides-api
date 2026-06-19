@@ -441,7 +441,11 @@ func TestLogin_With2FA_ReturnsPreAuthToken(t *testing.T) {
 			return &totpSecret, nil
 		},
 	}
+
+	// 2FA is only enforced in production (dev skips it for testing ergonomics),
+	// so exercise the pre-auth path with a production config.
 	svc := newTestServiceProduction(repo, newTestRedis(t))
+
 	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
 	require.NoError(t, err)
 	assert.True(t, result.TwoFactorRequired)

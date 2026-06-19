@@ -25,7 +25,9 @@ logs/
 .cache/
 *.log
 *.env
-.envvar/uploads/
+
 # Local pgAdmin dev artifacts (contains a password)
 pgadmin-pgpass
 pgadmin-servers.json
+# Local upload staging
+.envvar/uploads/

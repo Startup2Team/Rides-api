@@ -1133,6 +1133,8 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		return nil, err
 	}
 
+	// Uploaded KYC documents (licence, national ID, insurance, authorization,
+	// selfie) so the admin can review the actual photos before approving.
 	docs, _ := s.listDriverDocuments(ctx, id)
 
 	return map[string]interface{}{
