@@ -359,6 +359,7 @@ func main() {
 				Post("/location", driverH.UpdateLocation)
 
 			r.Get("/packages", pkgH.ListPackages)
+			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
 			r.Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/credits", pkgH.GetCredits)
 			r.Get("/bonuses", bonusH.DriverGrants)

@@ -37,18 +37,37 @@ func (h *Handler) SetBonus(b BonusAfterPurchase) { h.bonus = b }
 // ── Driver endpoints ──────────────────────────────────────────────────────────
 
 // GET /api/v1/driver/packages?vehicle_type=MOTO_BIKE
+// Returns the v4 catalog: each package's active version with any active campaign
+// override applied (mobile-shaped fields).
 func (h *Handler) ListPackages(w http.ResponseWriter, r *http.Request) {
 	vehicleType := r.URL.Query().Get("vehicle_type")
 	if vehicleType == "" {
 		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "vehicle_type query parameter is required")
 		return
 	}
-	pkgs, err := h.svc.ListPackages(r.Context(), vehicleType)
+	pkgs, err := h.svc.ListCatalog(r.Context(), vehicleType)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
+	if pkgs == nil {
+		pkgs = []*CatalogPackage{}
+	}
 	respond.OK(w, pkgs)
+}
+
+// GET /api/v1/driver/campaigns/active?vehicle_type=MOTO_BIKE
+func (h *Handler) ListActiveCampaigns(w http.ResponseWriter, r *http.Request) {
+	vehicleType := r.URL.Query().Get("vehicle_type")
+	campaigns, err := h.svc.ListActiveCampaigns(r.Context(), vehicleType)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	if campaigns == nil {
+		campaigns = []*Campaign{}
+	}
+	respond.OK(w, campaigns)
 }
 
 // POST /api/v1/driver/packages/purchase

@@ -14,6 +14,8 @@ import (
 // tests can provide a lightweight mock instead.
 type Repo interface {
 	ListPackages(ctx context.Context, vehicleTypeCode string) ([]*Package, error)
+	ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error)
+	ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error)
 	ListAllPackages(ctx context.Context) ([]*Package, error)
 	GetPackageByID(ctx context.Context, packageID string) (*Package, error)
 	CreatePackage(ctx context.Context, p *CreatePackageInput) (*Package, error)
@@ -110,6 +112,16 @@ func (s *Service) RefundCredit(ctx context.Context, driverUserID string) error {
 // ListPackages returns active packages available for purchase for a vehicle type.
 func (s *Service) ListPackages(ctx context.Context, vehicleTypeCode string) ([]*Package, error) {
 	return s.repo.ListPackages(ctx, vehicleTypeCode)
+}
+
+// ListCatalog returns the v4 buyable catalog (active version + campaign applied).
+func (s *Service) ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error) {
+	return s.repo.ListCatalog(ctx, vehicleTypeCode)
+}
+
+// ListActiveCampaigns returns currently-running campaigns for a vehicle type.
+func (s *Service) ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error) {
+	return s.repo.ListActiveCampaigns(ctx, vehicleTypeCode)
 }
 
 // GetCredits returns the driver's current best active credit, or nil if none.

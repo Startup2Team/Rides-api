@@ -34,6 +34,12 @@ func (m *mockRepo) ListPackages(_ context.Context, _ string) ([]*packages.Packag
 func (m *mockRepo) ListAllPackages(_ context.Context) ([]*packages.Package, error) {
 	return nil, nil
 }
+func (m *mockRepo) ListCatalog(_ context.Context, _ string) ([]*packages.CatalogPackage, error) {
+	return nil, nil
+}
+func (m *mockRepo) ListActiveCampaigns(_ context.Context, _ string) ([]*packages.Campaign, error) {
+	return nil, nil
+}
 func (m *mockRepo) CreatePackage(_ context.Context, _ *packages.CreatePackageInput) (*packages.Package, error) {
 	return nil, nil
 }
