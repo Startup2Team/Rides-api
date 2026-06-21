@@ -184,8 +184,10 @@ func main() {
 	trackH := tracking.NewHandler(hub, driverSvc, rdb, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
+	ledgerSvc := packages.NewLedgerService(pkgRepo, log) // v4 entitlement ledger
 	pkgH := packages.NewHandler(pkgSvc)
-	pkgH.SetBonus(bonusSvc) // auto-grant purchase bonuses
+	pkgH.SetBonus(bonusSvc)   // auto-grant purchase bonuses
+	pkgH.SetLedger(ledgerSvc) // v4 entitlements
 	bonusH := bonus.NewHandler(bonusSvc)
 	walletH := wallet.NewHandler(walletSvc)
 	var uploadH *upload.Handler
@@ -362,6 +364,7 @@ func main() {
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
 			r.Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/credits", pkgH.GetCredits)
+			r.Get("/entitlements", pkgH.GetEntitlements)
 			r.Get("/bonuses", bonusH.DriverGrants)
 			r.Get("/bonuses/tiers", bonusH.ListActiveTiers)
 

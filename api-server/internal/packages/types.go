@@ -70,6 +70,18 @@ type Campaign struct {
 	OverrideBonusRides *int       `json:"override_bonus_rides,omitempty"`
 }
 
+// Entitlement is a driver's current credit balance for one vehicle type,
+// derived from the ride_credit_ledger and cached in driver_entitlements.
+type Entitlement struct {
+	VehicleTypeID   string     `json:"vehicle_type_id"`
+	VehicleTypeCode string     `json:"vehicle_type_code"`
+	RidesRemaining  int        `json:"rides_remaining"`
+	BonusRemaining  int        `json:"bonus_remaining"`
+	TotalRemaining  int        `json:"total_remaining"`
+	UnlimitedUntil  *time.Time `json:"unlimited_until,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
 type DriverCredit struct {
 	ID              string    `json:"id"`
 	DriverID        string    `json:"driver_id"`

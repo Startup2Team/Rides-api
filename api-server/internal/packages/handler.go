@@ -23,8 +23,9 @@ type BonusAfterPurchase interface {
 
 // Handler exposes package and credit HTTP endpoints.
 type Handler struct {
-	svc   *Service
-	bonus BonusAfterPurchase // optional; nil = bonus disabled
+	svc    *Service
+	bonus  BonusAfterPurchase // optional; nil = bonus disabled
+	ledger *LedgerService     // v4 entitlement ledger
 }
 
 func NewHandler(svc *Service) *Handler {
@@ -33,6 +34,24 @@ func NewHandler(svc *Service) *Handler {
 
 // SetBonus wires the bonus service so purchases automatically trigger bonus grants.
 func (h *Handler) SetBonus(b BonusAfterPurchase) { h.bonus = b }
+
+// SetLedger wires the v4 entitlement ledger.
+func (h *Handler) SetLedger(l *LedgerService) { h.ledger = l }
+
+// GET /api/v1/driver/entitlements — v4 vehicle-type balances from the ledger.
+func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		respond.Error(w, apperrors.ErrUnauthorized)
+		return
+	}
+	ents, err := h.ledger.ListEntitlementsForUser(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"entitlements": ents})
+}
 
 // ── Driver endpoints ──────────────────────────────────────────────────────────
 
