@@ -114,7 +114,7 @@ func main() {
 	// ── Core services ─────────────────────────────────────────────────────────
 	telSvc := telephony.New(cfg, log)
 	notifySvc := notification.New(cfg, log)
-	_ = payment.New(cfg, log)
+	paymentSvc := payment.New(cfg, log)
 	anaSvc := analytics.NewService(db, rdb, log)
 	anaRepo := analytics.NewRepository(db)
 
@@ -185,9 +185,14 @@ func main() {
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
 	ledgerSvc := packages.NewLedgerService(pkgRepo, log) // v4 entitlement ledger
+	// Dev (non-prod) with payments simulated: auto-confirm purchases inline since
+	// no real MoMo callback arrives. In production the webhook drives confirmation.
+	devAutoConfirm := cfg.Env != "production" && cfg.Payments.Enabled
+	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
 	pkgH := packages.NewHandler(pkgSvc)
-	pkgH.SetBonus(bonusSvc)   // auto-grant purchase bonuses
-	pkgH.SetLedger(ledgerSvc) // v4 entitlements
+	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
+	pkgH.SetLedger(ledgerSvc)     // v4 entitlements
+	pkgH.SetPurchase(purchaseSvc) // v4 purchase + MoMo
 	bonusH := bonus.NewHandler(bonusSvc)
 	walletH := wallet.NewHandler(walletSvc)
 	var uploadH *upload.Handler
@@ -305,6 +310,9 @@ func main() {
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
 	})
 
+	// MoMo payment callback — public (called by the provider, not the app).
+	r.Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
+
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
@@ -363,13 +371,15 @@ func main() {
 			r.Get("/packages", pkgH.ListPackages)
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
 			r.Post("/packages/purchase", pkgH.PurchasePackage)
+			r.Get("/packages/purchases/{purchaseID}", pkgH.GetPurchaseStatus)
+			r.Get("/packages/history", pkgH.PurchaseHistory)
 			r.Get("/credits", pkgH.GetCredits)
 			r.Get("/entitlements", pkgH.GetEntitlements)
 			r.Get("/bonuses", bonusH.DriverGrants)
 			r.Get("/bonuses/tiers", bonusH.ListActiveTiers)
 
 			r.Get("/rides/active", rideH.GetActiveRideForDriver)
-			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, pkgSvc, cfg))
+			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, ledgerSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
 			r.Get("/rides/{ride_id}", rideH.GetRideForDriver)
 			r.Post("/rides/{ride_id}/cancel", driverCancelHandler(rideSvc))
@@ -681,8 +691,8 @@ func main() {
 	// Wire matching engine into ride service
 	rideSvc.SetMatchingEngine(engine)
 	rideSvc.SetRouteFareRecorder(locSvc)
-	rideSvc.SetPackagesService(pkgSvc)
-	adminSvc.SetPackagesService(pkgSvc)
+	rideSvc.SetPackagesService(ledgerSvc)  // v4: charge/refund via the ledger
+	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
@@ -720,6 +730,19 @@ func main() {
 }
 
 // ── Migration runner ──────────────────────────────────────────────────────
+
+// momoGateway adapts *payment.Service to the packages.MoMoGateway interface so
+// the purchase flow can request a mobile-money charge without importing payment
+// types. Credentials come from the env (MOMO_*), so it works once those are set.
+type momoGateway struct{ p *payment.Service }
+
+func (g momoGateway) RequestPayment(ctx context.Context, provider, phone string, amountRWF int, externalRef string) (string, string, error) {
+	res, err := g.p.RequestPayment(ctx, payment.Provider(provider), phone, phone, float64(amountRWF), externalRef)
+	if err != nil {
+		return "", "", err
+	}
+	return res.TransactionID, res.Status, nil
+}
 
 func runMigrations(databaseURL string) error {
 	migrateURL := strings.NewReplacer(

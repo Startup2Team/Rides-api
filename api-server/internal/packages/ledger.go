@@ -287,6 +287,57 @@ func (l *LedgerService) HasCredits(ctx context.Context, userID, vehicleTypeCode 
 	return total > 0, nil
 }
 
+// GrantFreeTrialIfEligible grants the promotional package's rides to the ledger
+// for a newly-approved driver, once per driver (guarded by free_trial_used).
+// Mirrors the old behaviour but writes to the v4 ledger.
+func (l *LedgerService) GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error {
+	var profileID, vehicleTypeID string
+	err := l.repo.db.QueryRow(ctx, `SELECT id FROM driver_profiles WHERE user_id = $1`, driverUserID).Scan(&profileID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if err := l.repo.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, vehicleTypeCode).Scan(&vehicleTypeID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+
+	// Claim the one-time free trial atomically.
+	tag, err := l.repo.db.Exec(ctx, `
+		UPDATE driver_profiles SET free_trial_used = TRUE, updated_at = now()
+		WHERE id = $1 AND free_trial_used = FALSE
+	`, profileID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // already claimed
+	}
+
+	// Find the active promotional version for this vehicle type.
+	var rides, bonus, validityDays int
+	err = l.repo.db.QueryRow(ctx, `
+		SELECT v.rides, v.bonus_rides, v.validity_days
+		FROM ride_package_versions v
+		JOIN ride_packages p ON p.id = v.package_id
+		WHERE p.vehicle_type_id = $1 AND p.is_active = TRUE
+		  AND v.status = 'ACTIVE' AND v.is_promotional = TRUE
+		ORDER BY v.rides DESC LIMIT 1
+	`, vehicleTypeID).Scan(&rides, &bonus, &validityDays)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // no promo package configured — nothing to grant
+		}
+		return err
+	}
+	expiresAt := time.Now().Add(time.Duration(validityDays) * 24 * time.Hour)
+	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "BONUS_GRANT", rides, bonus, nil, &expiresAt, nil, "free trial", ptr("freetrial:"+profileID))
+}
+
 // ListEntitlementsForUser returns a driver's balances across vehicle types.
 func (l *LedgerService) ListEntitlementsForUser(ctx context.Context, userID string) ([]*Entitlement, error) {
 	var profileID string
