@@ -125,19 +125,33 @@ func (r *Repository) resolveOffer(ctx context.Context, packageID, driverProfileI
 }
 
 // createPurchaseRow inserts a package_purchases row with the frozen snapshot.
-func (r *Repository) createPurchaseRow(ctx context.Context, driverProfileID string, vehicleID *string, o *resolvedOffer, status, provider, phone, paymentRef, idempotencyKey string) (string, error) {
+func (r *Repository) createPurchaseRow(ctx context.Context, driverProfileID string, vehicleID *string, o *resolvedOffer, status, provider, phone, paymentRef, idempotencyKey string, expiresAt *time.Time) (string, error) {
 	var id string
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO package_purchases
 		    (driver_id, vehicle_id, vehicle_type_id, package_id, package_version_id, package_version_number,
 		     package_name, campaign_id, campaign_code, price_paid_rwf, rides_granted, bonus_rides_granted,
-		     is_unlimited, status, payment_provider, payment_phone, payment_ref, idempotency_key)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,FALSE,$13,$14,$15,$16,$17)
+		     is_unlimited, status, payment_provider, payment_phone, payment_ref, idempotency_key, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,FALSE,$13,$14,$15,$16,$17,$18)
 		RETURNING id
 	`, driverProfileID, vehicleID, o.vehicleTypeID, o.packageID, o.versionID, o.versionNumber,
 		o.packageName, o.campaignID, o.campaignCode, o.price, o.rides, o.bonus,
-		status, nullStr(provider), nullStr(phone), paymentRef, idempotencyKey).Scan(&id)
+		status, nullStr(provider), nullStr(phone), paymentRef, idempotencyKey, expiresAt).Scan(&id)
 	return id, err
+}
+
+// markCreditsGranted flips the crash-recovery flag once the ledger grant lands.
+func (r *Repository) markCreditsGranted(ctx context.Context, id string) error {
+	_, err := r.db.Exec(ctx, `UPDATE package_purchases SET credits_granted=TRUE, updated_at=now() WHERE id=$1`, id)
+	return err
+}
+
+// storeWebhookPayload keeps the raw MTN callback as immutable evidence.
+func (r *Repository) storeWebhookPayload(ctx context.Context, paymentRef string, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	_, _ = r.db.Exec(ctx, `UPDATE package_purchases SET webhook_payload=$2::jsonb, updated_at=now() WHERE payment_ref=$1`, paymentRef, string(payload))
 }
 
 // CreateInput is the purchase request.
@@ -176,9 +190,9 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 	paymentRef := uuid.NewString()
 	expiresAt := time.Now().Add(time.Duration(offer.validityDays) * 24 * time.Hour)
 
-	// Free / promotional → grant immediately, no MoMo.
+	// Free / promotional → grant immediately, no MoMo (no payment timeout).
 	if offer.price <= 0 || offer.isPromotional {
-		id, err := s.repo.createPurchaseRow(ctx, profileID, vehicleID, offer, "PAID", "", "", paymentRef, in.IdempotencyKey)
+		id, err := s.repo.createPurchaseRow(ctx, profileID, vehicleID, offer, "PAID", "", "", paymentRef, in.IdempotencyKey, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -187,12 +201,15 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 		}
 		if err := s.ledger.GrantPurchase(ctx, profileID, vehicleID, offer.vehicleTypeID, id, offer.rides, offer.bonus, expiresAt); err != nil {
 			s.log.Error().Err(err).Str("purchase_id", id).Msg("packages: free grant failed")
+		} else {
+			_ = s.repo.markCreditsGranted(ctx, id)
 		}
 		return s.repo.getPurchaseByID(ctx, id)
 	}
 
-	// Paid → PENDING + MoMo prompt.
-	id, err := s.repo.createPurchaseRow(ctx, profileID, vehicleID, offer, "PENDING", in.MomoProvider, in.MomoPhone, paymentRef, in.IdempotencyKey)
+	// Paid → PENDING + MoMo prompt. 5-minute payment window.
+	paymentExpiry := time.Now().Add(5 * time.Minute)
+	id, err := s.repo.createPurchaseRow(ctx, profileID, vehicleID, offer, "PENDING", in.MomoProvider, in.MomoPhone, paymentRef, in.IdempotencyKey, &paymentExpiry)
 	if err != nil {
 		s.log.Error().Err(err).Str("step", "create_purchase_row").Msg("purchase create failed")
 		return nil, err
@@ -215,8 +232,10 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 	return s.repo.getPurchaseByID(ctx, id)
 }
 
-// Confirm is the MoMo webhook entry point. Idempotent on provider_txn_id.
-func (s *PurchaseService) Confirm(ctx context.Context, paymentRef, providerTxnID string, success bool) error {
+// Confirm is the MoMo webhook entry point. Idempotent on the purchase status
+// guard. rawPayload is the verbatim provider callback, stored as evidence.
+func (s *PurchaseService) Confirm(ctx context.Context, paymentRef, providerTxnID string, success bool, rawPayload []byte) error {
+	s.repo.storeWebhookPayload(ctx, paymentRef, rawPayload)
 	return s.confirm(ctx, paymentRef, providerTxnID, success)
 }
 
@@ -238,6 +257,7 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 	if err := s.ledger.GrantPurchase(ctx, profileID, vehicleID, vehicleTypeID, p, rides, bonus, expiresAt); err != nil {
 		return fmt.Errorf("grant after payment: %w", err)
 	}
+	_ = s.repo.markCreditsGranted(ctx, p)
 	return nil
 }
 

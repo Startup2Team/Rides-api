@@ -3,6 +3,7 @@ package packages
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -155,12 +156,13 @@ func (h *Handler) PurchaseHistory(w http.ResponseWriter, r *http.Request) {
 // Body: { "payment_ref", "provider_txn_id", "status" } where status is
 // SUCCESS|SUCCESSFUL|PAID for success, anything else = failure.
 func (h *Handler) WebhookMoMo(w http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // cap at 1 MB
 	var body struct {
 		PaymentRef    string `json:"payment_ref"`
 		ProviderTxnID string `json:"provider_txn_id"`
 		Status        string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PaymentRef == "" {
+	if err := json.Unmarshal(raw, &body); err != nil || body.PaymentRef == "" {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
@@ -169,7 +171,7 @@ func (h *Handler) WebhookMoMo(w http.ResponseWriter, r *http.Request) {
 	case "SUCCESS", "SUCCESSFUL", "PAID", "COMPLETED":
 		success = true
 	}
-	if err := h.purchase.Confirm(r.Context(), body.PaymentRef, body.ProviderTxnID, success); err != nil {
+	if err := h.purchase.Confirm(r.Context(), body.PaymentRef, body.ProviderTxnID, success, raw); err != nil {
 		respond.Error(w, err)
 		return
 	}
