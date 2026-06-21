@@ -257,6 +257,28 @@ func main() {
 		}
 	}()
 
+	// Expire lapsed ride credits — sweep the ledger hourly (and once on boot).
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		sweep := func() {
+			if n, err := ledgerSvc.SweepExpired(bgCtx); err != nil {
+				log.Error().Err(err).Msg("credit-expiry: sweep failed")
+			} else if n > 0 {
+				log.Info().Int("adjusted", n).Msg("credit-expiry: expired lapsed credits")
+			}
+		}
+		sweep()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				sweep()
+			}
+		}
+	}()
+
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
 

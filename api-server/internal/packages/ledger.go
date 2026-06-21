@@ -359,3 +359,81 @@ func (l *LedgerService) ListEntitlementsForUser(ctx context.Context, userID stri
 }
 
 func ptr(s string) *string { return &s }
+
+// SweepExpired recomputes every driver's balance from the ledger and writes an
+// EXPIRY entry wherever credits have lapsed (a grant's expires_at passed). The
+// live balance is the sum of NON-expired grants minus everything consumed,
+// floored at zero — so expired, unspent credits drop off and the cache follows.
+// Returns the number of entitlements adjusted. Safe to run repeatedly.
+func (l *LedgerService) SweepExpired(ctx context.Context) (int, error) {
+	rows, err := l.repo.db.Query(ctx, `SELECT driver_id, vehicle_type_id, rides_remaining, bonus_remaining FROM driver_entitlements`)
+	if err != nil {
+		return 0, err
+	}
+	type ent struct {
+		driverID, vehicleTypeID string
+		rides, bonus            int
+	}
+	var ents []ent
+	for rows.Next() {
+		var e ent
+		if err := rows.Scan(&e.driverID, &e.vehicleTypeID, &e.rides, &e.bonus); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ents = append(ents, e)
+	}
+	rows.Close()
+
+	adjusted := 0
+	for _, e := range ents {
+		var grantRides, grantBonus, usedRides, usedBonus int
+		err := l.repo.db.QueryRow(ctx, `
+			SELECT
+			  COALESCE(SUM(rides_delta) FILTER (WHERE rides_delta > 0 AND (expires_at IS NULL OR expires_at > now())), 0),
+			  COALESCE(SUM(bonus_delta) FILTER (WHERE bonus_delta > 0 AND (expires_at IS NULL OR expires_at > now())), 0),
+			  COALESCE(-SUM(rides_delta) FILTER (WHERE rides_delta < 0), 0),
+			  COALESCE(-SUM(bonus_delta) FILTER (WHERE bonus_delta < 0), 0)
+			FROM ride_credit_ledger
+			WHERE driver_id = $1 AND vehicle_type_id = $2
+		`, e.driverID, e.vehicleTypeID).Scan(&grantRides, &grantBonus, &usedRides, &usedBonus)
+		if err != nil {
+			return adjusted, err
+		}
+		newRides := grantRides - usedRides
+		if newRides < 0 {
+			newRides = 0
+		}
+		newBonus := grantBonus - usedBonus
+		if newBonus < 0 {
+			newBonus = 0
+		}
+		if newRides >= e.rides && newBonus >= e.bonus {
+			continue // nothing expired
+		}
+		tx, err := l.repo.db.Begin(ctx)
+		if err != nil {
+			return adjusted, err
+		}
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO ride_credit_ledger
+			    (driver_id, vehicle_type_id, entry_type, rides_delta, bonus_delta, balance_rides, balance_bonus, reason)
+			VALUES ($1,$2,'EXPIRY',$3,$4,$5,$6,'credits expired')
+		`, e.driverID, e.vehicleTypeID, newRides-e.rides, newBonus-e.bonus, newRides, newBonus); err != nil {
+			tx.Rollback(ctx)
+			return adjusted, err
+		}
+		if _, err = tx.Exec(ctx, `
+			UPDATE driver_entitlements SET rides_remaining=$3, bonus_remaining=$4, updated_at=now()
+			WHERE driver_id=$1 AND vehicle_type_id=$2
+		`, e.driverID, e.vehicleTypeID, newRides, newBonus); err != nil {
+			tx.Rollback(ctx)
+			return adjusted, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return adjusted, err
+		}
+		adjusted++
+	}
+	return adjusted, nil
+}
