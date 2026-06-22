@@ -52,9 +52,8 @@ func (r *Repository) ListPackages(ctx context.Context, vehicleTypeCode string) (
 	return pkgs, rows.Err()
 }
 
-// AdminListPackages returns every package (active and inactive) across all
-// vehicle types, newest first. Used by the admin packages console.
-func (r *Repository) AdminListPackages(ctx context.Context) ([]*Package, error) {
+// ListAllPackages returns all packages (active and inactive) for the admin panel, newest first.
+func (r *Repository) ListAllPackages(ctx context.Context) ([]*Package, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
 		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
@@ -62,7 +61,7 @@ func (r *Repository) AdminListPackages(ctx context.Context) ([]*Package, error) 
 		FROM ride_packages rp
 		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
 		WHERE rp.deleted_at IS NULL
-		ORDER BY rp.created_at DESC
+		ORDER BY vt.code, rp.price_rwf ASC
 	`)
 	if err != nil {
 		return nil, err
@@ -84,10 +83,16 @@ func (r *Repository) AdminListPackages(ctx context.Context) ([]*Package, error) 
 	return pkgs, rows.Err()
 }
 
-// AdminCreatePackage creates a new package for a vehicle type (looked up by code).
-func (r *Repository) AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error) {
+// CreatePackage inserts a new admin-defined package and creates version 1.
+func (r *Repository) CreatePackage(ctx context.Context, input *CreatePackageInput) (*Package, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
 	var vehicleTypeID string
-	if err := r.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, vehicleTypeCode).Scan(&vehicleTypeID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1 AND is_active = TRUE`, input.VehicleTypeCode).Scan(&vehicleTypeID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperrors.New(404, "VEHICLE_TYPE_NOT_FOUND", "vehicle type not found")
 		}
@@ -95,51 +100,310 @@ func (r *Repository) AdminCreatePackage(ctx context.Context, name, vehicleTypeCo
 	}
 
 	p := &Package{}
-	err := r.db.QueryRow(ctx, `
-		INSERT INTO ride_packages (name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO ride_packages (name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, cost_per_ride_rwf, is_promotional)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional, is_active, created_at, deleted_at
-	`, name, vehicleTypeID, rideCount, bonusRides, validityDays, priceRWF, isPromotional).Scan(
+	`, input.Name, vehicleTypeID, input.RideCount, input.BonusRides, input.ValidityDays, input.PriceRWF, input.CostPerRideRWF, input.IsPromotional).Scan(
 		&p.ID, &p.Name, &p.VehicleTypeID, &p.RideCount, &p.BonusRides,
 		&p.ValidityDays, &p.PriceRWF, &p.IsPromotional, &p.IsActive, &p.CreatedAt, &p.DeletedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
-	p.VehicleTypeCode = vehicleTypeCode
-	return p, nil
-}
+	p.VehicleTypeCode = input.VehicleTypeCode
 
-// AdminUpdatePackage updates a package's name, price, ride count, bonus rides,
-// or validity window. Only non-nil fields are changed.
-func (r *Repository) AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error) {
-	_, err := r.db.Exec(ctx, `
-		UPDATE ride_packages SET
-		    name          = COALESCE($1, name),
-		    ride_count    = COALESCE($2, ride_count),
-		    bonus_rides   = COALESCE($3, bonus_rides),
-		    validity_days = COALESCE($4, validity_days),
-		    price_rwf     = COALESCE($5, price_rwf)
-		WHERE id = $6
-	`, name, rideCount, bonusRides, validityDays, priceRWF, id)
+	// Insert version 1 for versioned purchases
+	_, err = tx.Exec(ctx, `
+		INSERT INTO ride_package_versions (package_id, version_number, rides, bonus_rides, price_rwf, cost_per_ride_rwf, validity_days, is_promotional, status, active_from)
+		VALUES ($1, 1, $2, $3, $4, $5, $6, $7, 'ACTIVE', NOW())
+	`, p.ID, p.RideCount, p.BonusRides, p.PriceRWF, input.CostPerRideRWF, p.ValidityDays, p.IsPromotional)
 	if err != nil {
 		return nil, err
 	}
-	return r.GetPackageByID(ctx, id)
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return p, nil
 }
 
-// AdminTogglePackage activates or deactivates a package. Deactivating removes
-// it from sale without deleting history — driver_ride_credits already issued
-// are unaffected.
-func (r *Repository) AdminTogglePackage(ctx context.Context, id string, isActive bool) error {
-	_, err := r.db.Exec(ctx, `UPDATE ride_packages SET is_active = $1 WHERE id = $2`, isActive, id)
-	return err
+// UpdatePackage updates mutable package fields. Only non-nil fields are changed.
+func (r *Repository) UpdatePackage(ctx context.Context, packageID string, input *UpdatePackageInput) (*Package, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Update ride_packages
+	sets := []string{"updated_at = NOW()"}
+	args := []interface{}{packageID}
+	n := 2
+
+	if input.Name != nil {
+		sets = append(sets, "name = $"+itoa(n))
+		args = append(args, *input.Name)
+		n++
+	}
+	if input.RideCount != nil {
+		sets = append(sets, "ride_count = $"+itoa(n))
+		args = append(args, *input.RideCount)
+		n++
+	}
+	if input.BonusRides != nil {
+		sets = append(sets, "bonus_rides = $"+itoa(n))
+		args = append(args, *input.BonusRides)
+		n++
+	}
+	if input.ValidityDays != nil {
+		sets = append(sets, "validity_days = $"+itoa(n))
+		args = append(args, *input.ValidityDays)
+		n++
+	}
+	if input.PriceRWF != nil {
+		sets = append(sets, "price_rwf = $"+itoa(n))
+		args = append(args, *input.PriceRWF)
+		n++
+	}
+	if input.CostPerRideRWF != nil {
+		sets = append(sets, "cost_per_ride_rwf = $"+itoa(n))
+		args = append(args, *input.CostPerRideRWF)
+		n++
+	}
+	if input.IsPromotional != nil {
+		sets = append(sets, "is_promotional = $"+itoa(n))
+		args = append(args, *input.IsPromotional)
+		n++
+	}
+
+	query := "UPDATE ride_packages SET " + joinStrings(sets, ", ") +
+		" WHERE id = $1 AND deleted_at IS NULL" +
+		" RETURNING id, name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional, is_active, created_at, deleted_at"
+
+	p := &Package{}
+	var vehicleTypeID string
+	err = tx.QueryRow(ctx, query, args...).Scan(
+		&p.ID, &p.Name, &vehicleTypeID,
+		&p.RideCount, &p.BonusRides, &p.ValidityDays, &p.PriceRWF,
+		&p.IsPromotional, &p.IsActive, &p.CreatedAt, &p.DeletedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrNotFound
+		}
+		return nil, err
+	}
+
+	// Fetch vehicle type code for returning
+	err = tx.QueryRow(ctx, `SELECT code FROM vehicle_types WHERE id = $1`, vehicleTypeID).Scan(&p.VehicleTypeCode)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update active version in ride_package_versions to keep in sync
+	vsets := []string{}
+	vargs := []interface{}{packageID}
+	vn := 2
+
+	if input.RideCount != nil {
+		vsets = append(vsets, "rides = $"+itoa(vn))
+		vargs = append(vargs, *input.RideCount)
+		vn++
+	}
+	if input.BonusRides != nil {
+		vsets = append(vsets, "bonus_rides = $"+itoa(vn))
+		vargs = append(vargs, *input.BonusRides)
+		vn++
+	}
+	if input.PriceRWF != nil {
+		vsets = append(vsets, "price_rwf = $"+itoa(vn))
+		vargs = append(vargs, *input.PriceRWF)
+		vn++
+	}
+	if input.ValidityDays != nil {
+		vsets = append(vsets, "validity_days = $"+itoa(vn))
+		vargs = append(vargs, *input.ValidityDays)
+		vn++
+	}
+	if input.CostPerRideRWF != nil {
+		vsets = append(vsets, "cost_per_ride_rwf = $"+itoa(vn))
+		vargs = append(vargs, *input.CostPerRideRWF)
+		vn++
+	}
+	if input.IsPromotional != nil {
+		vsets = append(vsets, "is_promotional = $"+itoa(vn))
+		vargs = append(vargs, *input.IsPromotional)
+		vn++
+	}
+
+	if len(vsets) > 0 {
+		vquery := "UPDATE ride_package_versions SET " + joinStrings(vsets, ", ") + " WHERE package_id = $1 AND status = 'ACTIVE'"
+		_, err = tx.Exec(ctx, vquery, vargs...)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return p, nil
 }
 
-// AdminDeletePackage soft-deletes a package by setting its deleted_at timestamp.
-func (r *Repository) AdminDeletePackage(ctx context.Context, id string) error {
-	_, err := r.db.Exec(ctx, `UPDATE ride_packages SET deleted_at = NOW(), is_active = FALSE WHERE id = $1`, id)
-	return err
+// SetPackageActive toggles a package's active flag.
+func (r *Repository) SetPackageActive(ctx context.Context, packageID string, active bool) error {
+	tag, err := r.db.Exec(ctx,
+		`UPDATE ride_packages SET is_active = $2, updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`,
+		packageID, active,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// DeletePackage soft-deletes a package by setting its deleted_at timestamp.
+func (r *Repository) DeletePackage(ctx context.Context, packageID string) error {
+	tag, err := r.db.Exec(ctx,
+		`UPDATE ride_packages SET deleted_at = NOW(), is_active = FALSE, updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`,
+		packageID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func itoa(n int) string {
+	return string(rune('0' + n)) // works for n < 10; enough for our field count
+}
+
+func joinStrings(ss []string, sep string) string {
+	out := ""
+	for i, s := range ss {
+		if i > 0 {
+			out += sep
+		}
+		out += s
+	}
+	return out
+}
+
+// ListCatalog returns the v4 buyable catalog for a vehicle type: each active
+// package's ACTIVE version with the best-matching active campaign applied.
+// Campaign matching: status=ACTIVE, within its window, type GLOBAL/VEHICLE_TYPE/
+// PACKAGE, targeting this package or its vehicle type (NULL target = any),
+// highest priority wins. FIRST_PURCHASE/REFERRAL are resolved at purchase time.
+func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT p.id, p.code, p.name, vt.code,
+		       v.id, v.version_number, v.rides, v.bonus_rides, v.price_rwf,
+		       v.validity_days, v.is_promotional, v.is_unlimited,
+		       c.id, c.code, c.override_price_rwf, c.override_rides, c.override_bonus_rides
+		FROM ride_packages p
+		JOIN vehicle_types vt ON vt.id = p.vehicle_type_id
+		JOIN ride_package_versions v ON v.package_id = p.id AND v.status = 'ACTIVE'
+		LEFT JOIN LATERAL (
+			SELECT cc.id, cc.code, cc.override_price_rwf, cc.override_rides, cc.override_bonus_rides
+			FROM campaigns cc
+			WHERE cc.status = 'ACTIVE'
+			  AND (cc.starts_at IS NULL OR cc.starts_at <= now())
+			  AND (cc.ends_at   IS NULL OR cc.ends_at   >= now())
+			  AND cc.type IN ('GLOBAL','VEHICLE_TYPE','PACKAGE')
+			  AND (cc.target_vehicle_type_id IS NULL OR cc.target_vehicle_type_id = p.vehicle_type_id)
+			  AND (cc.target_package_id      IS NULL OR cc.target_package_id      = p.id)
+			ORDER BY cc.priority DESC, cc.created_at DESC
+			LIMIT 1
+		) c ON TRUE
+		WHERE p.is_active = TRUE AND vt.code = $1
+		ORDER BY v.price_rwf ASC
+	`, vehicleTypeCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*CatalogPackage
+	for rows.Next() {
+		var (
+			cp                        CatalogPackage
+			ovPrice, ovRides, ovBonus *int
+			campaignID, campaignCode  *string
+		)
+		if err := rows.Scan(
+			&cp.ID, &cp.Code, &cp.Name, &cp.VehicleTypeCode,
+			&cp.VersionID, &cp.VersionNumber, &cp.IncludedRides, &cp.BonusRides, &cp.NormalPriceRWF,
+			&cp.ValidityDays, &cp.LaunchOffer, &cp.IsUnlimited,
+			&campaignID, &campaignCode, &ovPrice, &ovRides, &ovBonus,
+		); err != nil {
+			return nil, err
+		}
+		// Apply campaign overrides (NULL = keep version value).
+		cp.CurrentPriceRWF = cp.NormalPriceRWF
+		if ovPrice != nil {
+			cp.CurrentPriceRWF = *ovPrice
+		}
+		if ovRides != nil {
+			cp.IncludedRides = *ovRides
+		}
+		if ovBonus != nil {
+			cp.BonusRides = *ovBonus
+		}
+		if campaignID != nil {
+			cp.CampaignID, cp.CampaignCode = campaignID, campaignCode
+		}
+		cp.TotalCredits = cp.IncludedRides + cp.BonusRides
+		cp.IsPromotional = cp.LaunchOffer
+		// Legacy mirrors for the pre-v4 mobile mapping.
+		cp.PriceRWF = cp.CurrentPriceRWF
+		cp.RideCount = cp.TotalCredits
+		out = append(out, &cp)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveCampaigns returns currently-running campaigns relevant to a vehicle
+// type (GLOBAL or matching that type). Drivers see these as active promotions.
+func (r *Repository) ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.code, c.name, c.type, c.starts_at, c.ends_at,
+		       c.override_price_rwf, c.override_rides, c.override_bonus_rides
+		FROM campaigns c
+		LEFT JOIN vehicle_types vt ON vt.id = c.target_vehicle_type_id
+		WHERE c.status = 'ACTIVE'
+		  AND (c.starts_at IS NULL OR c.starts_at <= now())
+		  AND (c.ends_at   IS NULL OR c.ends_at   >= now())
+		  AND (c.target_vehicle_type_id IS NULL OR vt.code = $1)
+		ORDER BY c.priority DESC, c.created_at DESC
+	`, vehicleTypeCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*Campaign
+	for rows.Next() {
+		c := &Campaign{}
+		if err := rows.Scan(
+			&c.ID, &c.Code, &c.Name, &c.Type, &c.StartsAt, &c.EndsAt,
+			&c.OverridePriceRWF, &c.OverrideRides, &c.OverrideBonusRides,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // GetPackageByID returns a single package by its ID.

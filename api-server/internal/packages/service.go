@@ -14,6 +14,9 @@ import (
 // tests can provide a lightweight mock instead.
 type Repo interface {
 	ListPackages(ctx context.Context, vehicleTypeCode string) ([]*Package, error)
+	ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error)
+	ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error)
+	ListAllPackages(ctx context.Context) ([]*Package, error)
 	GetPackageByID(ctx context.Context, packageID string) (*Package, error)
 	GetActiveCredit(ctx context.Context, driverUserID string) (*DriverCredit, error)
 	SumActiveCredits(ctx context.Context, driverUserID string) (int, error)
@@ -21,11 +24,10 @@ type Repo interface {
 	RefundCredit(ctx context.Context, driverUserID string) error
 	PurchasePackage(ctx context.Context, driverUserID, packageID, vehicleTypeID string, ridesTotal, validityDays int, isPromotional bool) (*DriverCredit, error)
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
-	AdminListPackages(ctx context.Context) ([]*Package, error)
-	AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error)
-	AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error)
-	AdminTogglePackage(ctx context.Context, id string, isActive bool) error
-	AdminDeletePackage(ctx context.Context, id string) error
+	CreatePackage(ctx context.Context, p *CreatePackageInput) (*Package, error)
+	UpdatePackage(ctx context.Context, packageID string, p *UpdatePackageInput) (*Package, error)
+	SetPackageActive(ctx context.Context, packageID string, active bool) error
+	DeletePackage(ctx context.Context, packageID string) error
 }
 
 // WalletDeductor is the wallet.Service method subset needed by this package.
@@ -36,6 +38,27 @@ type WalletDeductor interface {
 
 // ErrNoCredits is returned when a driver tries to accept a ride with no credits left.
 var ErrNoCredits = apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding.")
+
+type CreatePackageInput struct {
+	Name            string `json:"name" validate:"required"`
+	VehicleTypeCode string `json:"vehicle_type_code" validate:"required"`
+	RideCount       int    `json:"ride_count" validate:"required,min=1"`
+	BonusRides      int    `json:"bonus_rides" validate:"min=0"`
+	ValidityDays    int    `json:"validity_days" validate:"required,min=1"`
+	PriceRWF        int    `json:"price_rwf" validate:"min=0"`
+	CostPerRideRWF  int    `json:"cost_per_ride_rwf" validate:"min=0"`
+	IsPromotional   bool   `json:"is_promotional"`
+}
+
+type UpdatePackageInput struct {
+	Name           *string `json:"name,omitempty"`
+	RideCount      *int    `json:"ride_count,omitempty" validate:"omitempty,min=1"`
+	BonusRides     *int    `json:"bonus_rides,omitempty" validate:"omitempty,min=0"`
+	ValidityDays   *int    `json:"validity_days,omitempty" validate:"omitempty,min=1"`
+	PriceRWF       *int    `json:"price_rwf,omitempty" validate:"omitempty,min=0"`
+	CostPerRideRWF *int    `json:"cost_per_ride_rwf,omitempty" validate:"omitempty,min=0"`
+	IsPromotional  *bool   `json:"is_promotional,omitempty"`
+}
 
 // Service handles credit and package business logic.
 type Service struct {
@@ -93,19 +116,34 @@ func (s *Service) ListPackages(ctx context.Context, vehicleTypeCode string) ([]*
 }
 
 func (s *Service) AdminListPackages(ctx context.Context) ([]*Package, error) {
-	return s.repo.AdminListPackages(ctx)
+	return s.repo.ListAllPackages(ctx)
 }
 
-func (s *Service) AdminCreatePackage(ctx context.Context, name, vehicleTypeCode string, rideCount, bonusRides, validityDays, priceRWF int, isPromotional bool) (*Package, error) {
-	return s.repo.AdminCreatePackage(ctx, name, vehicleTypeCode, rideCount, bonusRides, validityDays, priceRWF, isPromotional)
+func (s *Service) AdminCreatePackage(ctx context.Context, input *CreatePackageInput) (*Package, error) {
+	if input.Name == "" || input.VehicleTypeCode == "" {
+		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "name and vehicle_type_code are required")
+	}
+	if input.RideCount <= 0 {
+		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "ride_count must be positive")
+	}
+	if input.PriceRWF < 0 {
+		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "price_rwf must be >= 0")
+	}
+	if input.ValidityDays <= 0 {
+		input.ValidityDays = 30
+	}
+	if input.CostPerRideRWF <= 0 {
+		input.CostPerRideRWF = 30 // default platform cost per ride
+	}
+	return s.repo.CreatePackage(ctx, input)
 }
 
-func (s *Service) AdminUpdatePackage(ctx context.Context, id string, name *string, rideCount, bonusRides, validityDays, priceRWF *int) (*Package, error) {
-	return s.repo.AdminUpdatePackage(ctx, id, name, rideCount, bonusRides, validityDays, priceRWF)
+func (s *Service) AdminUpdatePackage(ctx context.Context, id string, input *UpdatePackageInput) (*Package, error) {
+	return s.repo.UpdatePackage(ctx, id, input)
 }
 
 func (s *Service) AdminTogglePackage(ctx context.Context, id string, isActive bool) error {
-	return s.repo.AdminTogglePackage(ctx, id, isActive)
+	return s.repo.SetPackageActive(ctx, id, isActive)
 }
 
 func (s *Service) GetPackageByID(ctx context.Context, id string) (*Package, error) {
@@ -113,7 +151,17 @@ func (s *Service) GetPackageByID(ctx context.Context, id string) (*Package, erro
 }
 
 func (s *Service) AdminDeletePackage(ctx context.Context, id string) error {
-	return s.repo.AdminDeletePackage(ctx, id)
+	return s.repo.DeletePackage(ctx, id)
+}
+
+// ListCatalog returns the v4 buyable catalog (active version + campaign applied).
+func (s *Service) ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error) {
+	return s.repo.ListCatalog(ctx, vehicleTypeCode)
+}
+
+// ListActiveCampaigns returns currently-running campaigns for a vehicle type.
+func (s *Service) ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error) {
+	return s.repo.ListActiveCampaigns(ctx, vehicleTypeCode)
 }
 
 // GetCredits returns the driver's current best active credit, or nil if none.
