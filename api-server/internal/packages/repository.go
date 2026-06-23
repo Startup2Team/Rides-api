@@ -3,6 +3,7 @@ package packages
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -145,42 +146,42 @@ func (r *Repository) UpdatePackage(ctx context.Context, packageID string, input 
 	n := 2
 
 	if input.Name != nil {
-		sets = append(sets, "name = $"+itoa(n))
+		sets = append(sets, "name = $"+strconv.Itoa(n))
 		args = append(args, *input.Name)
 		n++
 	}
 	if input.RideCount != nil {
-		sets = append(sets, "ride_count = $"+itoa(n))
+		sets = append(sets, "ride_count = $"+strconv.Itoa(n))
 		args = append(args, *input.RideCount)
 		n++
 	}
 	if input.BonusRides != nil {
-		sets = append(sets, "bonus_rides = $"+itoa(n))
+		sets = append(sets, "bonus_rides = $"+strconv.Itoa(n))
 		args = append(args, *input.BonusRides)
 		n++
 	}
 	if input.ValidityDays != nil {
-		sets = append(sets, "validity_days = $"+itoa(n))
+		sets = append(sets, "validity_days = $"+strconv.Itoa(n))
 		args = append(args, *input.ValidityDays)
 		n++
 	}
 	if input.PriceRWF != nil {
-		sets = append(sets, "price_rwf = $"+itoa(n))
+		sets = append(sets, "price_rwf = $"+strconv.Itoa(n))
 		args = append(args, *input.PriceRWF)
 		n++
 	}
 	if input.CostPerRideRWF != nil {
-		sets = append(sets, "cost_per_ride_rwf = $"+itoa(n))
+		sets = append(sets, "cost_per_ride_rwf = $"+strconv.Itoa(n))
 		args = append(args, *input.CostPerRideRWF)
 		n++
 	}
 	if input.IsPromotional != nil {
-		sets = append(sets, "is_promotional = $"+itoa(n))
+		sets = append(sets, "is_promotional = $"+strconv.Itoa(n))
 		args = append(args, *input.IsPromotional)
 		n++
 	}
 
-	query := "UPDATE ride_packages SET " + joinStrings(sets, ", ") +
+	query := "UPDATE ride_packages SET " + strings.Join(sets, ", ") +
 		" WHERE id = $1 AND deleted_at IS NULL" +
 		" RETURNING id, name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional, is_active, created_at, deleted_at"
 
@@ -210,38 +211,38 @@ func (r *Repository) UpdatePackage(ctx context.Context, packageID string, input 
 	vn := 2
 
 	if input.RideCount != nil {
-		vsets = append(vsets, "rides = $"+itoa(vn))
+		vsets = append(vsets, "rides = $"+strconv.Itoa(vn))
 		vargs = append(vargs, *input.RideCount)
 		vn++
 	}
 	if input.BonusRides != nil {
-		vsets = append(vsets, "bonus_rides = $"+itoa(vn))
+		vsets = append(vsets, "bonus_rides = $"+strconv.Itoa(vn))
 		vargs = append(vargs, *input.BonusRides)
 		vn++
 	}
 	if input.PriceRWF != nil {
-		vsets = append(vsets, "price_rwf = $"+itoa(vn))
+		vsets = append(vsets, "price_rwf = $"+strconv.Itoa(vn))
 		vargs = append(vargs, *input.PriceRWF)
 		vn++
 	}
 	if input.ValidityDays != nil {
-		vsets = append(vsets, "validity_days = $"+itoa(vn))
+		vsets = append(vsets, "validity_days = $"+strconv.Itoa(vn))
 		vargs = append(vargs, *input.ValidityDays)
 		vn++
 	}
 	if input.CostPerRideRWF != nil {
-		vsets = append(vsets, "cost_per_ride_rwf = $"+itoa(vn))
+		vsets = append(vsets, "cost_per_ride_rwf = $"+strconv.Itoa(vn))
 		vargs = append(vargs, *input.CostPerRideRWF)
 		vn++
 	}
 	if input.IsPromotional != nil {
-		vsets = append(vsets, "is_promotional = $"+itoa(vn))
+		vsets = append(vsets, "is_promotional = $"+strconv.Itoa(vn))
 		vargs = append(vargs, *input.IsPromotional)
 		vn++
 	}
 
 	if len(vsets) > 0 {
-		vquery := "UPDATE ride_package_versions SET " + joinStrings(vsets, ", ") + " WHERE package_id = $1 AND status = 'ACTIVE'"
+		vquery := "UPDATE ride_package_versions SET " + strings.Join(vsets, ", ") + " WHERE package_id = $1 AND status = 'ACTIVE'"
 		_, err = tx.Exec(ctx, vquery, vargs...)
 		if err != nil {
 			return nil, err
@@ -394,72 +395,72 @@ func (r *Repository) UpdateCampaign(ctx context.Context, id string, input *Updat
 	n := 2
 
 	if input.Name != nil {
-		sets = append(sets, "name = $"+itoa(n))
+		sets = append(sets, "name = $"+strconv.Itoa(n))
 		args = append(args, *input.Name)
 		n++
 	}
 	if input.Description != nil {
-		sets = append(sets, "description = $"+itoa(n))
+		sets = append(sets, "description = $"+strconv.Itoa(n))
 		args = append(args, *input.Description)
 		n++
 	}
 	if input.Status != nil {
-		sets = append(sets, "status = $"+itoa(n))
+		sets = append(sets, "status = $"+strconv.Itoa(n))
 		args = append(args, *input.Status)
 		n++
 	}
 	if input.StartsAt != nil {
-		sets = append(sets, "starts_at = $"+itoa(n))
+		sets = append(sets, "starts_at = $"+strconv.Itoa(n))
 		args = append(args, input.StartsAt)
 		n++
 	}
 	if input.EndsAt != nil {
-		sets = append(sets, "ends_at = $"+itoa(n))
+		sets = append(sets, "ends_at = $"+strconv.Itoa(n))
 		args = append(args, input.EndsAt)
 		n++
 	}
 	if input.TargetVehicleTypeID != nil {
-		sets = append(sets, "target_vehicle_type_id = $"+itoa(n))
+		sets = append(sets, "target_vehicle_type_id = $"+strconv.Itoa(n))
 		args = append(args, input.TargetVehicleTypeID)
 		n++
 	}
 	if input.TargetPackageID != nil {
-		sets = append(sets, "target_package_id = $"+itoa(n))
+		sets = append(sets, "target_package_id = $"+strconv.Itoa(n))
 		args = append(args, input.TargetPackageID)
 		n++
 	}
 	if input.OverridePriceRWF != nil {
-		sets = append(sets, "override_price_rwf = $"+itoa(n))
+		sets = append(sets, "override_price_rwf = $"+strconv.Itoa(n))
 		args = append(args, input.OverridePriceRWF)
 		n++
 	}
 	if input.OverrideRides != nil {
-		sets = append(sets, "override_rides = $"+itoa(n))
+		sets = append(sets, "override_rides = $"+strconv.Itoa(n))
 		args = append(args, input.OverrideRides)
 		n++
 	}
 	if input.OverrideBonusRides != nil {
-		sets = append(sets, "override_bonus_rides = $"+itoa(n))
+		sets = append(sets, "override_bonus_rides = $"+strconv.Itoa(n))
 		args = append(args, input.OverrideBonusRides)
 		n++
 	}
 	if input.Priority != nil {
-		sets = append(sets, "priority = $"+itoa(n))
+		sets = append(sets, "priority = $"+strconv.Itoa(n))
 		args = append(args, *input.Priority)
 		n++
 	}
 	if input.MaxRedemptions != nil {
-		sets = append(sets, "max_redemptions = $"+itoa(n))
+		sets = append(sets, "max_redemptions = $"+strconv.Itoa(n))
 		args = append(args, input.MaxRedemptions)
 		n++
 	}
 	if input.PerDriverLimit != nil {
-		sets = append(sets, "per_driver_limit = $"+itoa(n))
+		sets = append(sets, "per_driver_limit = $"+strconv.Itoa(n))
 		args = append(args, input.PerDriverLimit)
 		n++
 	}
 
-	query := "UPDATE campaigns SET " + joinStrings(sets, ", ") + " WHERE id = $1"
+	query := "UPDATE campaigns SET " + strings.Join(sets, ", ") + " WHERE id = $1"
 	tag, err := tx.Exec(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -496,24 +497,6 @@ func (r *Repository) DeleteCampaign(ctx context.Context, id string) error {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-func itoa(n int) string {
-	if n < 10 {
-		return string(rune('0' + n))
-	}
-	return string(rune('0'+(n/10))) + string(rune('0'+(n%10)))
-}
-
-func joinStrings(ss []string, sep string) string {
-	out := ""
-	for i, s := range ss {
-		if i > 0 {
-			out += sep
-		}
-		out += s
-	}
-	return out
-}
 
 // ListCatalog returns the v4 buyable catalog for a vehicle type: each active
 // package's ACTIVE version with the best-matching active campaign applied.
