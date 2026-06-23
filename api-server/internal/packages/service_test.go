@@ -31,6 +31,12 @@ type mockRepo struct {
 func (m *mockRepo) ListPackages(_ context.Context, _ string) ([]*packages.Package, error) {
 	return nil, nil
 }
+func (m *mockRepo) ListCatalog(_ context.Context, _ string) ([]*packages.CatalogPackage, error) {
+	return nil, nil
+}
+func (m *mockRepo) ListActiveCampaigns(_ context.Context, _ string) ([]*packages.Campaign, error) {
+	return nil, nil
+}
 func (m *mockRepo) GetPackageByID(_ context.Context, _ string) (*packages.Package, error) {
 	return m.pkgByID, m.pkgByIDErr
 }
