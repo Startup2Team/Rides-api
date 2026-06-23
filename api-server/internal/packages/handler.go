@@ -430,4 +430,3 @@ func (h *Handler) AdminDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 
 	respond.OK(w, map[string]string{"status": "success"})
 }
-

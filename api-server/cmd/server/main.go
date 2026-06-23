@@ -733,7 +733,6 @@ func main() {
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
-
 			// Bonuses — admin CRUD for bonus tiers
 			r.Get("/bonuses/tiers", bonusH.AdminListTiers)
 			r.Post("/bonuses/tiers", bonusH.AdminCreateTier)

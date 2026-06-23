@@ -232,7 +232,6 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 				return apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding.")
 			}
 		}
-
 		offlineKey := rkeys.K.DriverOfflineAt(profile.ID)
 		_, redisErr := s.redis.Get(ctx, offlineKey).Result()
 		if redisErr == nil {
