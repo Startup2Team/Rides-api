@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net/http"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -55,17 +56,26 @@ type ApplyInput struct {
 	AuthorizationExpiryDate *time.Time
 }
 
+type CreditChecker interface {
+	HasCredits(ctx context.Context, driverUserID, vehicleType string) (bool, error)
+}
+
 // Service handles driver business logic.
 type Service struct {
-	repo      *Repository
-	redis     *goredis.Client
-	analytics *analytics.Service
-	cfg       *config.Config
-	log       zerolog.Logger
+	repo          *Repository
+	redis         *goredis.Client
+	analytics     *analytics.Service
+	cfg           *config.Config
+	log           zerolog.Logger
+	creditChecker CreditChecker
 }
 
 func NewService(repo *Repository, rdb *goredis.Client, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{repo: repo, redis: rdb, analytics: ana, cfg: cfg, log: log}
+}
+
+func (s *Service) SetCreditChecker(cc CreditChecker) {
+	s.creditChecker = cc
 }
 
 // Apply submits a driver application.
@@ -206,6 +216,23 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 		if profile.ApprovalStatus != "APPROVED" {
 			return apperrors.ErrDriverNotActive
 		}
+
+		// 1. License Expiry Check
+		if profile.LicenseExpiryDate != nil && profile.LicenseExpiryDate.Before(time.Now()) {
+			return apperrors.New(http.StatusBadRequest, "EXPIRED_LICENSE", "Your driver license has expired. Update your driver license documents to continue.")
+		}
+
+		// 2. Active Package / Credits Check
+		if s.creditChecker != nil {
+			hasCredits, err := s.creditChecker.HasCredits(ctx, userID, profile.TransportType)
+			if err != nil {
+				return err
+			}
+			if !hasCredits {
+				return apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding.")
+			}
+		}
+
 		offlineKey := rkeys.K.DriverOfflineAt(profile.ID)
 		_, redisErr := s.redis.Get(ctx, offlineKey).Result()
 		if redisErr == nil {

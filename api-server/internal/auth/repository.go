@@ -180,3 +180,85 @@ func (r *Repository) ClearSuspension(ctx context.Context, userID string) error {
 	)
 	return err
 }
+
+// AnonymizeUser scrubs all PII from users and associated tables within a transaction.
+func (r *Repository) AnonymizeUser(ctx context.Context, userID string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Delete device sessions
+	_, err = tx.Exec(ctx, `DELETE FROM device_sessions WHERE user_id = $1`, userID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Delete saved locations
+	_, err = tx.Exec(ctx, `DELETE FROM saved_locations WHERE user_id = $1`, userID)
+	if err != nil {
+		return err
+	}
+
+	// 3. Delete driver locations
+	_, err = tx.Exec(ctx, `DELETE FROM driver_locations WHERE driver_id IN (SELECT id FROM driver_profiles WHERE user_id = $1)`, userID)
+	if err != nil {
+		return err
+	}
+
+	// 4. Delete driver documents
+	_, err = tx.Exec(ctx, `DELETE FROM driver_documents WHERE driver_id IN (SELECT id FROM driver_profiles WHERE user_id = $1)`, userID)
+	if err != nil {
+		return err
+	}
+
+	// 5. Update driver vehicles to scrub and release plate numbers
+	_, err = tx.Exec(ctx, `
+		UPDATE driver_vehicles
+		SET plate_number = 'del_pl_' || left(id::text, 12),
+			is_active = FALSE,
+			updated_at = NOW()
+		WHERE driver_id IN (SELECT id FROM driver_profiles WHERE user_id = $1)
+	`, userID)
+	if err != nil {
+		return err
+	}
+
+	// 6. Update driver profile to scrub and release license numbers/sensitive info
+	_, err = tx.Exec(ctx, `
+		UPDATE driver_profiles
+		SET vehicle_plate = 'del_pl_' || left(id::text, 12),
+			license_number = 'del_li_' || left(id::text, 12),
+			city = 'deleted',
+			momo_pay_code = 'deleted',
+			province = NULL,
+			district = NULL,
+			sector = NULL,
+			cell = NULL,
+			village = NULL,
+			is_online = FALSE,
+			updated_at = NOW()
+		WHERE user_id = $1
+	`, userID)
+	if err != nil {
+		return err
+	}
+
+	// 7. Update user profile to scrub personal details and release phone number
+	_, err = tx.Exec(ctx, `
+		UPDATE users
+		SET phone_number = 'del_' || left(id::text, 15),
+			full_name = 'Deleted User',
+			email = NULL,
+			device_id = NULL,
+			fcm_token = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}

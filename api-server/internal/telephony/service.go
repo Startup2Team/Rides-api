@@ -40,6 +40,9 @@ const (
 func (s *Service) SendOTP(ctx context.Context, phone, otp string) error {
 	if s.cfg.AT.APIKey == "" || s.cfg.AT.Username == "" {
 		s.log.Warn().Msg("Africa's Talking credentials not configured — skipping SMS send")
+		if s.cfg.Env == "production" {
+			return fmt.Errorf("telephony: Africa's Talking credentials not configured")
+		}
 		return nil
 	}
 

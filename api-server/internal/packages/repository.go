@@ -3,6 +3,7 @@ package packages
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -100,11 +101,12 @@ func (r *Repository) CreatePackage(ctx context.Context, input *CreatePackageInpu
 	}
 
 	p := &Package{}
+	packageCode := packageCodeFromName(input.Name)
 	err = tx.QueryRow(ctx, `
-		INSERT INTO ride_packages (name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, cost_per_ride_rwf, is_promotional)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO ride_packages (name, code, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, cost_per_ride_rwf, is_promotional)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, name, vehicle_type_id, ride_count, bonus_rides, validity_days, price_rwf, is_promotional, is_active, created_at, deleted_at
-	`, input.Name, vehicleTypeID, input.RideCount, input.BonusRides, input.ValidityDays, input.PriceRWF, input.CostPerRideRWF, input.IsPromotional).Scan(
+	`, input.Name, packageCode, vehicleTypeID, input.RideCount, input.BonusRides, input.ValidityDays, input.PriceRWF, input.CostPerRideRWF, input.IsPromotional).Scan(
 		&p.ID, &p.Name, &p.VehicleTypeID, &p.RideCount, &p.BonusRides,
 		&p.ValidityDays, &p.PriceRWF, &p.IsPromotional, &p.IsActive, &p.CreatedAt, &p.DeletedAt,
 	)
@@ -307,7 +309,7 @@ func joinStrings(ss []string, sep string) string {
 // highest priority wins. FIRST_PURCHASE/REFERRAL are resolved at purchase time.
 func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT p.id, p.code, p.name, vt.code,
+		SELECT p.id, COALESCE(p.code, ''), p.name, vt.code,
 		       v.id, v.version_number, v.rides, v.bonus_rides, v.price_rwf,
 		       v.validity_days, v.is_promotional, v.is_unlimited,
 		       c.id, c.code, c.override_price_rwf, c.override_rides, c.override_bonus_rides
@@ -326,7 +328,9 @@ func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([
 			ORDER BY cc.priority DESC, cc.created_at DESC
 			LIMIT 1
 		) c ON TRUE
-		WHERE p.is_active = TRUE AND vt.code = $1
+		WHERE p.is_active = TRUE
+		  AND p.deleted_at IS NULL
+		  AND vt.code = $1
 		ORDER BY v.price_rwf ASC
 	`, vehicleTypeCode)
 	if err != nil {
@@ -606,4 +610,16 @@ func (r *Repository) GrantFreeTrialIfEligible(ctx context.Context, driverUserID,
 	}
 
 	return tx.Commit(ctx)
+}
+
+func packageCodeFromName(name string) string {
+	code := strings.ToLower(strings.TrimSpace(name))
+	code = strings.ReplaceAll(code, " ", "_")
+	if len(code) > 40 {
+		code = code[:40]
+	}
+	if code == "" {
+		return "package"
+	}
+	return code
 }

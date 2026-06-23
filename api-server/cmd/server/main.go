@@ -149,6 +149,7 @@ func main() {
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
+	driverSvc.SetCreditChecker(pkgSvc)
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
@@ -334,6 +335,7 @@ func main() {
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
 		r.Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
+		r.With(mw.Authenticate(cfg, rdb)).Delete("/account", authH.DeleteAccount)
 	})
 
 	// MoMo payment callback — public (called by the provider, not the app).
@@ -380,6 +382,10 @@ func main() {
 			r.Get("/profile", driverH.GetProfile)
 			r.Put("/profile", driverH.UpdateProfile)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending, mw.RoleCustomer))
 			r.Post("/documents", driverH.UploadDocument)
 			r.Get("/documents", driverH.ListDocuments)
 		})

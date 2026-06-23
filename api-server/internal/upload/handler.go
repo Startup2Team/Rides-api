@@ -1,6 +1,7 @@
 package upload
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -60,12 +62,104 @@ func NewHandler(cfg *appcfg.Config) (*Handler, error) {
 			o.BaseEndpoint = aws.String(fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.Storage.KeyID))
 		}
 	})
-	return &Handler{
+	h := &Handler{
 		cfg:       cfg,
 		client:    s3Client,
 		presigner: s3.NewPresignClient(s3Client),
 		proxy:     strings.EqualFold(cfg.Storage.Provider, "minio"),
-	}, nil
+	}
+	if h.proxy {
+		go h.SeedDevMockFiles()
+	}
+	return h, nil
+}
+
+func (h *Handler) SeedDevMockFiles() {
+	if !h.proxy {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. Create the bucket if it doesn't exist
+	_, err := h.client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(h.cfg.Storage.Bucket),
+	})
+	if err != nil {
+		// Ignore if it already exists
+	}
+
+	// Set bucket policy to allow anonymous read (MinIO default is private,
+	// but the application relies on public-read style URL access for driver images).
+	policy := fmt.Sprintf(`{
+		"Version": "2012-10-17",
+		"Statement": [
+			{
+				"Sid": "PublicRead",
+				"Effect": "Allow",
+				"Principal": "*",
+				"Action": ["s3:GetObject"],
+				"Resource": ["arn:aws:s3:::%s/*"]
+			}
+		]
+	}`, h.cfg.Storage.Bucket)
+
+	_, _ = h.client.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+		Bucket: aws.String(h.cfg.Storage.Bucket),
+		Policy: aws.String(policy),
+	})
+
+	// 2. Read the placeholder image file
+	var imgData []byte
+	paths := []string{
+		"/home/salomon/rides-project/rides-web/public/images/driverside-clean.png",
+		"../../rides-web/public/images/driverside-clean.png",
+		"../rides-web/public/images/driverside-clean.png",
+	}
+
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err == nil && len(data) > 0 {
+			imgData = data
+			break
+		}
+	}
+
+	// Fallback to a tiny 1x1 transparent PNG if we cannot load the real image
+	if len(imgData) == 0 {
+		imgData = []byte{
+			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+			0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+			0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x60, 0x60, 0x60, 0x60,
+			0x00, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+			0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+		}
+	}
+
+	mockDocs := []string{
+		"documents/mock-licence-front.jpg",
+		"documents/mock-licence-back.jpg",
+		"documents/mock-national-id-front.jpg",
+		"documents/mock-national-id-back.jpg",
+		"documents/mock-vehicle-insurance.jpg",
+		"documents/mock-vehicle-authorization.jpg",
+		"documents/mock-selfie.jpg",
+	}
+
+	contentType := "image/png"
+	if len(imgData) > 0 && imgData[0] == 0xFF && imgData[1] == 0xD8 {
+		contentType = "image/jpeg"
+	}
+
+	for _, key := range mockDocs {
+		_, _ = h.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:      aws.String(h.cfg.Storage.Bucket),
+			Key:         aws.String(key),
+			Body:        bytes.NewReader(imgData),
+			ContentType: aws.String(contentType),
+		})
+	}
 }
 
 func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
