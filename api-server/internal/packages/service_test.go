@@ -96,7 +96,6 @@ func (m *mockRepo) DeleteCampaign(_ context.Context, _ string) error {
 	return nil
 }
 
-
 func newSvc(repo packages.Repo) *packages.Service {
 	return packages.NewService(repo, zerolog.Nop())
 }

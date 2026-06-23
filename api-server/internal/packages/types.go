@@ -103,7 +103,7 @@ type AdminCampaign struct {
 	Code                  string     `json:"code"`
 	Name                  string     `json:"name"`
 	Description           string     `json:"description"`
-	Type                  string     `json:"type"` // GLOBAL|VEHICLE_TYPE|PACKAGE|FIRST_PURCHASE|REFERRAL
+	Type                  string     `json:"type"`   // GLOBAL|VEHICLE_TYPE|PACKAGE|FIRST_PURCHASE|REFERRAL
 	Status                string     `json:"status"` // DRAFT|SCHEDULED|ACTIVE|EXPIRED|ARCHIVED
 	StartsAt              *time.Time `json:"starts_at"`
 	EndsAt                *time.Time `json:"ends_at"`
@@ -123,35 +123,34 @@ type AdminCampaign struct {
 }
 
 type CreateCampaignInput struct {
-	Code               string     `json:"code" validate:"required"`
-	Name               string     `json:"name" validate:"required"`
-	Description        string     `json:"description"`
-	Type               string     `json:"type" validate:"required,oneof=GLOBAL VEHICLE_TYPE PACKAGE FIRST_PURCHASE REFERRAL"`
-	StartsAt           *time.Time `json:"starts_at"`
-	EndsAt             *time.Time `json:"ends_at"`
-	TargetVehicleTypeID *string   `json:"target_vehicle_type_id"`
-	TargetPackageID    *string    `json:"target_package_id"`
-	OverridePriceRWF   *int       `json:"override_price_rwf"`
-	OverrideRides      *int       `json:"override_rides"`
-	OverrideBonusRides *int       `json:"override_bonus_rides"`
-	Priority           int        `json:"priority"`
-	MaxRedemptions     *int       `json:"max_redemptions"`
-	PerDriverLimit     *int       `json:"per_driver_limit"`
+	Code                string     `json:"code" validate:"required"`
+	Name                string     `json:"name" validate:"required"`
+	Description         string     `json:"description"`
+	Type                string     `json:"type" validate:"required,oneof=GLOBAL VEHICLE_TYPE PACKAGE FIRST_PURCHASE REFERRAL"`
+	StartsAt            *time.Time `json:"starts_at"`
+	EndsAt              *time.Time `json:"ends_at"`
+	TargetVehicleTypeID *string    `json:"target_vehicle_type_id"`
+	TargetPackageID     *string    `json:"target_package_id"`
+	OverridePriceRWF    *int       `json:"override_price_rwf"`
+	OverrideRides       *int       `json:"override_rides"`
+	OverrideBonusRides  *int       `json:"override_bonus_rides"`
+	Priority            int        `json:"priority"`
+	MaxRedemptions      *int       `json:"max_redemptions"`
+	PerDriverLimit      *int       `json:"per_driver_limit"`
 }
 
 type UpdateCampaignInput struct {
-	Name               *string    `json:"name"`
-	Description        *string    `json:"description"`
-	Status             *string    `json:"status" validate:"omitempty,oneof=DRAFT SCHEDULED ACTIVE EXPIRED ARCHIVED"`
-	StartsAt           *time.Time `json:"starts_at"`
-	EndsAt             *time.Time `json:"ends_at"`
-	TargetVehicleTypeID *string   `json:"target_vehicle_type_id"`
-	TargetPackageID    *string    `json:"target_package_id"`
-	OverridePriceRWF   *int       `json:"override_price_rwf"`
-	OverrideRides      *int       `json:"override_rides"`
-	OverrideBonusRides *int       `json:"override_bonus_rides"`
-	Priority           *int       `json:"priority"`
-	MaxRedemptions     *int       `json:"max_redemptions"`
-	PerDriverLimit     *int       `json:"per_driver_limit"`
+	Name                *string    `json:"name"`
+	Description         *string    `json:"description"`
+	Status              *string    `json:"status" validate:"omitempty,oneof=DRAFT SCHEDULED ACTIVE EXPIRED ARCHIVED"`
+	StartsAt            *time.Time `json:"starts_at"`
+	EndsAt              *time.Time `json:"ends_at"`
+	TargetVehicleTypeID *string    `json:"target_vehicle_type_id"`
+	TargetPackageID     *string    `json:"target_package_id"`
+	OverridePriceRWF    *int       `json:"override_price_rwf"`
+	OverrideRides       *int       `json:"override_rides"`
+	OverrideBonusRides  *int       `json:"override_bonus_rides"`
+	Priority            *int       `json:"priority"`
+	MaxRedemptions      *int       `json:"max_redemptions"`
+	PerDriverLimit      *int       `json:"per_driver_limit"`
 }
-
