@@ -14,6 +14,8 @@ import (
 // tests can provide a lightweight mock instead.
 type Repo interface {
 	ListPackages(ctx context.Context, vehicleTypeCode string) ([]*Package, error)
+	ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error)
+	ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error)
 	GetPackageByID(ctx context.Context, packageID string) (*Package, error)
 	GetActiveCredit(ctx context.Context, driverUserID string) (*DriverCredit, error)
 	SumActiveCredits(ctx context.Context, driverUserID string) (int, error)
@@ -114,6 +116,14 @@ func (s *Service) GetPackageByID(ctx context.Context, id string) (*Package, erro
 
 func (s *Service) AdminDeletePackage(ctx context.Context, id string) error {
 	return s.repo.AdminDeletePackage(ctx, id)
+}
+
+func (s *Service) ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error) {
+	return s.repo.ListCatalog(ctx, vehicleTypeCode)
+}
+
+func (s *Service) ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error) {
+	return s.repo.ListActiveCampaigns(ctx, vehicleTypeCode)
 }
 
 // GetCredits returns the driver's current best active credit, or nil if none.

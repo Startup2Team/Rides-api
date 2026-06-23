@@ -128,9 +128,7 @@ func (r *Repository) AdminUpdatePackage(ctx context.Context, id string, name *st
 	return r.GetPackageByID(ctx, id)
 }
 
-// AdminTogglePackage activates or deactivates a package. Deactivating removes
-// it from sale without deleting history — driver_ride_credits already issued
-// are unaffected.
+// AdminTogglePackage activates or deactivates a package.
 func (r *Repository) AdminTogglePackage(ctx context.Context, id string, isActive bool) error {
 	_, err := r.db.Exec(ctx, `UPDATE ride_packages SET is_active = $1 WHERE id = $2`, isActive, id)
 	return err
@@ -140,6 +138,107 @@ func (r *Repository) AdminTogglePackage(ctx context.Context, id string, isActive
 func (r *Repository) AdminDeletePackage(ctx context.Context, id string) error {
 	_, err := r.db.Exec(ctx, `UPDATE ride_packages SET deleted_at = NOW(), is_active = FALSE WHERE id = $1`, id)
 	return err
+}
+
+// ListCatalog returns the v4 buyable catalog for a vehicle type: each active
+// package's ACTIVE version with the best-matching active campaign applied.
+func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([]*CatalogPackage, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT p.id, p.code, p.name, vt.code,
+		       v.id, v.version_number, v.rides, v.bonus_rides, v.price_rwf,
+		       v.validity_days, v.is_promotional, v.is_unlimited,
+		       c.id, c.code, c.override_price_rwf, c.override_rides, c.override_bonus_rides
+		FROM ride_packages p
+		JOIN vehicle_types vt ON vt.id = p.vehicle_type_id
+		JOIN ride_package_versions v ON v.package_id = p.id AND v.status = 'ACTIVE'
+		LEFT JOIN LATERAL (
+			SELECT cc.id, cc.code, cc.override_price_rwf, cc.override_rides, cc.override_bonus_rides
+			FROM campaigns cc
+			WHERE cc.status = 'ACTIVE'
+			  AND (cc.starts_at IS NULL OR cc.starts_at <= now())
+			  AND (cc.ends_at   IS NULL OR cc.ends_at   >= now())
+			  AND cc.type IN ('GLOBAL','VEHICLE_TYPE','PACKAGE')
+			  AND (cc.target_vehicle_type_id IS NULL OR cc.target_vehicle_type_id = p.vehicle_type_id)
+			  AND (cc.target_package_id      IS NULL OR cc.target_package_id      = p.id)
+			ORDER BY cc.priority DESC, cc.created_at DESC
+			LIMIT 1
+		) c ON TRUE
+		WHERE p.is_active = TRUE AND vt.code = $1
+		ORDER BY v.price_rwf ASC
+	`, vehicleTypeCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*CatalogPackage
+	for rows.Next() {
+		var (
+			cp                        CatalogPackage
+			ovPrice, ovRides, ovBonus *int
+			campaignID, campaignCode  *string
+		)
+		if err := rows.Scan(
+			&cp.ID, &cp.Code, &cp.Name, &cp.VehicleTypeCode,
+			&cp.VersionID, &cp.VersionNumber, &cp.IncludedRides, &cp.BonusRides, &cp.NormalPriceRWF,
+			&cp.ValidityDays, &cp.LaunchOffer, &cp.IsUnlimited,
+			&campaignID, &campaignCode, &ovPrice, &ovRides, &ovBonus,
+		); err != nil {
+			return nil, err
+		}
+		cp.CurrentPriceRWF = cp.NormalPriceRWF
+		if ovPrice != nil {
+			cp.CurrentPriceRWF = *ovPrice
+		}
+		if ovRides != nil {
+			cp.IncludedRides = *ovRides
+		}
+		if ovBonus != nil {
+			cp.BonusRides = *ovBonus
+		}
+		if campaignID != nil {
+			cp.CampaignID, cp.CampaignCode = campaignID, campaignCode
+		}
+		cp.TotalCredits = cp.IncludedRides + cp.BonusRides
+		cp.IsPromotional = cp.LaunchOffer
+		cp.PriceRWF = cp.CurrentPriceRWF
+		cp.RideCount = cp.TotalCredits
+		out = append(out, &cp)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveCampaigns returns currently-running campaigns relevant to a vehicle
+// type (GLOBAL or matching that type).
+func (r *Repository) ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.code, c.name, c.type, c.starts_at, c.ends_at,
+		       c.override_price_rwf, c.override_rides, c.override_bonus_rides
+		FROM campaigns c
+		LEFT JOIN vehicle_types vt ON vt.id = c.target_vehicle_type_id
+		WHERE c.status = 'ACTIVE'
+		  AND (c.starts_at IS NULL OR c.starts_at <= now())
+		  AND (c.ends_at   IS NULL OR c.ends_at   >= now())
+		  AND (c.target_vehicle_type_id IS NULL OR vt.code = $1)
+		ORDER BY c.priority DESC, c.created_at DESC
+	`, vehicleTypeCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*Campaign
+	for rows.Next() {
+		c := &Campaign{}
+		if err := rows.Scan(
+			&c.ID, &c.Code, &c.Name, &c.Type, &c.StartsAt, &c.EndsAt,
+			&c.OverridePriceRWF, &c.OverrideRides, &c.OverrideBonusRides,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // GetPackageByID returns a single package by its ID.

@@ -38,10 +38,11 @@ type RouteFareRecorder interface {
 }
 
 // PackagesService charges a ride credit when a fare is agreed and refunds it
-// on server-verified blameless cancellations.
+// on server-verified blameless cancellations. Backed by the v4 entitlement
+// ledger: both calls are idempotent per ride and need the ride's vehicle type.
 type PackagesService interface {
-	DeductCredit(ctx context.Context, driverUserID string) error
-	RefundCredit(ctx context.Context, driverUserID string) error
+	DeductForRide(ctx context.Context, driverUserID, vehicleTypeCode, rideID string) (bool, error)
+	RefundForRide(ctx context.Context, driverUserID, vehicleTypeCode, rideID string) (bool, error)
 }
 
 // Service handles ride lifecycle business logic.
@@ -235,7 +236,12 @@ func (s *Service) refundDriverCredit(ctx context.Context, rideID string, driverP
 		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: credit refund — could not resolve driver user")
 		return
 	}
-	if err := s.packages.RefundCredit(ctx, driverUserID); err != nil {
+	r, err := s.repo.FindByID(ctx, rideID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: credit refund — could not load ride")
+		return
+	}
+	if _, err := s.packages.RefundForRide(ctx, driverUserID, r.TransportType, rideID); err != nil {
 		s.log.Warn().Err(err).Str("ride_id", rideID).Str("driver_user_id", driverUserID).Msg("ride: credit refund failed")
 		return
 	}
@@ -341,7 +347,7 @@ func (s *Service) ChargeForAgreedFare(ctx context.Context, rideID string) {
 		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: credit charge — could not resolve driver user")
 		return
 	}
-	if err := s.packages.DeductCredit(ctx, driverUserID); err != nil {
+	if _, err := s.packages.DeductForRide(ctx, driverUserID, r.TransportType, rideID); err != nil {
 		s.log.Warn().Err(err).Str("ride_id", rideID).Str("driver_user_id", driverUserID).Msg("ride: credit charge on agreement failed")
 		return
 	}
