@@ -28,6 +28,13 @@ type Repo interface {
 	UpdatePackage(ctx context.Context, packageID string, p *UpdatePackageInput) (*Package, error)
 	SetPackageActive(ctx context.Context, packageID string, active bool) error
 	DeletePackage(ctx context.Context, packageID string) error
+
+	ListAllCampaigns(ctx context.Context) ([]*AdminCampaign, error)
+	GetCampaignByID(ctx context.Context, id string) (*AdminCampaign, error)
+	CreateCampaign(ctx context.Context, creatorAdminID string, input *CreateCampaignInput) (*AdminCampaign, error)
+	UpdateCampaign(ctx context.Context, id string, input *UpdateCampaignInput) (*AdminCampaign, error)
+	SetCampaignStatus(ctx context.Context, id string, status string) error
+	DeleteCampaign(ctx context.Context, id string) error
 }
 
 // WalletDeductor is the wallet.Service method subset needed by this package.
@@ -152,6 +159,30 @@ func (s *Service) GetPackageByID(ctx context.Context, id string) (*Package, erro
 
 func (s *Service) AdminDeletePackage(ctx context.Context, id string) error {
 	return s.repo.DeletePackage(ctx, id)
+}
+
+func (s *Service) AdminListCampaigns(ctx context.Context) ([]*AdminCampaign, error) {
+	return s.repo.ListAllCampaigns(ctx)
+}
+
+func (s *Service) AdminCreateCampaign(ctx context.Context, creatorAdminID string, input *CreateCampaignInput) (*AdminCampaign, error) {
+	return s.repo.CreateCampaign(ctx, creatorAdminID, input)
+}
+
+func (s *Service) AdminUpdateCampaign(ctx context.Context, id string, input *UpdateCampaignInput) (*AdminCampaign, error) {
+	return s.repo.UpdateCampaign(ctx, id, input)
+}
+
+func (s *Service) AdminSetCampaignStatus(ctx context.Context, id string, status string) error {
+	return s.repo.SetCampaignStatus(ctx, id, status)
+}
+
+func (s *Service) AdminDeleteCampaign(ctx context.Context, id string) error {
+	return s.repo.DeleteCampaign(ctx, id)
+}
+
+func (s *Service) GetCampaignByID(ctx context.Context, id string) (*AdminCampaign, error) {
+	return s.repo.GetCampaignByID(ctx, id)
 }
 
 // ListCatalog returns the v4 buyable catalog (active version + campaign applied).

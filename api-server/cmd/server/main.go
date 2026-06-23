@@ -728,6 +728,12 @@ func main() {
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
 			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
 
+			// Campaigns admin CRUD
+			r.Get("/campaigns", pkgH.AdminListCampaigns)
+			r.Post("/campaigns", pkgH.AdminCreateCampaign)
+			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
+			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
+
 			// Bonuses — admin CRUD for bonus tiers
 			r.Get("/bonuses/tiers", bonusH.AdminListTiers)
 			r.Post("/bonuses/tiers", bonusH.AdminCreateTier)

@@ -328,3 +328,106 @@ func (h *Handler) AdminDeletePackage(w http.ResponseWriter, r *http.Request) {
 
 	respond.OK(w, map[string]string{"status": "success"})
 }
+
+// GET /api/v1/admin/campaigns
+func (h *Handler) AdminListCampaigns(w http.ResponseWriter, r *http.Request) {
+	campaigns, err := h.svc.AdminListCampaigns(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, campaigns)
+}
+
+// POST /api/v1/admin/campaigns
+func (h *Handler) AdminCreateCampaign(w http.ResponseWriter, r *http.Request) {
+	var input CreateCampaignInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(input); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	adminID, role := adminCtx(r)
+	campaign, err := h.svc.AdminCreateCampaign(r.Context(), adminID, &input)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	h.audit.Record(r.Context(), adminID, role, "campaign.create", "campaigns", campaign.ID, fmt.Sprintf("Created campaign %s (code: %s)", campaign.Name, campaign.Code), map[string]any{"campaign": campaign})
+
+	respond.Created(w, campaign)
+}
+
+// PATCH /api/v1/admin/campaigns/{id}
+func (h *Handler) AdminUpdateCampaign(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "id path parameter is required")
+		return
+	}
+
+	var input UpdateCampaignInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(input); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	campaign, err := h.svc.AdminUpdateCampaign(r.Context(), id, &input)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	adminID, role := adminCtx(r)
+	action := "campaign.update"
+	if input.Status != nil {
+		if *input.Status == "ACTIVE" {
+			action = "campaign.activate"
+		} else if *input.Status == "EXPIRED" {
+			action = "campaign.expire"
+		} else if *input.Status == "ARCHIVED" {
+			action = "campaign.archive"
+		}
+	}
+	h.audit.Record(r.Context(), adminID, role, action, "campaigns", campaign.ID, fmt.Sprintf("Updated campaign %s", campaign.Name), map[string]any{"updates": input})
+
+	respond.OK(w, campaign)
+}
+
+// DELETE /api/v1/admin/campaigns/{id}
+func (h *Handler) AdminDeleteCampaign(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "id path parameter is required")
+		return
+	}
+
+	campaign, err := h.svc.GetCampaignByID(r.Context(), id)
+	var campaignName string
+	if err == nil && campaign != nil {
+		campaignName = campaign.Name
+	} else {
+		campaignName = id
+	}
+
+	err = h.svc.AdminDeleteCampaign(r.Context(), id)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "campaign.delete", "campaigns", id, fmt.Sprintf("Soft-deleted (archived) campaign %s", campaignName), map[string]any{"campaign_id": id})
+
+	respond.OK(w, map[string]string{"status": "success"})
+}
+

@@ -285,10 +285,223 @@ func (r *Repository) DeletePackage(ctx context.Context, packageID string) error 
 	return nil
 }
 
+// ListAllCampaigns returns all campaigns for the admin console, newest first.
+func (r *Repository) ListAllCampaigns(ctx context.Context) ([]*AdminCampaign, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.code, c.name, COALESCE(c.description, ''), c.type, c.status, c.starts_at, c.ends_at,
+		       c.target_vehicle_type_id, vt.code,
+		       c.target_package_id, rp.name,
+		       c.override_price_rwf, c.override_rides, c.override_bonus_rides,
+		       c.priority, c.max_redemptions, c.per_driver_limit,
+		       c.created_by, c.created_at, c.updated_at
+		FROM campaigns c
+		LEFT JOIN vehicle_types vt ON vt.id = c.target_vehicle_type_id
+		LEFT JOIN ride_packages rp ON rp.id = c.target_package_id
+		ORDER BY c.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*AdminCampaign
+	for rows.Next() {
+		c := &AdminCampaign{}
+		if err := rows.Scan(
+			&c.ID, &c.Code, &c.Name, &c.Description, &c.Type, &c.Status, &c.StartsAt, &c.EndsAt,
+			&c.TargetVehicleTypeID, &c.TargetVehicleTypeCode,
+			&c.TargetPackageID, &c.TargetPackageName,
+			&c.OverridePriceRWF, &c.OverrideRides, &c.OverrideBonusRides,
+			&c.Priority, &c.MaxRedemptions, &c.PerDriverLimit,
+			&c.CreatedBy, &c.CreatedAt, &c.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// GetCampaignByID returns a campaign by its ID.
+func (r *Repository) GetCampaignByID(ctx context.Context, id string) (*AdminCampaign, error) {
+	c := &AdminCampaign{}
+	err := r.db.QueryRow(ctx, `
+		SELECT c.id, c.code, c.name, COALESCE(c.description, ''), c.type, c.status, c.starts_at, c.ends_at,
+		       c.target_vehicle_type_id, vt.code,
+		       c.target_package_id, rp.name,
+		       c.override_price_rwf, c.override_rides, c.override_bonus_rides,
+		       c.priority, c.max_redemptions, c.per_driver_limit,
+		       c.created_by, c.created_at, c.updated_at
+		FROM campaigns c
+		LEFT JOIN vehicle_types vt ON vt.id = c.target_vehicle_type_id
+		LEFT JOIN ride_packages rp ON rp.id = c.target_package_id
+		WHERE c.id = $1
+	`, id).Scan(
+		&c.ID, &c.Code, &c.Name, &c.Description, &c.Type, &c.Status, &c.StartsAt, &c.EndsAt,
+		&c.TargetVehicleTypeID, &c.TargetVehicleTypeCode,
+		&c.TargetPackageID, &c.TargetPackageName,
+		&c.OverridePriceRWF, &c.OverrideRides, &c.OverrideBonusRides,
+		&c.Priority, &c.MaxRedemptions, &c.PerDriverLimit,
+		&c.CreatedBy, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperrors.ErrNotFound
+		}
+		return nil, err
+	}
+	return c, nil
+}
+
+// CreateCampaign inserts a new campaign.
+func (r *Repository) CreateCampaign(ctx context.Context, creatorAdminID string, input *CreateCampaignInput) (*AdminCampaign, error) {
+	var id string
+	var createdByUUID *string
+	if creatorAdminID != "" {
+		createdByUUID = &creatorAdminID
+	}
+
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO campaigns (
+			code, name, description, type, status, starts_at, ends_at,
+			target_vehicle_type_id, target_package_id, override_price_rwf,
+			override_rides, override_bonus_rides, priority, max_redemptions,
+			per_driver_limit, created_by
+		)
+		VALUES ($1, $2, $3, $4, 'DRAFT', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		RETURNING id
+	`, input.Code, input.Name, input.Description, input.Type, input.StartsAt, input.EndsAt,
+		input.TargetVehicleTypeID, input.TargetPackageID, input.OverridePriceRWF,
+		input.OverrideRides, input.OverrideBonusRides, input.Priority, input.MaxRedemptions,
+		input.PerDriverLimit, createdByUUID,
+	).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	return r.GetCampaignByID(ctx, id)
+}
+
+// UpdateCampaign updates an existing campaign.
+func (r *Repository) UpdateCampaign(ctx context.Context, id string, input *UpdateCampaignInput) (*AdminCampaign, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	sets := []string{"updated_at = NOW()"}
+	args := []interface{}{id}
+	n := 2
+
+	if input.Name != nil {
+		sets = append(sets, "name = $"+itoa(n))
+		args = append(args, *input.Name)
+		n++
+	}
+	if input.Description != nil {
+		sets = append(sets, "description = $"+itoa(n))
+		args = append(args, *input.Description)
+		n++
+	}
+	if input.Status != nil {
+		sets = append(sets, "status = $"+itoa(n))
+		args = append(args, *input.Status)
+		n++
+	}
+	if input.StartsAt != nil {
+		sets = append(sets, "starts_at = $"+itoa(n))
+		args = append(args, input.StartsAt)
+		n++
+	}
+	if input.EndsAt != nil {
+		sets = append(sets, "ends_at = $"+itoa(n))
+		args = append(args, input.EndsAt)
+		n++
+	}
+	if input.TargetVehicleTypeID != nil {
+		sets = append(sets, "target_vehicle_type_id = $"+itoa(n))
+		args = append(args, input.TargetVehicleTypeID)
+		n++
+	}
+	if input.TargetPackageID != nil {
+		sets = append(sets, "target_package_id = $"+itoa(n))
+		args = append(args, input.TargetPackageID)
+		n++
+	}
+	if input.OverridePriceRWF != nil {
+		sets = append(sets, "override_price_rwf = $"+itoa(n))
+		args = append(args, input.OverridePriceRWF)
+		n++
+	}
+	if input.OverrideRides != nil {
+		sets = append(sets, "override_rides = $"+itoa(n))
+		args = append(args, input.OverrideRides)
+		n++
+	}
+	if input.OverrideBonusRides != nil {
+		sets = append(sets, "override_bonus_rides = $"+itoa(n))
+		args = append(args, input.OverrideBonusRides)
+		n++
+	}
+	if input.Priority != nil {
+		sets = append(sets, "priority = $"+itoa(n))
+		args = append(args, *input.Priority)
+		n++
+	}
+	if input.MaxRedemptions != nil {
+		sets = append(sets, "max_redemptions = $"+itoa(n))
+		args = append(args, input.MaxRedemptions)
+		n++
+	}
+	if input.PerDriverLimit != nil {
+		sets = append(sets, "per_driver_limit = $"+itoa(n))
+		args = append(args, input.PerDriverLimit)
+		n++
+	}
+
+	query := "UPDATE campaigns SET " + joinStrings(sets, ", ") + " WHERE id = $1"
+	tag, err := tx.Exec(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, apperrors.ErrNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return r.GetCampaignByID(ctx, id)
+}
+
+// SetCampaignStatus updates the status of a campaign.
+func (r *Repository) SetCampaignStatus(ctx context.Context, id string, status string) error {
+	tag, err := r.db.Exec(ctx,
+		`UPDATE campaigns SET status = $2, updated_at = NOW() WHERE id = $1`,
+		id, status,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// DeleteCampaign archives (soft-deletes) a campaign.
+func (r *Repository) DeleteCampaign(ctx context.Context, id string) error {
+	return r.SetCampaignStatus(ctx, id, "ARCHIVED")
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func itoa(n int) string {
-	return string(rune('0' + n)) // works for n < 10; enough for our field count
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	return string(rune('0'+(n/10))) + string(rune('0'+(n%10)))
 }
 
 func joinStrings(ss []string, sep string) string {

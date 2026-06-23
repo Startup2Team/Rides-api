@@ -92,6 +92,24 @@ func (m *mockRepo) AdminTogglePackage(_ context.Context, _ string, _ bool) error
 func (m *mockRepo) AdminDeletePackage(_ context.Context, _ string) error {
 	return nil
 }
+func (m *mockRepo) ListAllCampaigns(_ context.Context) ([]*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) GetCampaignByID(_ context.Context, _ string) (*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) CreateCampaign(_ context.Context, _ string, _ *packages.CreateCampaignInput) (*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) UpdateCampaign(_ context.Context, _ string, _ *packages.UpdateCampaignInput) (*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) SetCampaignStatus(_ context.Context, _ string, _ string) error {
+	return nil
+}
+func (m *mockRepo) DeleteCampaign(_ context.Context, _ string) error {
+	return nil
+}
 
 func newSvc(repo packages.Repo) *packages.Service {
 	return packages.NewService(repo, zerolog.Nop())
