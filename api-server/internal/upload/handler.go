@@ -113,7 +113,6 @@ func (h *Handler) SeedDevMockFiles() {
 	// 2. Read the placeholder image file
 	var imgData []byte
 	paths := []string{
-		"/home/salomon/rides-project/rides-web/public/images/driverside-clean.png",
 		"../../rides-web/public/images/driverside-clean.png",
 		"../rides-web/public/images/driverside-clean.png",
 	}

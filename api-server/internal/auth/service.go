@@ -265,7 +265,9 @@ func (s *Service) liftExpiredSuspension(ctx context.Context, user *User) {
 func (s *Service) Logout(ctx context.Context, userID, jti string, refreshToken string) error {
 	// Revoke access token session key
 	accessKey := rkeys.K.Session(userID, jti)
-	_ = s.redis.Set(ctx, accessKey, "revoked", s.cfg.JWT.AccessExpiry).Err()
+	if err := s.redis.Set(ctx, accessKey, "revoked", s.cfg.JWT.AccessExpiry).Err(); err != nil {
+		return err
+	}
 
 	// If refresh token is provided, decode and revoke its session too
 	if refreshToken != "" {
@@ -278,7 +280,9 @@ func (s *Service) Logout(ctx context.Context, userID, jti string, refreshToken s
 		})
 		if err == nil && token.Valid && claims.TokenType == "refresh" && claims.UserID == userID {
 			refreshKey := rkeys.K.Session(userID, claims.ID)
-			_ = s.redis.Set(ctx, refreshKey, "revoked", s.cfg.JWT.RefreshExpiry).Err()
+			if err := s.redis.Set(ctx, refreshKey, "revoked", s.cfg.JWT.RefreshExpiry).Err(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

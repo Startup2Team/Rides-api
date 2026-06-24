@@ -192,17 +192,26 @@ func (s *Service) ListDocuments(ctx context.Context, userID string) ([]*Document
 // ForceOffline sets a driver OFFLINE unconditionally, ignoring any active-ride
 // guard and cooldown. Used during logout so the driver is always cleanly removed
 // from the matching pool even if their Redis state is stale.
-func (s *Service) ForceOffline(ctx context.Context, userID string) {
+func (s *Service) ForceOffline(ctx context.Context, userID string) error {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		// Not a driver — nothing to do.
-		return
+		return nil
 	}
-	s.redis.Del(ctx, rkeys.K.DriverActiveRide(profile.ID))
-	s.redis.Set(ctx, rkeys.K.DriverState(profile.ID), "OFFLINE", 0)
-	s.redis.ZRem(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), profile.ID)
-	_ = s.repo.UpdateOnlineStatus(ctx, userID, false)
+	if err := s.redis.Del(ctx, rkeys.K.DriverActiveRide(profile.ID)).Err(); err != nil {
+		return err
+	}
+	if err := s.redis.Set(ctx, rkeys.K.DriverState(profile.ID), "OFFLINE", 0).Err(); err != nil {
+		return err
+	}
+	if err := s.redis.ZRem(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), profile.ID).Err(); err != nil {
+		return err
+	}
+	if err := s.repo.UpdateOnlineStatus(ctx, userID, false); err != nil {
+		return err
+	}
 	s.log.Info().Str("driver_id", profile.ID).Msg("driver: force-offlined on logout")
+	return nil
 }
 
 // SetAvailability toggles a driver online/offline with cooldown enforcement.

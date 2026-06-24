@@ -335,7 +335,7 @@ func main() {
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
 		r.Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
-		r.With(mw.Authenticate(cfg, rdb)).Delete("/account", authH.DeleteAccount)
+		r.With(mw.Authenticate(cfg, rdb), mw.OTPRateLimit(rdb, "delete_account", 3, 24*time.Hour)).Delete("/account", authH.DeleteAccount)
 	})
 
 	// MoMo payment callback — public (called by the provider, not the app).
