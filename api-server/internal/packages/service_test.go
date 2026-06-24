@@ -37,6 +37,9 @@ func (m *mockRepo) ListCatalog(_ context.Context, _ string) ([]*packages.Catalog
 func (m *mockRepo) ListActiveCampaigns(_ context.Context, _ string) ([]*packages.Campaign, error) {
 	return nil, nil
 }
+func (m *mockRepo) ListAllPackages(_ context.Context) ([]*packages.Package, error) {
+	return nil, nil
+}
 func (m *mockRepo) GetPackageByID(_ context.Context, _ string) (*packages.Package, error) {
 	return m.pkgByID, m.pkgByIDErr
 }
@@ -62,19 +65,34 @@ func (m *mockRepo) GrantFreeTrialIfEligible(_ context.Context, _, _ string) erro
 	m.grantCalled++
 	return m.grantErr
 }
-func (m *mockRepo) AdminListPackages(_ context.Context) ([]*packages.Package, error) {
+func (m *mockRepo) CreatePackage(_ context.Context, _ *packages.CreatePackageInput) (*packages.Package, error) {
 	return nil, nil
 }
-func (m *mockRepo) AdminCreatePackage(_ context.Context, _, _ string, _, _, _, _ int, _ bool) (*packages.Package, error) {
+func (m *mockRepo) UpdatePackage(_ context.Context, _ string, _ *packages.UpdatePackageInput) (*packages.Package, error) {
 	return nil, nil
 }
-func (m *mockRepo) AdminUpdatePackage(_ context.Context, _ string, _ *string, _, _, _, _ *int) (*packages.Package, error) {
-	return nil, nil
-}
-func (m *mockRepo) AdminTogglePackage(_ context.Context, _ string, _ bool) error {
+func (m *mockRepo) SetPackageActive(_ context.Context, _ string, _ bool) error {
 	return nil
 }
-func (m *mockRepo) AdminDeletePackage(_ context.Context, _ string) error {
+func (m *mockRepo) DeletePackage(_ context.Context, _ string) error {
+	return nil
+}
+func (m *mockRepo) ListAllCampaigns(_ context.Context) ([]*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) GetCampaignByID(_ context.Context, _ string) (*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) CreateCampaign(_ context.Context, _ string, _ *packages.CreateCampaignInput) (*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) UpdateCampaign(_ context.Context, _ string, _ *packages.UpdateCampaignInput) (*packages.AdminCampaign, error) {
+	return nil, nil
+}
+func (m *mockRepo) SetCampaignStatus(_ context.Context, _ string, _ string) error {
+	return nil
+}
+func (m *mockRepo) DeleteCampaign(_ context.Context, _ string) error {
 	return nil
 }
 

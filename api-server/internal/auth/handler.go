@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/rs/zerolog/log"
 
 	"github.com/workspace/ride-platform/internal/middleware"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -19,7 +20,7 @@ var validate = validator.New()
 // driverOfflineOnLogout is the subset of driver.Service needed by the logout handler.
 // Using an interface avoids an import cycle (auth → driver is fine; keeping it minimal).
 type driverOfflineOnLogout interface {
-	ForceOffline(ctx context.Context, userID string)
+	ForceOffline(ctx context.Context, userID string) error
 }
 
 // Handler exposes auth HTTP endpoints.
@@ -146,7 +147,12 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.Logout(r.Context(), claims.UserID, claims.ID); err != nil {
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	if err := h.svc.Logout(r.Context(), claims.UserID, claims.ID, body.RefreshToken); err != nil {
 		respond.Error(w, err)
 		return
 	}
@@ -155,7 +161,36 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	// This runs even if they still have an "active" ride in Redis (stale key)
 	// so logout is never blocked by ghost Redis state.
 	if h.driverSvc != nil {
-		go h.driverSvc.ForceOffline(context.Background(), claims.UserID)
+		go func() {
+			if err := h.driverSvc.ForceOffline(context.Background(), claims.UserID); err != nil {
+				log.Error().Err(err).Str("user_id", claims.UserID).Msg("failed to force-offline driver on logout")
+			}
+		}()
+	}
+
+	respond.NoContent(w)
+}
+
+// DELETE /api/v1/auth/account
+func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		respond.Error(w, apperrors.ErrUnauthorized)
+		return
+	}
+
+	if err := h.svc.DeleteAccount(r.Context(), claims.UserID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	// Force the driver offline to clean up geo-indexes and matching state
+	if h.driverSvc != nil {
+		go func() {
+			if err := h.driverSvc.ForceOffline(context.Background(), claims.UserID); err != nil {
+				log.Error().Err(err).Str("user_id", claims.UserID).Msg("failed to force-offline deleted user")
+			}
+		}()
 	}
 
 	respond.NoContent(w)

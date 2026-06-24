@@ -149,6 +149,7 @@ func main() {
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
+	driverSvc.SetCreditChecker(pkgSvc)
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
@@ -188,13 +189,15 @@ func main() {
 	trackH := tracking.NewHandler(hub, driverSvc, rdb, cfg, log)
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
-	ledgerSvc := packages.NewLedgerService(pkgRepo, log)
+	ledgerSvc := packages.NewLedgerService(pkgRepo, log) // v4 entitlement ledger
+	// Dev (non-prod) with payments simulated: auto-confirm purchases inline since
+	// no real MoMo callback arrives. In production the webhook drives confirmation.
 	devAutoConfirm := cfg.Env != "production" && cfg.Payments.Enabled
 	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
 	pkgH := packages.NewHandler(pkgSvc, auditLog)
-	pkgH.SetBonus(bonusSvc)
-	pkgH.SetLedger(ledgerSvc)
-	pkgH.SetPurchase(purchaseSvc)
+	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
+	pkgH.SetLedger(ledgerSvc)     // v4 entitlements
+	pkgH.SetPurchase(purchaseSvc) // v4 purchase + MoMo
 	bonusH := bonus.NewHandler(bonusSvc)
 	walletH := wallet.NewHandler(walletSvc)
 	var uploadH *upload.Handler
@@ -332,6 +335,7 @@ func main() {
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
 		r.Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
+		r.With(mw.Authenticate(cfg, rdb), mw.OTPRateLimit(rdb, "delete_account", 3, 24*time.Hour)).Delete("/account", authH.DeleteAccount)
 	})
 
 	// MoMo payment callback — public (called by the provider, not the app).
@@ -378,6 +382,10 @@ func main() {
 			r.Get("/profile", driverH.GetProfile)
 			r.Put("/profile", driverH.UpdateProfile)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending, mw.RoleCustomer))
 			r.Post("/documents", driverH.UploadDocument)
 			r.Get("/documents", driverH.ListDocuments)
 		})
@@ -720,6 +728,11 @@ func main() {
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
 			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
 
+			// Campaigns admin CRUD
+			r.Get("/campaigns", pkgH.AdminListCampaigns)
+			r.Post("/campaigns", pkgH.AdminCreateCampaign)
+			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
+			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
 			// Bonuses — admin CRUD for bonus tiers
 			r.Get("/bonuses/tiers", bonusH.AdminListTiers)
 			r.Post("/bonuses/tiers", bonusH.AdminCreateTier)

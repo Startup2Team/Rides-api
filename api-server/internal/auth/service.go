@@ -261,10 +261,31 @@ func (s *Service) liftExpiredSuspension(ctx context.Context, user *User) {
 	user.SuspensionUntil = nil
 }
 
-// Logout revokes the refresh session in Redis.
-func (s *Service) Logout(ctx context.Context, userID, jti string) error {
-	key := rkeys.K.Session(userID, jti)
-	return s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err()
+// Logout revokes the access and refresh sessions in Redis.
+func (s *Service) Logout(ctx context.Context, userID, jti string, refreshToken string) error {
+	// Revoke access token session key
+	accessKey := rkeys.K.Session(userID, jti)
+	if err := s.redis.Set(ctx, accessKey, "revoked", s.cfg.JWT.AccessExpiry).Err(); err != nil {
+		return err
+	}
+
+	// If refresh token is provided, decode and revoke its session too
+	if refreshToken != "" {
+		claims := &middleware.Claims{}
+		token, err := jwt.ParseWithClaims(refreshToken, claims, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, apperrors.ErrTokenInvalid
+			}
+			return []byte(s.cfg.JWT.RefreshSecret), nil
+		})
+		if err == nil && token.Valid && claims.TokenType == "refresh" && claims.UserID == userID {
+			refreshKey := rkeys.K.Session(userID, claims.ID)
+			if err := s.redis.Set(ctx, refreshKey, "revoked", s.cfg.JWT.RefreshExpiry).Err(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ——————————————————————————————————————————————————————
@@ -335,6 +356,29 @@ func (s *Service) issueTokenPair(ctx context.Context, user *User) (*TokenPair, e
 		RefreshToken: refreshToken,
 		RoleState:    user.RoleState,
 	}, nil
+}
+
+// DeleteAccount anonymizes the user profile and terminates all active sessions.
+func (s *Service) DeleteAccount(ctx context.Context, userID string) error {
+	// 1. Scrub/anonymize user profile and related resources in the database
+	if err := s.repo.AnonymizeUser(ctx, userID); err != nil {
+		return err
+	}
+
+	// 2. Scan and delete all active session keys in Redis for this user
+	var cursor uint64
+	for {
+		keys, nextCursor, err := s.redis.Scan(ctx, cursor, "session:"+userID+":*", 100).Result()
+		if err == nil && len(keys) > 0 {
+			s.redis.Del(ctx, keys...)
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return nil
 }
 
 func generateOTP() (string, error) {
