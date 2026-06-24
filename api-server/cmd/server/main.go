@@ -149,7 +149,9 @@ func main() {
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
-	driverSvc.SetCreditChecker(pkgSvc)
+	// Note: the go-online credit gate is wired to the v4 ledger (ledgerSvc) below,
+	// once it is constructed — NOT to pkgSvc, whose HasCredits reads the legacy
+	// driver_ride_credits table that the v4 cutover no longer populates.
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
@@ -190,6 +192,9 @@ func main() {
 	locH := location.NewHandler(locSvc, rideSvc)
 	fareH := fare.NewHandler(fareRepo, locSvc)
 	ledgerSvc := packages.NewLedgerService(pkgRepo, log) // v4 entitlement ledger
+	// Go-online credit gate reads the same v4 ledger that ride deduction debits,
+	// so a driver with a real v4 package isn't wrongly blocked with NO_CREDITS.
+	driverSvc.SetCreditChecker(ledgerSvc)
 	// Dev (non-prod) with payments simulated: auto-confirm purchases inline since
 	// no real MoMo callback arrives. In production the webhook drives confirmation.
 	devAutoConfirm := cfg.Env != "production" && cfg.Payments.Enabled

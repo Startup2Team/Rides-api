@@ -231,7 +231,17 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 			return apperrors.New(http.StatusBadRequest, "EXPIRED_LICENSE", "Your driver license has expired. Update your driver license documents to continue.")
 		}
 
-		// 2. Active Package / Credits Check
+		// 2. Insurance Expiry Check
+		if profile.InsuranceExpiryDate != nil && profile.InsuranceExpiryDate.Before(time.Now()) {
+			return apperrors.New(http.StatusBadRequest, "EXPIRED_INSURANCE", "Your vehicle insurance has expired. Update your insurance documents to continue.")
+		}
+
+		// 3. Authorization / Permit Expiry Check
+		if profile.AuthorizationExpiryDate != nil && profile.AuthorizationExpiryDate.Before(time.Now()) {
+			return apperrors.New(http.StatusBadRequest, "EXPIRED_AUTHORIZATION", "Your vehicle authorization permit has expired. Update your authorization documents to continue.")
+		}
+
+		// 4. Active Package / Credits Check
 		if s.creditChecker != nil {
 			hasCredits, err := s.creditChecker.HasCredits(ctx, userID, profile.TransportType)
 			if err != nil {
