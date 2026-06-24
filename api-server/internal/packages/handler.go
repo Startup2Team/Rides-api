@@ -63,15 +63,13 @@ func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
 
 // ── Driver endpoints ──────────────────────────────────────────────────────────
 
-// GET /api/v1/driver/packages?vehicle_type=MOTO_BIKE
+// GET /api/v1/driver/packages[?vehicle_type=MOTO_BIKE]
 // Returns the v4 catalog: each package's active version with any active campaign
-// override applied (mobile-shaped fields).
+// override applied (mobile-shaped fields). vehicle_type is optional — omitting it
+// returns the full catalog across all vehicle types in one response, so the app
+// fetches once instead of once per vehicle type.
 func (h *Handler) ListPackages(w http.ResponseWriter, r *http.Request) {
 	vehicleType := r.URL.Query().Get("vehicle_type")
-	if vehicleType == "" {
-		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "vehicle_type query parameter is required")
-		return
-	}
 	pkgs, err := h.svc.ListCatalog(r.Context(), vehicleType)
 	if err != nil {
 		respond.Error(w, err)
