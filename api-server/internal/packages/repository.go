@@ -508,12 +508,14 @@ func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([
 		SELECT p.id, COALESCE(p.code, ''), p.name, vt.code,
 		       v.id, v.version_number, v.rides, v.bonus_rides, v.price_rwf,
 		       v.validity_days, v.is_promotional, v.is_unlimited,
-		       c.id, c.code, c.override_price_rwf, c.override_rides, c.override_bonus_rides
+		       c.id, c.code, c.name, COALESCE(c.description, ''),
+		       c.override_price_rwf, c.override_rides, c.override_bonus_rides
 		FROM ride_packages p
 		JOIN vehicle_types vt ON vt.id = p.vehicle_type_id
 		JOIN ride_package_versions v ON v.package_id = p.id AND v.status = 'ACTIVE'
 		LEFT JOIN LATERAL (
-			SELECT cc.id, cc.code, cc.override_price_rwf, cc.override_rides, cc.override_bonus_rides
+			SELECT cc.id, cc.code, cc.name, cc.description,
+			       cc.override_price_rwf, cc.override_rides, cc.override_bonus_rides
 			FROM campaigns cc
 			WHERE cc.status = 'ACTIVE'
 			  AND (cc.starts_at IS NULL OR cc.starts_at <= now())
@@ -537,15 +539,17 @@ func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([
 	var out []*CatalogPackage
 	for rows.Next() {
 		var (
-			cp                        CatalogPackage
-			ovPrice, ovRides, ovBonus *int
-			campaignID, campaignCode  *string
+			cp                                     CatalogPackage
+			ovPrice, ovRides, ovBonus              *int
+			campaignID, campaignCode, campaignName *string
+			campaignDescription                    string
 		)
 		if err := rows.Scan(
 			&cp.ID, &cp.Code, &cp.Name, &cp.VehicleTypeCode,
 			&cp.VersionID, &cp.VersionNumber, &cp.IncludedRides, &cp.BonusRides, &cp.NormalPriceRWF,
 			&cp.ValidityDays, &cp.LaunchOffer, &cp.IsUnlimited,
-			&campaignID, &campaignCode, &ovPrice, &ovRides, &ovBonus,
+			&campaignID, &campaignCode, &campaignName, &campaignDescription,
+			&ovPrice, &ovRides, &ovBonus,
 		); err != nil {
 			return nil, err
 		}
@@ -562,6 +566,10 @@ func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([
 		}
 		if campaignID != nil {
 			cp.CampaignID, cp.CampaignCode = campaignID, campaignCode
+			cp.CampaignName = campaignName
+			if campaignDescription != "" {
+				cp.CampaignDescription = &campaignDescription
+			}
 		}
 		cp.TotalCredits = cp.IncludedRides + cp.BonusRides
 		cp.IsPromotional = cp.LaunchOffer
@@ -577,7 +585,8 @@ func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([
 // type (GLOBAL or matching that type). Drivers see these as active promotions.
 func (r *Repository) ListActiveCampaigns(ctx context.Context, vehicleTypeCode string) ([]*Campaign, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT c.id, c.code, c.name, c.type, c.starts_at, c.ends_at,
+		SELECT c.id, c.code, c.name, COALESCE(c.description, ''), c.type, c.starts_at, c.ends_at,
+		       vt.code,
 		       c.override_price_rwf, c.override_rides, c.override_bonus_rides
 		FROM campaigns c
 		LEFT JOIN vehicle_types vt ON vt.id = c.target_vehicle_type_id
@@ -595,12 +604,15 @@ func (r *Repository) ListActiveCampaigns(ctx context.Context, vehicleTypeCode st
 	var out []*Campaign
 	for rows.Next() {
 		c := &Campaign{}
+		var targetVehicleTypeCode *string
 		if err := rows.Scan(
-			&c.ID, &c.Code, &c.Name, &c.Type, &c.StartsAt, &c.EndsAt,
+			&c.ID, &c.Code, &c.Name, &c.Description, &c.Type, &c.StartsAt, &c.EndsAt,
+			&targetVehicleTypeCode,
 			&c.OverridePriceRWF, &c.OverrideRides, &c.OverrideBonusRides,
 		); err != nil {
 			return nil, err
 		}
+		c.TargetVehicleTypeCode = targetVehicleTypeCode
 		out = append(out, c)
 	}
 	return out, rows.Err()

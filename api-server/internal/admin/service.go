@@ -312,6 +312,11 @@ func (s *Service) DriverOverview(ctx context.Context, vehicleType string) (map[s
 		vt = " AND transport_type = '" + vehicleType + "'"
 	}
 
+	vtAlias := ""
+	if vehicleType != "" {
+		vtAlias = " AND dp.transport_type = '" + vehicleType + "'"
+	}
+
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE 1=1`+vt).Scan(&total)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE is_online=TRUE AND approval_status IN ('APPROVED','ACTIVE')`+vt).Scan(&online)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='PENDING_REVIEW'`+vt).Scan(&pending)
@@ -319,7 +324,7 @@ func (s *Service) DriverOverview(ctx context.Context, vehicleType string) (map[s
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT dp.id) FROM driver_profiles dp
 		JOIN rides r ON r.driver_id = dp.id
-		WHERE r.status = 'IN_PROGRESS'`+vt).Scan(&onTrip)
+		WHERE r.status = 'IN_PROGRESS'`+vtAlias).Scan(&onTrip)
 
 	return map[string]interface{}{
 		"total": total, "online": online,
@@ -445,8 +450,15 @@ func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]in
 
 	rows, _ := s.db.Query(ctx, `
 		SELECT r.id, r.status, r.transport_type, r.agreed_fare,
-		       r.pickup_address, r.destination_address, r.created_at
-		FROM rides r WHERE r.customer_id=$1 ORDER BY r.created_at DESC LIMIT 10
+		       r.pickup_address, r.destination_address, r.created_at,
+		       r.driver_id, du.full_name AS driver_name, du.phone_number AS driver_phone,
+		       dp.vehicle_plate AS vehicle_plate
+		FROM rides r
+		LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
+		LEFT JOIN users du ON du.id = dp.user_id
+		WHERE r.customer_id = $1
+		ORDER BY r.created_at DESC
+		LIMIT 10
 	`, userID)
 	var trips []map[string]interface{}
 	if rows != nil {
@@ -455,11 +467,16 @@ func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]in
 			var rID, rStatus, rType, pickupAddr, destAddr string
 			var fare *float64
 			var rAt time.Time
-			if err := rows.Scan(&rID, &rStatus, &rType, &fare, &pickupAddr, &destAddr, &rAt); err == nil {
+			var driverID, driverName, driverPhone, vehiclePlate *string
+			if err := rows.Scan(&rID, &rStatus, &rType, &fare, &pickupAddr, &destAddr, &rAt, &driverID, &driverName, &driverPhone, &vehiclePlate); err == nil {
 				trips = append(trips, map[string]interface{}{
 					"id": rID, "status": rStatus, "transport_type": rType,
 					"agreed_fare": fare, "pickup_address": pickupAddr,
 					"destination_address": destAddr, "created_at": rAt,
+					"driver_id":     driverID,
+					"driver_name":   driverName,
+					"driver_phone":  driverPhone,
+					"vehicle_plate": vehiclePlate,
 				})
 			}
 		}
