@@ -1,10 +1,16 @@
-# Production compose — used on the server, pulls pre-built image from registry.
-# Run: docker compose -f docker-compose.prod.yml up -d
+# Production compose — single Vultr (Johannesburg) box.
+# Run FROM this directory:  /opt/rides/Rides-api/api-server
+# Builds the API (this repo) and the admin (Rides-web repo) on the box.
 #
-# Required env vars on the server (put in /opt/backend-travels/.env):
-#   IMAGE_TAG=latest (or a specific sha)
-#   DATABASE_URL, REDIS_URL, JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, ...
-#   (copy .env.example and fill in real values)
+# Layout expected on the server:
+#   /opt/rides/Rides-api/api-server   (this dir — run compose here)
+#   /opt/rides/Rides-web              (admin repo, deploy/docker branch)
+#
+# Required env in ./.env (copy .env.production.example):
+#   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, REDIS_PASSWORD,
+#   JWT_*, MOMO_*, STORAGE_*, AT_*, ADMIN_ORIGIN, ADMIN_API_URL, ...
+#
+# Run: docker compose -f docker-compose.prod.yml up -d --build
 
 services:
   # ── PostgreSQL + PostGIS ───────────────────────────────────────────────────
@@ -22,7 +28,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # No port exposed — only reachable by other containers
+    # No port exposed — only reachable by other containers.
 
   # ── Redis ──────────────────────────────────────────────────────────────────
   redis:
@@ -36,14 +42,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # No port exposed — only reachable by other containers
+    # No port exposed — only reachable by other containers.
 
-  # ── API Server ─────────────────────────────────────────────────────────────
+  # ── API Server (Go) ────────────────────────────────────────────────────────
   api:
-    image: ghcr.io/startup2team/backend-travels:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: always
-    ports:
-      - "127.0.0.1:8080:8080"   # Bind to localhost only — Nginx sits in front
     env_file: .env
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
@@ -59,7 +65,26 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 20s
+    # No public port — Nginx proxies to api:8080 on the internal network.
+
+  # ── Admin dashboard (Next.js, from the Rides-web repo) ─────────────────────
+  admin:
+    build:
+      # Rides-web is cloned beside Rides-api: ../../Rides-web from here.
+      context: ../../Rides-web
+      dockerfile: Dockerfile
+      args:
+        # Baked into the browser bundle at build time.
+        NEXT_PUBLIC_API_URL: ${ADMIN_API_URL:-https://api.rides.rw/api/v1}
+    restart: always
+    environment:
+      # Server-side calls from Next route handlers stay on the internal network.
+      BACKEND_ORIGIN: http://api:8080
+      NODE_ENV: production
+    depends_on:
+      - api
+    # No public port — Nginx proxies to admin:3000 on the internal network.
 
   # ── Nginx reverse proxy + TLS termination ─────────────────────────────────
   nginx:
@@ -70,9 +95,10 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro    # Let's Encrypt certs go here
+      - ./nginx/certs:/etc/nginx/certs:ro    # Cloudflare Origin cert goes here
     depends_on:
       - api
+      - admin
 
 volumes:
   postgres_data:
