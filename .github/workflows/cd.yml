@@ -1,9 +1,9 @@
 name: CD (Vultr JNB)
 
 # Continuous deployment to the production box in Johannesburg.
-# On every push to main, GitHub SSHes into the server and runs the deploy
-# script, which pulls both repos (Rides-api + Rides-web) and rebuilds the
-# Docker stack. Replaces the old Railway pipeline.
+# The GitHub runner checks out this repo, ships the code to the server over SSH
+# (git archive → tar), and rebuilds the Docker stack. No deploy keys needed —
+# the runner already has read access to its own repo.
 #
 # Required GitHub Secret:
 #   DEPLOY_SSH_KEY — private SSH key trusted by root@139.84.251.242
@@ -18,10 +18,18 @@ jobs:
     name: Deploy to Vultr (Johannesburg)
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 139.84.251.242
-          username: root
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: /opt/rides/deploy.sh
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -H 139.84.251.242 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Ship code to the box and rebuild
+        run: |
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          # Overlay tracked files (keeps the box's .env + nginx/certs untouched).
+          git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
+          $SSH 'cd /opt/rides/Rides-api/api-server && docker compose -f docker-compose.prod.yml up -d --build api && docker image prune -f'
