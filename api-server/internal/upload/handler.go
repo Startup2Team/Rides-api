@@ -265,7 +265,7 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	_, err = h.client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:        aws.String(h.cfg.Storage.Bucket),
 		Key:           aws.String(objectKey),
-		Body:          strings.NewReader(string(data)),
+		Body:          bytes.NewReader(data),
 		ContentType:   aws.String(contentType),
 		ContentLength: aws.Int64(int64(len(data))),
 	})
