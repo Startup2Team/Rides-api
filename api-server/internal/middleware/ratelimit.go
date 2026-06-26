@@ -69,7 +69,7 @@ func OTPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time
 				key = fmt.Sprintf("ratelimit:%s:phone:%s", prefix, phone)
 			} else {
 				// No phone in body — still cap by IP so a malformed request can't bypass.
-				key = fmt.Sprintf("ratelimit:%s:ip:%s", prefix, trustedIP(r))
+				key = fmt.Sprintf("ratelimit:%s:ip:%s", prefix, TrustedIP(r))
 			}
 
 			count, err := atomicIncr(r.Context(), rdb, key, window)
@@ -89,12 +89,12 @@ func OTPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time
 }
 
 // IPRateLimit is a general per-IP rate limiter backed by Redis.
-// Uses trustedIP() which only reads proxy headers when the connection
+// Uses TrustedIP() which only reads proxy headers when the connection
 // comes from a known private/loopback address, preventing header spoofing.
 func IPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := trustedIP(r)
+			ip := TrustedIP(r)
 			key := fmt.Sprintf("ratelimit:%s:%s", prefix, ip)
 
 			count, err := atomicIncr(r.Context(), rdb, key, window)
@@ -149,13 +149,13 @@ func UserRateLimit(rdb *redis.Client, prefix string, maxRequests int, window tim
 	}
 }
 
-// trustedIP returns the real client IP.
+// TrustedIP returns the real client IP.
 //
 // Security: X-Forwarded-For and X-Real-IP can be spoofed by any client.
 // We only trust them when the direct connection comes from a private/loopback
 // address (i.e. a known reverse proxy like Railway's edge or a local nginx).
 // Direct public connections always use RemoteAddr so clients cannot fake their IP.
-func trustedIP(r *http.Request) string {
+func TrustedIP(r *http.Request) string {
 	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		remoteHost = r.RemoteAddr
