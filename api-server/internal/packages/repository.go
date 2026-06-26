@@ -528,8 +528,8 @@ func (r *Repository) ListCatalog(ctx context.Context, vehicleTypeCode string) ([
 		) c ON TRUE
 		WHERE p.is_active = TRUE
 		  AND p.deleted_at IS NULL
-		  AND vt.code = $1
-		ORDER BY v.price_rwf ASC
+		  AND ($1 = '' OR vt.code = $1)
+		ORDER BY vt.code ASC, v.price_rwf ASC
 	`, vehicleTypeCode)
 	if err != nil {
 		return nil, err
@@ -593,7 +593,7 @@ func (r *Repository) ListActiveCampaigns(ctx context.Context, vehicleTypeCode st
 		WHERE c.status = 'ACTIVE'
 		  AND (c.starts_at IS NULL OR c.starts_at <= now())
 		  AND (c.ends_at   IS NULL OR c.ends_at   >= now())
-		  AND (c.target_vehicle_type_id IS NULL OR vt.code = $1)
+		  AND ($1 = '' OR c.target_vehicle_type_id IS NULL OR vt.code = $1)
 		ORDER BY c.priority DESC, c.created_at DESC
 	`, vehicleTypeCode)
 	if err != nil {

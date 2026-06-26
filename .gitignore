@@ -10,6 +10,14 @@ Thumbs.db
 dist/
 tmp/
 
+# Local runtime upload storage — driver docs live in S3/R2, never in git
+api-server/var/
+
+# Node tooling clutter (not part of the Go backend)
+node_modules/
+package.json
+package-lock.json
+
 # Test artifacts
 coverage.out
 coverage.html

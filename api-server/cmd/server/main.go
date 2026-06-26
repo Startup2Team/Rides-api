@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -155,7 +156,9 @@ func main() {
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
-	driverSvc.SetCreditChecker(pkgSvc)
+	// Note: the go-online credit gate is wired to the v4 ledger (ledgerSvc) below,
+	// once it is constructed — NOT to pkgSvc, whose HasCredits reads the legacy
+	// driver_ride_credits table that the v4 cutover no longer populates.
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
@@ -349,8 +352,14 @@ func main() {
 		r.With(mw.Authenticate(cfg, rdb), mw.OTPRateLimit(rdb, "delete_account", 3, 24*time.Hour)).Delete("/account", authH.DeleteAccount)
 	})
 
-	// MoMo payment callback — public (called by the provider, not the app).
-	r.Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
+	// MoMo payment callback — public (called by the provider, not the app), so it
+	// is gated by a shared secret instead of a user session. Without this any
+	// caller could POST a fake "SUCCESS" and have credits granted for free.
+	if cfg.Env == "production" && cfg.Payments.WebhookSecret == "" {
+		log.Warn().Msg("MOMO_WEBHOOK_SECRET is unset in production — the MoMo callback is UNAUTHENTICATED; set it before enabling payments")
+	}
+	r.With(momoWebhookAuth(cfg.Payments.WebhookSecret)).
+		Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
 
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
@@ -818,6 +827,25 @@ func (g momoGateway) RequestPayment(ctx context.Context, provider, phone string,
 		return "", "", err
 	}
 	return res.TransactionID, res.Status, nil
+}
+
+// momoWebhookAuth gates the public MoMo callback with a shared secret. When the
+// secret is empty (dev), it is a pass-through. When set, callers must present a
+// matching X-Webhook-Secret header (constant-time compared) or get 401. This is
+// an interim guard until the provider's signature verification is wired.
+func momoWebhookAuth(secret string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if secret != "" {
+				got := r.Header.Get("X-Webhook-Secret")
+				if subtle.ConstantTimeCompare([]byte(got), []byte(secret)) != 1 {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func runMigrations(databaseURL string) error {

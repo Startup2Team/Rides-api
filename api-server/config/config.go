@@ -36,6 +36,10 @@ type Config struct {
 // disabled — otherwise a user could mint wallet balance with no payment captured.
 type PaymentsConfig struct {
 	Enabled bool
+	// WebhookSecret gates the public MoMo callback. When set, callbacks must
+	// present it in the X-Webhook-Secret header (constant-time compared). Empty
+	// disables the check (dev only) — it MUST be set in production.
+	WebhookSecret string
 }
 
 type DatabaseConfig struct {
@@ -233,6 +237,7 @@ func Load() (*Config, error) {
 
 	// Real-money wallet movement stays OFF until a verified payment gateway exists.
 	cfg.Payments.Enabled = getEnvBool("PAYMENTS_ENABLED", false)
+	cfg.Payments.WebhookSecret = getEnv("MOMO_WEBHOOK_SECRET", "")
 
 	return cfg, nil
 }
