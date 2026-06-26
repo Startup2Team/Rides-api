@@ -165,9 +165,26 @@ type CreateInput struct {
 // Create starts a purchase: resolves the offer, snapshots it, and either grants
 // immediately (free/promotional) or opens a PENDING MoMo charge. Idempotent on
 // idempotency_key.
+func (s *PurchaseService) devSettlePending(ctx context.Context, purchaseID, paymentRef string) (*Purchase, error) {
+	if !s.devAutoConfirm || paymentRef == "" {
+		return nil, nil
+	}
+	if err := s.confirm(ctx, paymentRef, "DEV-SIMULATED", true); err != nil {
+		return nil, err
+	}
+	return s.repo.getPurchaseByID(ctx, purchaseID)
+}
+
 func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateInput) (*Purchase, error) {
 	// Idempotency: return the existing purchase if this key was already used.
 	if existing, err := s.repo.getPurchaseByIdem(ctx, in.IdempotencyKey); err == nil && existing != nil {
+		if existing.Status == "PENDING" {
+			if settled, settleErr := s.devSettlePending(ctx, existing.ID, existing.PaymentRef); settleErr != nil {
+				s.log.Warn().Err(settleErr).Str("purchase_id", existing.ID).Msg("packages: dev auto-confirm on idempotent purchase failed")
+			} else if settled != nil {
+				return settled, nil
+			}
+		}
 		return existing, nil
 	}
 
@@ -214,7 +231,8 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 		s.log.Error().Err(err).Str("step", "create_purchase_row").Msg("purchase create failed")
 		return nil, err
 	}
-	if s.momo != nil && in.MomoPhone != "" {
+	// Dev: skip live MoMo — auto-confirm inline so mobile does not poll forever.
+	if !s.devAutoConfirm && s.momo != nil && in.MomoPhone != "" {
 		provider := "MTN_MOMO"
 		if in.MomoProvider == "airtel" {
 			provider = "AIRTEL_MONEY"
@@ -223,11 +241,11 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 			s.log.Warn().Err(err).Str("purchase_id", id).Msg("packages: momo prompt failed")
 		}
 	}
-	// Dev: no real callback will arrive — simulate success so the flow completes.
-	if s.devAutoConfirm {
-		if err := s.confirm(ctx, paymentRef, "DEV-SIMULATED", true); err != nil {
-			s.log.Warn().Err(err).Str("purchase_id", id).Msg("packages: dev auto-confirm failed")
-		}
+	if settled, err := s.devSettlePending(ctx, id, paymentRef); err != nil {
+		s.log.Error().Err(err).Str("purchase_id", id).Msg("packages: dev auto-confirm failed")
+		return nil, fmt.Errorf("dev auto-confirm: %w", err)
+	} else if settled != nil {
+		return settled, nil
 	}
 	return s.repo.getPurchaseByID(ctx, id)
 }
@@ -263,7 +281,18 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 
 // GetStatus returns a purchase for polling (must belong to the user).
 func (s *PurchaseService) GetStatus(ctx context.Context, userID, purchaseID string) (*Purchase, error) {
-	return s.repo.getPurchaseForUser(ctx, userID, purchaseID)
+	p, err := s.repo.getPurchaseForUser(ctx, userID, purchaseID)
+	if err != nil {
+		return nil, err
+	}
+	if p.Status == "PENDING" {
+		if settled, settleErr := s.devSettlePending(ctx, p.ID, p.PaymentRef); settleErr != nil {
+			s.log.Warn().Err(settleErr).Str("purchase_id", p.ID).Msg("packages: dev auto-confirm on status poll failed")
+		} else if settled != nil {
+			return settled, nil
+		}
+	}
+	return p, nil
 }
 
 // History lists a driver's purchases, newest first.
