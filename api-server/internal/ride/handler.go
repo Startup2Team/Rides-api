@@ -38,6 +38,7 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 		DestAddr      string   `json:"dest_address"  validate:"required"`
 		TransportType string   `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
 		InitialFare   *float64 `json:"initial_fare"`
+		DistanceKM    *float64 `json:"distance_km"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -52,7 +53,7 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 	pickup := geo.Point{Lat: body.PickupLat, Lng: body.PickupLng}
 	dest := geo.Point{Lat: body.DestLat, Lng: body.DestLng}
 
-	ride, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare)
+	ride, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare, body.DistanceKM)
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -75,7 +76,7 @@ func (h *Handler) GetRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respond.OK(w, ride)
+	respond.OK(w, ride.ToResponse())
 }
 
 // GET /api/v1/customer/rides
@@ -101,8 +102,13 @@ func (h *Handler) ListRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	responses := make([]*RideResponse, len(rides))
+	for i, ride := range rides {
+		responses[i] = ride.ToResponse()
+	}
+
 	respond.OK(w, map[string]interface{}{
-		"rides":  rides,
+		"rides":  responses,
 		"limit":  limit,
 		"offset": offset,
 	})
@@ -127,4 +133,41 @@ func (h *Handler) CancelRide(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.NoContent(w)
+}
+
+// GET /api/v1/driver/rides/:ride_id
+func (h *Handler) GetRideForDriver(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	rideID := chi.URLParam(r, "ride_id")
+
+	ride, err := h.svc.GetRideForDriver(r.Context(), rideID, claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, ride.ToResponse())
+}
+
+// GET /api/v1/driver/rides/active
+func (h *Handler) GetActiveRideForDriver(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	ride, err := h.svc.GetActiveRideForDriver(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, ride.ToResponse())
+}
+
+// GET /api/v1/customer/rides/active
+// Returns the customer's current non-terminal ride for app-restart recovery.
+// 404 when the customer has no active ride.
+func (h *Handler) GetActiveRideForCustomer(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	ride, err := h.svc.GetActiveRide(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, ride.ToResponse())
 }

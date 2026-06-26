@@ -18,6 +18,7 @@ import (
 	"github.com/workspace/ride-platform/internal/tracking"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
+	"github.com/workspace/ride-platform/pkg/timeutil"
 )
 
 const (
@@ -117,14 +118,35 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	maxAttempts := e.cfg.Matching.MaxAttempts
 	tried := make(map[string]bool)
 
+	// Radius expands each round: primary → expanded → 2× expanded → …
+	// This way a ride in a quiet area keeps searching wider rather than
+	// failing immediately after the first empty ring.
+	baseRadius := e.cfg.Matching.PrimaryRadiusM
+
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		candidates, err := e.searchCandidates(ctx, pickup, transportType, tried)
-		if err != nil || len(candidates) == 0 {
+		// Double the search radius on each attempt after the first.
+		currentRadius := baseRadius * (1 << attempt) // 1×, 2×, 4×, …
+		if currentRadius > e.cfg.Matching.ExpandedRadiusM {
+			currentRadius = e.cfg.Matching.ExpandedRadiusM
+		}
+
+		candidates, err := e.searchCandidatesWithRadius(ctx, pickup, transportType, tried, currentRadius)
+		if err != nil {
+			e.log.Warn().Err(err).Str("ride_id", rideID).Int("attempt", attempt).Msg("matching: candidate search error")
 			break
+		}
+		if len(candidates) == 0 {
+			e.log.Debug().Str("ride_id", rideID).Int("attempt", attempt).Int("radius_m", currentRadius).Msg("matching: no candidates at radius, expanding")
+			continue
 		}
 
 		for _, c := range candidates {
 			if tried[c.profileID] {
+				continue
+			}
+			// Skip seeded/offline drivers with no live socket — otherwise each offer waits
+			// for the full match timeout before trying the next candidate.
+			if !e.hub.IsDriverConnected(c.profileID) {
 				continue
 			}
 			tried[c.profileID] = true
@@ -143,7 +165,7 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 
 	// All attempts exhausted
 	e.log.Warn().Str("ride_id", rideID).Msg("matching: no driver found — cancelling ride")
-	_ = e.rideRepo.Cancel(ctx, rideID, "no driver found after max attempts", "SYSTEM")
+	_, _ = e.rideRepo.Cancel(ctx, rideID, "no driver found after max attempts", "SYSTEM")
 	_ = e.rideRepo.AppendEvent(ctx, rideID, "ride.cancelled", "SYSTEM", rideID, map[string]interface{}{
 		"reason": "no_driver_found",
 	})
@@ -156,15 +178,16 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	})
 }
 
-// searchCandidates uses Redis GEO to find nearby drivers, enriches and scores them.
-func (e *Engine) searchCandidates(ctx context.Context, pickup geo.Point, vehicleType string, tried map[string]bool) ([]*candidate, error) {
+// searchCandidatesWithRadius uses Redis GEO to find nearby drivers within the given radius,
+// enriches and scores them.
+func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Point, vehicleType string, tried map[string]bool, radiusM int) ([]*candidate, error) {
 	geoKey := rkeys.K.DriverGeoIndex(vehicleType)
 
 	results, err := e.redis.GeoSearchLocation(ctx, geoKey, &goredis.GeoSearchLocationQuery{
 		GeoSearchQuery: goredis.GeoSearchQuery{
 			Longitude:  pickup.Lng,
 			Latitude:   pickup.Lat,
-			Radius:     float64(e.cfg.Matching.ExpandedRadiusM) / 1000.0,
+			Radius:     float64(radiusM) / 1000.0,
 			RadiusUnit: "km",
 			Sort:       "ASC",
 			Count:      10,
@@ -174,7 +197,7 @@ func (e *Engine) searchCandidates(ctx context.Context, pickup geo.Point, vehicle
 	}).Result()
 
 	if err != nil || len(results) == 0 {
-		return e.fallbackPostGIS(ctx, pickup, vehicleType, tried)
+		return e.fallbackPostGIS(ctx, pickup, vehicleType, tried, radiusM)
 	}
 
 	var candidates []*candidate
@@ -200,7 +223,7 @@ func (e *Engine) searchCandidates(ctx context.Context, pickup geo.Point, vehicle
 		}
 
 		distM := r.Dist * 1000
-		normalizedDist := distM / float64(e.cfg.Matching.ExpandedRadiusM)
+		normalizedDist := distM / float64(radiusM)
 		normalizedDeclines := math.Min(float64(declines), 10) / 10.0
 		acceptancePenalty := 1.0 - profile.AcceptanceRate/100.0
 		score := (normalizedDist * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
@@ -222,13 +245,13 @@ func (e *Engine) searchCandidates(ctx context.Context, pickup geo.Point, vehicle
 }
 
 // fallbackPostGIS is used on cold start when Redis GEO index is empty.
-func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleType string, tried map[string]bool) ([]*candidate, error) {
+func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleType string, tried map[string]bool, radiusM int) ([]*candidate, error) {
 	var excludedIDs []string
 	for id := range tried {
 		excludedIDs = append(excludedIDs, id)
 	}
 
-	nearby, err := e.driverRepo.FindNearby(ctx, pickup, e.cfg.Matching.ExpandedRadiusM, vehicleType, excludedIDs)
+	nearby, err := e.driverRepo.FindNearby(ctx, pickup, radiusM, vehicleType, excludedIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +263,7 @@ func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleT
 			declines = d
 		}
 
-		normalizedDist := n.DistanceM / float64(e.cfg.Matching.ExpandedRadiusM)
+		normalizedDist := n.DistanceM / float64(radiusM)
 		normalizedDeclines := math.Min(float64(declines), 10) / 10.0
 		acceptancePenalty := 1.0 - n.AcceptanceRate/100.0
 		score := (normalizedDist * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
@@ -278,13 +301,27 @@ func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate)
 		_ = e.notify.SendRideRequest(ctx, *c.fcmToken, rideID, "", "", c.distanceM)
 	}
 
-	e.hub.SendToDriver(c.userID, tracking.Message{
-		Type:   "ride_request",
-		RideID: rideID,
-		Payload: map[string]interface{}{
-			"ride_id":    rideID,
-			"distance_m": c.distanceM,
-		},
+	payload := map[string]interface{}{
+		"ride_id":    rideID,
+		"distance_m": c.distanceM,
+	}
+	if ridePayload, rpErr := e.rideRepo.GetRideRequestPayload(ctx, rideID); rpErr == nil && ridePayload != nil {
+		payload["transport_type"] = ridePayload.TransportType
+		payload["distance_km"] = ridePayload.DistanceKM
+		payload["pickup_lat"] = ridePayload.PickupLat
+		payload["pickup_lng"] = ridePayload.PickupLng
+		payload["pickup_address"] = ridePayload.PickupAddress
+		payload["dest_lat"] = ridePayload.DestinationLat
+		payload["dest_lng"] = ridePayload.DestinationLng
+		payload["dest_address"] = ridePayload.DestinationAddress
+		payload["suggested_fare"] = ridePayload.SuggestedFare
+		payload["customer_name"] = ridePayload.CustomerName
+		payload["customer_phone"] = ridePayload.CustomerPhone
+	}
+	e.hub.SendToDriver(c.profileID, tracking.Message{
+		Type:    "ride_request",
+		RideID:  rideID,
+		Payload: payload,
 	})
 
 	_ = e.rideRepo.AppendEvent(ctx, rideID, "ride.request_sent", "SYSTEM", c.profileID, map[string]interface{}{
@@ -329,7 +366,31 @@ func (e *Engine) onAccepted(ctx context.Context, rideID string, c *candidate) {
 	// Start 5-minute negotiation timeout
 	e.rideSvc.StartNegotiationTimeout(rideID)
 
+	e.notifyCustomerDriverMatched(ctx, rideID, c)
+
 	e.log.Info().Str("ride_id", rideID).Str("driver_id", c.profileID).Msg("matching: driver accepted")
+}
+
+func (e *Engine) notifyCustomerDriverMatched(ctx context.Context, rideID string, c *candidate) {
+	payload := map[string]interface{}{
+		"driver_id":  c.profileID,
+		"distance_m": c.distanceM,
+	}
+	if info, err := e.driverRepo.GetMatchNotificationInfo(ctx, c.profileID); err == nil && info != nil {
+		payload["driver_name"] = info.FullName
+		payload["driver_phone"] = info.Phone
+		payload["vehicle_plate"] = info.VehiclePlate
+		payload["transport_type"] = info.TransportType
+		if info.Lat != 0 || info.Lng != 0 {
+			payload["lat"] = info.Lat
+			payload["lng"] = info.Lng
+		}
+	}
+	e.hub.SendToCustomer(rideID, tracking.Message{
+		Type:    "driver_matched",
+		RideID:  rideID,
+		Payload: payload,
+	})
 }
 
 func (e *Engine) onDeclined(ctx context.Context, rideID string, c *candidate) {
@@ -347,7 +408,5 @@ func sortCandidates(cs []*candidate) {
 	}
 }
 
-func endOfDay() time.Time {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
-}
+// endOfDay is kept as a package-level alias for readability at call sites.
+func endOfDay() time.Time { return timeutil.EndOfDay() }

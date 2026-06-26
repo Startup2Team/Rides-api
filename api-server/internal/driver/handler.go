@@ -29,20 +29,27 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		TransportType  string `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
-		VehiclePlate   string `json:"vehicle_plate"    validate:"required"`
-		LicenseNumber  string `json:"license_number"   validate:"required"`
-		DateOfBirth    string `json:"date_of_birth"    validate:"required"` // YYYY-MM-DD
-		City           string `json:"city"             validate:"required"`
-		MomoPayCode    string `json:"momo_pay_code"    validate:"required"`
-		MomoProvider   string `json:"momo_provider"    validate:"required,oneof=mtn airtel"`
-		Province       string `json:"province"         validate:"required"`
-		District       string `json:"district"         validate:"required"`
-		Sector         string `json:"sector"           validate:"required"`
-		Cell           string `json:"cell"             validate:"required"`
-		Village        string `json:"village"          validate:"required"`
-		PassengerSeats *int   `json:"passenger_seats"`
-		LoadCapacityKg *int   `json:"load_capacity_kg"`
+		TransportType           string `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+		VehiclePlate            string `json:"vehicle_plate"    validate:"required"`
+		LicenseNumber           string `json:"license_number"   validate:"required"`
+		DateOfBirth             string `json:"date_of_birth"    validate:"required"` // YYYY-MM-DD
+		City                    string `json:"city"             validate:"required"`
+		MomoPayCode             string `json:"momo_pay_code"    validate:"required"`
+		MomoProvider            string `json:"momo_provider"    validate:"required,oneof=mtn airtel"`
+		Province                string `json:"province"         validate:"required"`
+		District                string `json:"district"         validate:"required"`
+		Sector                  string `json:"sector"           validate:"required"`
+		Cell                    string `json:"cell"             validate:"required"`
+		Village                 string `json:"village"          validate:"required"`
+		PassengerSeats          *int   `json:"passenger_seats"`
+		LoadCapacityKg          *int   `json:"load_capacity_kg"`
+		LicenseExpiryDate       string `json:"license_expiry_date"`
+		InsuranceExpiryDate     string `json:"insurance_expiry_date"`
+		AuthorizationExpiryDate string `json:"authorization_expiry_date"`
+		// Mobile app camelCase aliases
+		LicenseExpiryDateCamel       string `json:"licenseExpiryDate"`
+		InsuranceExpiryDateCamel     string `json:"insuranceExpiryDate"`
+		AuthorizationExpiryDateCamel string `json:"authorizationExpiryDate"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -54,28 +61,73 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dob, err := time.Parse("2006-01-02", body.DateOfBirth)
+	dob, err := parseFlexibleDate(body.DateOfBirth)
 	if err != nil {
-		respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_DOB", "date_of_birth must be YYYY-MM-DD")
+		respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_DOB", "date_of_birth is invalid")
 		return
 	}
 
+	licenseExpiryStr := body.LicenseExpiryDate
+	if licenseExpiryStr == "" {
+		licenseExpiryStr = body.LicenseExpiryDateCamel
+	}
+	var licenseExpiryDate *time.Time
+	if licenseExpiryStr != "" {
+		parsed, err := parseFlexibleDate(licenseExpiryStr)
+		if err != nil {
+			respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_LICENSE_EXPIRY", "license_expiry_date is invalid")
+			return
+		}
+		licenseExpiryDate = &parsed
+	}
+
+	insuranceExpiryStr := body.InsuranceExpiryDate
+	if insuranceExpiryStr == "" {
+		insuranceExpiryStr = body.InsuranceExpiryDateCamel
+	}
+	var insuranceExpiryDate *time.Time
+	if insuranceExpiryStr != "" {
+		parsed, err := parseFlexibleDate(insuranceExpiryStr)
+		if err != nil {
+			respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_INSURANCE_EXPIRY", "insurance_expiry_date is invalid")
+			return
+		}
+		insuranceExpiryDate = &parsed
+	}
+
+	authorizationExpiryStr := body.AuthorizationExpiryDate
+	if authorizationExpiryStr == "" {
+		authorizationExpiryStr = body.AuthorizationExpiryDateCamel
+	}
+	var authorizationExpiryDate *time.Time
+	if authorizationExpiryStr != "" {
+		parsed, err := parseFlexibleDate(authorizationExpiryStr)
+		if err != nil {
+			respond.ErrorMsg(w, http.StatusBadRequest, "INVALID_AUTHORIZATION_EXPIRY", "authorization_expiry_date is invalid")
+			return
+		}
+		authorizationExpiryDate = &parsed
+	}
+
 	profile, err := h.svc.Apply(r.Context(), ApplyInput{
-		UserID:         claims.UserID,
-		TransportType:  body.TransportType,
-		VehiclePlate:   body.VehiclePlate,
-		LicenseNumber:  body.LicenseNumber,
-		City:           body.City,
-		MomoPayCode:    body.MomoPayCode,
-		MomoProvider:   body.MomoProvider,
-		Province:       body.Province,
-		District:       body.District,
-		Sector:         body.Sector,
-		Cell:           body.Cell,
-		Village:        body.Village,
-		PassengerSeats: body.PassengerSeats,
-		LoadCapacityKg: body.LoadCapacityKg,
-		DateOfBirth:    dob,
+		UserID:                  claims.UserID,
+		TransportType:           body.TransportType,
+		VehiclePlate:            body.VehiclePlate,
+		LicenseNumber:           body.LicenseNumber,
+		City:                    body.City,
+		MomoPayCode:             body.MomoPayCode,
+		MomoProvider:            body.MomoProvider,
+		Province:                body.Province,
+		District:                body.District,
+		Sector:                  body.Sector,
+		Cell:                    body.Cell,
+		Village:                 body.Village,
+		PassengerSeats:          body.PassengerSeats,
+		LoadCapacityKg:          body.LoadCapacityKg,
+		DateOfBirth:             dob,
+		LicenseExpiryDate:       licenseExpiryDate,
+		InsuranceExpiryDate:     insuranceExpiryDate,
+		AuthorizationExpiryDate: authorizationExpiryDate,
 	})
 	if err != nil {
 		respond.Error(w, err)
@@ -180,12 +232,14 @@ func (h *Handler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/driver/documents
-// Accepts: document_type (LICENCE_FRONT | VEHICLE_INSURANCE | VEHICLE_AUTHORIZATION), file_url
+// Accepts a document_type from the onboarding KYC set and a stored file_url
+// (produced by the /uploads flow). Repeated uploads of the same type replace
+// the prior file (UpsertDocument), so re-taking a photo overwrites cleanly.
 func (h *Handler) UploadDocument(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		DocumentType string `json:"document_type" validate:"required,oneof=LICENCE_FRONT VEHICLE_INSURANCE VEHICLE_AUTHORIZATION"`
+		DocumentType string `json:"document_type" validate:"required,oneof=LICENCE_FRONT LICENCE_BACK NATIONAL_ID_FRONT NATIONAL_ID_BACK VEHICLE_INSURANCE VEHICLE_AUTHORIZATION SELFIE"`
 		FileURL      string `json:"file_url"      validate:"required,url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -221,12 +275,12 @@ func (h *Handler) ListDocuments(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/driver/earnings/daily
 func (h *Handler) DailyEarnings(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
-	total, err := h.svc.GetDailyEarnings(r.Context(), claims.UserID)
+	total, ridesToday, err := h.svc.GetDailyEarnings(r.Context(), claims.UserID)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
-	respond.OK(w, map[string]interface{}{"total_rwf": total, "period": "today"})
+	respond.OK(w, map[string]interface{}{"total_rwf": total, "rides_today": ridesToday, "period": "today"})
 }
 
 // GET /api/v1/driver/earnings/weekly
@@ -252,12 +306,13 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/customer/location (nearby drivers for customer)
+// transport_type is optional — omit or send "" to get all vehicle types.
 func NearbyDriversHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Lat           float64 `json:"lat"            validate:"required"`
 			Lng           float64 `json:"lng"            validate:"required"`
-			TransportType string  `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX"`
+			TransportType string  `json:"transport_type" validate:"omitempty,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			respond.Error(w, apperrors.ErrBadRequest)
@@ -289,4 +344,30 @@ func (h *Handler) AcceptPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.NoContent(w)
+}
+
+func parseFlexibleDate(dateStr string) (time.Time, error) {
+	formats := []string{
+		"2006-01-02",
+		"02/01/2006",
+		"01/02/2006",
+		"2/1/2006",
+		"1/2/2006",
+		"2006/01/02",
+		"2006/1/2",
+		"02-01-2006",
+		"01-02-2006",
+		"2-1-2006",
+		"1-2-2006",
+		time.RFC3339,
+	}
+	var lastErr error
+	for _, fmtStr := range formats {
+		t, err := time.Parse(fmtStr, dateStr)
+		if err == nil {
+			return t, nil
+		}
+		lastErr = err
+	}
+	return time.Time{}, lastErr
 }

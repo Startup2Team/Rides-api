@@ -17,11 +17,12 @@ type Message struct {
 	Data  map[string]string // custom key-value pairs for the mobile app
 }
 
-// Service wraps Firebase Cloud Messaging.
+// Service wraps Firebase Cloud Messaging and persists notifications to the DB.
 type Service struct {
 	cfg    *config.Config
 	log    zerolog.Logger
 	client fcmClient
+	repo   *Repository
 }
 
 // fcmClient is an interface so we can swap in a mock in tests.
@@ -48,11 +49,57 @@ func New(cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{cfg: cfg, log: log, client: client}
 }
 
+// SetRepository wires the DB persistence layer (optional — set after construction
+// to avoid a chicken-and-egg with the pool that may be created after New()).
+func (s *Service) SetRepository(repo *Repository) {
+	s.repo = repo
+}
+
+// Persist saves a notification to the database for the user's in-app history.
+// Best-effort: a DB failure should not block the FCM push.
+func (s *Service) Persist(ctx context.Context, userID, title, body, nType string, data map[string]string) {
+	if s.repo == nil {
+		return
+	}
+	if _, err := s.repo.Create(ctx, userID, title, body, nType, data); err != nil {
+		s.log.Warn().Err(err).Str("user_id", userID).Msg("notification: failed to persist")
+	}
+}
+
+// PersistForUser is a convenience that persists a notification by user ID
+// (used when we don't have an FCM token but still want the in-app history).
+func (s *Service) PersistForUser(ctx context.Context, userID, title, body, nType string, data map[string]string) {
+	s.Persist(ctx, userID, title, body, nType, data)
+}
+
+// send pushes via FCM and persists to the DB for in-app history.
+func (s *Service) send(ctx context.Context, userID, fcmToken, title, body, nType string, data map[string]string) error {
+	s.Persist(ctx, userID, title, body, nType, data)
+	return s.client.Send(ctx, fcmToken, title, body, data)
+}
+
 // SendRideRequest sends a high-priority FCM push to a driver when a ride is matched.
 func (s *Service) SendRideRequest(ctx context.Context, fcmToken, rideID, pickupAddress, destAddress string, distanceM float64) error {
+	data := map[string]string{
+		"type":           "ride_request",
+		"ride_id":        rideID,
+		"pickup_address": pickupAddress,
+		"dest_address":   destAddress,
+	}
+	// No user ID available here — persist without user (FCM-only legacy path).
 	return s.client.Send(ctx, fcmToken,
 		"New Ride Request",
 		fmt.Sprintf("%.0fm away — %s → %s", distanceM, pickupAddress, destAddress),
+		data,
+	)
+}
+
+// SendRideRequestToUser sends a ride request push AND persists the notification.
+func (s *Service) SendRideRequestToUser(ctx context.Context, userID, fcmToken, rideID, pickupAddress, destAddress string, distanceM float64) error {
+	return s.send(ctx, userID, fcmToken,
+		"New Ride Request",
+		fmt.Sprintf("%.0fm away — %s → %s", distanceM, pickupAddress, destAddress),
+		"ride",
 		map[string]string{
 			"type":           "ride_request",
 			"ride_id":        rideID,

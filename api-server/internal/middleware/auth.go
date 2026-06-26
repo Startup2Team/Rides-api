@@ -24,9 +24,11 @@ const (
 
 // Claims are the JWT payload fields embedded in every access token.
 type Claims struct {
-	UserID    string `json:"user_id"`
-	RoleState string `json:"role_state"`
-	TokenType string `json:"token_type"` // "access" | "refresh"
+	UserID      string `json:"user_id"`
+	RoleState   string `json:"role_state"`
+	TokenType   string `json:"token_type"`   // "access" | "refresh"
+	AdminRole   string `json:"admin_role"`   // set only for admin tokens: SUPER_ADMIN, OPS_MANAGER, etc.
+	IsSuspended bool   `json:"is_suspended"` // embedded so suspension is enforced without a DB hit
 	jwt.RegisteredClaims
 }
 
@@ -60,13 +62,17 @@ func WithLogger(log zerolog.Logger) func(http.Handler) http.Handler {
 func Authenticate(cfg *config.Config, rdb *goredis.Client) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			header := r.Header.Get("Authorization")
-			if header == "" || !strings.HasPrefix(header, "Bearer ") {
+			tokenStr := ""
+			if header := r.Header.Get("Authorization"); header != "" && strings.HasPrefix(header, "Bearer ") {
+				tokenStr = strings.TrimPrefix(header, "Bearer ")
+			} else if q := r.URL.Query().Get("token"); q != "" {
+				// Mobile WebSocket clients cannot set Authorization headers; they pass JWT via query.
+				tokenStr = q
+			}
+			if tokenStr == "" {
 				respond.Error(w, apperrors.ErrUnauthorized)
 				return
 			}
-
-			tokenStr := strings.TrimPrefix(header, "Bearer ")
 
 			claims := &Claims{}
 			token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {

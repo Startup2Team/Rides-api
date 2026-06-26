@@ -108,6 +108,16 @@ func (Keys) CustomerDailyCancel(customerID string) string {
 	return fmt.Sprintf("customer:cancels:%s:daily", customerID)
 }
 
+func (Keys) DriverDailyCancel(driverUserID string) string {
+	return fmt.Sprintf("driver:cancels:%s:daily", driverUserID)
+}
+
+// CustomerCreatingRide is a short-lived SET NX lock (10 s TTL) that prevents
+// two concurrent HTTP requests from the same customer creating duplicate rides.
+func (Keys) CustomerCreatingRide(customerID string) string {
+	return fmt.Sprintf("customer:%s:creating_ride", customerID)
+}
+
 // ── Auth sessions ─────────────────────────────────────────────────────────
 
 func (Keys) Session(userID, jti string) string {
@@ -141,8 +151,40 @@ func (Keys) GPSAnomalyCount(driverID string) string {
 	return fmt.Sprintf("driver:gps_anomalies:%s:session_count", driverID)
 }
 
+// DriverSmoothedLocation stores the EMA-smoothed GPS position for a driver.
+// Updated on every accepted location_update; read before fanning out to the
+// customer so the map path doesn't jitter from raw GPS noise.
+func (Keys) DriverSmoothedLocation(driverID string) string {
+	return fmt.Sprintf("driver:%s:smoothed_location", driverID)
+}
+
+// DriverGracePeriod is set for 60 s when a driver goes online.
+// During this window the GPS plausibility check is skipped so that the app's
+// initial KIGALI_CENTER placeholder position (sent before device GPS resolves)
+// does not create a false anomaly when the real GPS position arrives.
+func (Keys) DriverGracePeriod(driverID string) string {
+	return fmt.Sprintf("driver:%s:gps_grace", driverID)
+}
+
 // ── Analytics ─────────────────────────────────────────────────────────────
 
 func (Keys) AnalyticsStream() string {
 	return "analytics:events"
+}
+
+// RideDriverLocation caches the driver's last GPS update for a specific ride.
+// Written on every location relay while a trip is active; TTL 30 minutes.
+// Used to replay the driver's position to a customer who reconnects their WS.
+func (Keys) RideDriverLocation(rideID string) string {
+	return fmt.Sprintf("ride:%s:driver_location", rideID)
+}
+
+// ── Admin dashboard ────────────────────────────────────────────────────────
+
+func (Keys) DashboardCache() string {
+	return "admin:dashboard:cache"
+}
+
+func (Keys) RevenueTodayCache() string {
+	return "admin:revenue:today"
 }

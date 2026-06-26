@@ -15,9 +15,19 @@ type Round struct {
 	ProposedBy      string // "CUSTOMER" | "DRIVER"
 	ProposedAmount  float64
 	Response        *string // ACCEPTED | COUNTERED | DECLINED | TIMEOUT
+	Message         *string
 	CallInitiated   bool
 	CallInitiatedAt *time.Time
 	CreatedAt       time.Time
+}
+
+// TextMessage is a chat message sent during negotiation.
+type TextMessage struct {
+	ID        string    `json:"id"`
+	RideID    string    `json:"ride_id"`
+	Sender    string    `json:"sender"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Repository handles negotiation round DB operations.
@@ -50,10 +60,10 @@ func (r *Repository) CreateRound(ctx context.Context, rideID string, roundNumber
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO negotiation_rounds (ride_id, round_number, proposed_by, proposed_amount)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, ride_id, round_number, proposed_by, proposed_amount, response, call_initiated, call_initiated_at, created_at
+		RETURNING id, ride_id, round_number, proposed_by, proposed_amount, response, message, call_initiated, call_initiated_at, created_at
 	`, rideID, roundNumber, proposedBy, amount).Scan(
 		&round.ID, &round.RideID, &round.RoundNumber, &round.ProposedBy,
-		&round.ProposedAmount, &round.Response, &round.CallInitiated,
+		&round.ProposedAmount, &round.Response, &round.Message, &round.CallInitiated,
 		&round.CallInitiatedAt, &round.CreatedAt,
 	)
 	return round, err
@@ -63,13 +73,13 @@ func (r *Repository) GetLatestRound(ctx context.Context, rideID string) (*Round,
 	round := &Round{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, ride_id, round_number, proposed_by, proposed_amount, response,
-		       call_initiated, call_initiated_at, created_at
+		       message, call_initiated, call_initiated_at, created_at
 		FROM negotiation_rounds
 		WHERE ride_id = $1
 		ORDER BY round_number DESC LIMIT 1
 	`, rideID).Scan(
 		&round.ID, &round.RideID, &round.RoundNumber, &round.ProposedBy,
-		&round.ProposedAmount, &round.Response, &round.CallInitiated,
+		&round.ProposedAmount, &round.Response, &round.Message, &round.CallInitiated,
 		&round.CallInitiatedAt, &round.CreatedAt,
 	)
 	return round, err
@@ -97,7 +107,7 @@ func (r *Repository) MarkCallInitiated(ctx context.Context, rideID string) error
 func (r *Repository) ListRounds(ctx context.Context, rideID string) ([]*Round, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, ride_id, round_number, proposed_by, proposed_amount, response,
-		       call_initiated, call_initiated_at, created_at
+		       message, call_initiated, call_initiated_at, created_at
 		FROM negotiation_rounds WHERE ride_id = $1 ORDER BY round_number ASC
 	`, rideID)
 	if err != nil {
@@ -110,7 +120,7 @@ func (r *Repository) ListRounds(ctx context.Context, rideID string) ([]*Round, e
 		round := &Round{}
 		if err := rows.Scan(
 			&round.ID, &round.RideID, &round.RoundNumber, &round.ProposedBy,
-			&round.ProposedAmount, &round.Response, &round.CallInitiated,
+			&round.ProposedAmount, &round.Response, &round.Message, &round.CallInitiated,
 			&round.CallInitiatedAt, &round.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -118,4 +128,37 @@ func (r *Repository) ListRounds(ctx context.Context, rideID string) ([]*Round, e
 		rounds = append(rounds, round)
 	}
 	return rounds, rows.Err()
+}
+
+// ── Text messages ────────────────────────────────────────────────────────────
+
+func (r *Repository) CreateTextMessage(ctx context.Context, rideID, sender, body string) (*TextMessage, error) {
+	msg := &TextMessage{}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO negotiation_messages (ride_id, sender, body)
+		VALUES ($1, $2, $3)
+		RETURNING id, ride_id, sender, body, created_at
+	`, rideID, sender, body).Scan(&msg.ID, &msg.RideID, &msg.Sender, &msg.Body, &msg.CreatedAt)
+	return msg, err
+}
+
+func (r *Repository) ListTextMessages(ctx context.Context, rideID string) ([]*TextMessage, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, ride_id, sender, body, created_at
+		FROM negotiation_messages WHERE ride_id = $1 ORDER BY created_at ASC
+	`, rideID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*TextMessage
+	for rows.Next() {
+		m := &TextMessage{}
+		if err := rows.Scan(&m.ID, &m.RideID, &m.Sender, &m.Body, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
 }

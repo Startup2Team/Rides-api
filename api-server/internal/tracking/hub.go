@@ -6,6 +6,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// safeClose closes ch exactly once. Safe to call from multiple goroutines.
+func safeClose(ch chan struct{}, once *sync.Once) {
+	once.Do(func() { close(ch) })
+}
+
 // Message is a typed payload sent over WebSocket connections.
 type Message struct {
 	Type    string                 `json:"type"`
@@ -15,11 +20,18 @@ type Message struct {
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	UserID string
-	RideID string // set for customers tracking a specific ride
-	Role   string // "DRIVER" | "CUSTOMER"
-	Send   chan Message
-	done   chan struct{}
+	UserID    string
+	RideID    string // set for customers tracking a specific ride
+	Role      string // "DRIVER" | "CUSTOMER"
+	Send      chan Message
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// Done signals the client's goroutines to stop. Safe to call multiple times
+// and from multiple goroutines — only the first call closes the channel.
+func (c *Client) Done() {
+	safeClose(c.done, &c.closeOnce)
 }
 
 // Hub manages all active WebSocket connections.
@@ -47,7 +59,7 @@ func (h *Hub) RegisterDriver(userID string, client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if existing, ok := h.drivers[userID]; ok {
-		close(existing.done)
+		existing.Done()
 	}
 	h.drivers[userID] = client
 	h.log.Info().Str("user_id", userID).Msg("ws: driver connected")
@@ -66,7 +78,7 @@ func (h *Hub) RegisterCustomer(rideID, userID string, client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if existing, ok := h.customers[rideID]; ok {
-		close(existing.done)
+		existing.Done()
 	}
 	h.customers[rideID] = client
 	h.log.Info().Str("ride_id", rideID).Str("user_id", userID).Msg("ws: customer connected")

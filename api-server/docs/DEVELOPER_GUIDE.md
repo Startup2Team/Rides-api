@@ -1,4 +1,4 @@
-# Taravelis Backend — Developer Guide
+# Rides Backend — Developer Guide
 
 Everything you need to work on this codebase: structure, patterns, how to write code, how to test it, and how to ship it.
 

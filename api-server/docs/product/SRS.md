@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-Taravelis is a ride-hailing and light logistics backend for Rwanda and East Africa. It supports customers booking transport, drivers accepting and completing rides, negotiation-based fare agreement, admin oversight, and operational analytics.
+Rides is a ride-hailing and light logistics backend for Rwanda and East Africa. It supports customers booking transport, drivers accepting and completing rides, negotiation-based fare agreement, admin oversight, and operational analytics.
 
 This document defines the MVP backend requirements and system expectations.
 

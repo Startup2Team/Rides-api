@@ -23,7 +23,7 @@ func (r *Repository) Overview(ctx context.Context) (map[string]interface{}, erro
 	var totalRevenueToday float64
 
 	_ = r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM driver_profiles WHERE is_online = TRUE AND approval_status = 'ACTIVE'
+		SELECT COUNT(*) FROM driver_profiles WHERE is_online = TRUE AND approval_status = 'APPROVED'
 	`).Scan(&activeDrivers)
 
 	_ = r.db.QueryRow(ctx, `
@@ -121,14 +121,14 @@ func (r *Repository) RevenueBreakdown(ctx context.Context) ([]map[string]interfa
 // DriverPerformance returns top driver metrics.
 func (r *Repository) DriverPerformance(ctx context.Context, limit int) ([]map[string]interface{}, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT dp.id, u.phone_number, dp.transport_type, dp.total_rides,
+		SELECT dp.id, u.phone_number, u.full_name, dp.transport_type, dp.total_rides,
 		       dp.acceptance_rate, dp.priority_tier,
-		       COALESCE(SUM(r.agreed_fare) FILTER (WHERE r.status='COMPLETED'), 0) AS earnings_30d
+		       COALESCE(SUM(ri.agreed_fare) FILTER (WHERE ri.status='COMPLETED'), 0) AS earnings_30d
 		FROM driver_profiles dp
 		JOIN users u ON u.id = dp.user_id
-		LEFT JOIN rides r ON r.driver_id = dp.id AND r.completed_at >= NOW() - INTERVAL '30 days'
-		WHERE dp.approval_status = 'ACTIVE'
-		GROUP BY dp.id, u.phone_number, dp.transport_type, dp.total_rides, dp.acceptance_rate, dp.priority_tier
+		LEFT JOIN rides ri ON ri.driver_id = dp.id AND ri.completed_at >= NOW() - INTERVAL '30 days'
+		WHERE dp.approval_status = 'APPROVED'
+		GROUP BY dp.id, u.phone_number, u.full_name, dp.transport_type, dp.total_rides, dp.acceptance_rate, dp.priority_tier
 		ORDER BY earnings_30d DESC
 		LIMIT $1
 	`, limit)
@@ -140,14 +140,16 @@ func (r *Repository) DriverPerformance(ctx context.Context, limit int) ([]map[st
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, phone, transportType string
+		var fullName *string
 		var totalRides, priorityTier int
 		var acceptanceRate, earnings float64
-		if err := rows.Scan(&id, &phone, &transportType, &totalRides, &acceptanceRate, &priorityTier, &earnings); err != nil {
+		if err := rows.Scan(&id, &phone, &fullName, &transportType, &totalRides, &acceptanceRate, &priorityTier, &earnings); err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]interface{}{
-			"driver_id": id, "phone": phone, "transport_type": transportType,
-			"total_rides": totalRides, "acceptance_rate": acceptanceRate,
+			"driver_id": id, "phone": phone, "full_name": fullName,
+			"transport_type": transportType,
+			"total_rides":    totalRides, "acceptance_rate": acceptanceRate,
 			"priority_tier": priorityTier, "earnings_30d": earnings,
 		})
 	}
@@ -217,6 +219,147 @@ func (r *Repository) Heatmap(ctx context.Context) ([]map[string]interface{}, err
 			return nil, err
 		}
 		result = append(result, map[string]interface{}{"lat": lat, "lng": lng, "count": count})
+	}
+	return result, nil
+}
+
+// Funnel returns the ride booking conversion funnel.
+func (r *Repository) Funnel(ctx context.Context, days int) (map[string]interface{}, error) {
+	var booked, matched, confirmed, completed, cancelled int
+	_ = r.db.QueryRow(ctx, `
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE status != 'SEARCHING'),
+			COUNT(*) FILTER (WHERE status IN ('CONFIRMED','DRIVER_EN_ROUTE','DRIVER_ARRIVED','IN_PROGRESS','COMPLETED')),
+			COUNT(*) FILTER (WHERE status = 'COMPLETED'),
+			COUNT(*) FILTER (WHERE status = 'CANCELLED')
+		FROM rides
+		WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
+	`, days).Scan(&booked, &matched, &confirmed, &completed, &cancelled)
+
+	return map[string]interface{}{
+		"booked":    booked,
+		"matched":   matched,
+		"confirmed": confirmed,
+		"completed": completed,
+		"cancelled": cancelled,
+	}, nil
+}
+
+// VehicleMix returns the ride count and revenue share per transport type.
+func (r *Repository) VehicleMix(ctx context.Context, days int) ([]map[string]interface{}, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT transport_type,
+		       COUNT(*) AS rides,
+		       COALESCE(SUM(agreed_fare), 0) AS revenue
+		FROM rides
+		WHERE status = 'COMPLETED'
+		  AND completed_at >= NOW() - ($1 || ' days')::INTERVAL
+		GROUP BY transport_type
+		ORDER BY rides DESC
+	`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var tType string
+		var rides int
+		var revenue float64
+		if err := rows.Scan(&tType, &rides, &revenue); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{
+			"transport_type": tType, "rides": rides, "revenue": revenue,
+		})
+	}
+	return result, nil
+}
+
+// ActivityHeatmap returns a (day_of_week, hour) grid of ride counts.
+// day_of_week: 0=Sun..6=Sat  hour: 0-23 (UTC+2 Kigali).
+func (r *Repository) ActivityHeatmap(ctx context.Context) ([]map[string]interface{}, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT
+			EXTRACT(DOW FROM created_at AT TIME ZONE 'Africa/Kigali')::INT AS dow,
+			EXTRACT(HOUR FROM created_at AT TIME ZONE 'Africa/Kigali')::INT AS hour,
+			COUNT(*) AS count
+		FROM rides
+		WHERE created_at >= NOW() - INTERVAL '90 days'
+		GROUP BY dow, hour
+		ORDER BY dow, hour
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var dow, hour, count int
+		if err := rows.Scan(&dow, &hour, &count); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{
+			"day": dow, "hour": hour, "count": count,
+		})
+	}
+	return result, nil
+}
+
+// Satisfaction returns a synthetic distribution (rides don't yet store ratings).
+// Returns completion-rate proxy as a satisfaction signal.
+func (r *Repository) Satisfaction(ctx context.Context) (map[string]interface{}, error) {
+	var total, completed int
+	_ = r.db.QueryRow(ctx, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE status='COMPLETED')
+		FROM rides WHERE created_at >= NOW() - INTERVAL '30 days'
+	`).Scan(&total, &completed)
+
+	rate := 0.0
+	if total > 0 {
+		rate = float64(completed) / float64(total) * 100
+	}
+	return map[string]interface{}{
+		"completion_rate_pct": rate,
+		"total_rides_30d":     total,
+		"completed_rides_30d": completed,
+	}, nil
+}
+
+// HeatmapZones returns aggregated demand/supply per named Kigali district bucket.
+func (r *Repository) HeatmapZones(ctx context.Context) ([]map[string]interface{}, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT
+			ROUND(ST_Y(pickup_point::geometry)::NUMERIC, 2) AS lat_bucket,
+			ROUND(ST_X(pickup_point::geometry)::NUMERIC, 2) AS lng_bucket,
+			COUNT(*) AS demand,
+			COUNT(*) FILTER (WHERE status = 'COMPLETED') AS trips,
+			COALESCE(AVG(agreed_fare) FILTER (WHERE status = 'COMPLETED'), 0) AS avg_fare
+		FROM rides
+		WHERE created_at >= NOW() - INTERVAL '7 days'
+		GROUP BY lat_bucket, lng_bucket
+		ORDER BY demand DESC
+		LIMIT 50
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var lat, lng, avgFare float64
+		var demand, trips int
+		if err := rows.Scan(&lat, &lng, &demand, &trips, &avgFare); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{
+			"lat": lat, "lng": lng,
+			"demand": demand, "trips": trips, "avg_fare": avgFare,
+		})
 	}
 	return result, nil
 }
