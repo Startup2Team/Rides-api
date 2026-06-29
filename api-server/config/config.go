@@ -29,6 +29,21 @@ type Config struct {
 	Customer CustomerConfig
 	Penalty  PenaltyConfig
 	Payments PaymentsConfig
+	Security SecurityConfig
+}
+
+// SecurityConfig holds API-protection tunables.
+type SecurityConfig struct {
+	// GlobalRateLimitPerMin caps requests per client IP per minute across all
+	// routes (DDoS / abuse backstop). Higher than the old hard-coded 100 so that
+	// many users behind one carrier-grade-NAT IP don't share a tiny bucket.
+	GlobalRateLimitPerMin int
+	// MaxRequestBodyBytes caps non-upload request bodies (memory-exhaustion guard).
+	MaxRequestBodyBytes int64
+	// SwaggerEnabled exposes /swagger. Off by default in production.
+	SwaggerEnabled bool
+	// SwaggerBasicAuth, when "user:pass", protects /swagger with HTTP Basic auth.
+	SwaggerBasicAuth string
 }
 
 // PaymentsConfig gates real-money wallet movement. Until a payment gateway
@@ -251,6 +266,11 @@ func Load() (*Config, error) {
 	// Real-money wallet movement stays OFF until a verified payment gateway exists.
 	cfg.Payments.Enabled = getEnvBool("PAYMENTS_ENABLED", false)
 	cfg.Payments.WebhookSecret = getEnv("MOMO_WEBHOOK_SECRET", "")
+
+	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 300)
+	cfg.Security.MaxRequestBodyBytes = int64(getEnvInt("MAX_REQUEST_BODY_BYTES", 1<<20)) // 1 MiB
+	cfg.Security.SwaggerEnabled = getEnvBool("SWAGGER_ENABLED", cfg.Env != "production")
+	cfg.Security.SwaggerBasicAuth = getEnv("SWAGGER_BASIC_AUTH", "")
 
 	return cfg, nil
 }

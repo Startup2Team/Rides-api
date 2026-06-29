@@ -342,8 +342,16 @@ func main() {
 	r.Use(chimw.RequestID)
 	r.Use(chimw.Recoverer)
 	r.Use(mw.SecurityHeaders(cfg.Env))
-	// Global rate limiter to prevent application-layer DDoS (100 requests/minute per IP)
-	r.Use(mw.IPRateLimit(rdb, "global", 100, time.Minute))
+	// Global request-body cap (memory-exhaustion guard), except large-upload
+	// routes which set their own higher per-handler limit.
+	r.Use(mw.SkipPaths(mw.BodyLimit(cfg.Security.MaxRequestBodyBytes), apiV1Prefix+"/uploads/objects/"))
+	// Global per-IP rate limit (application-layer DDoS/abuse backstop). Skip health
+	// checks and the long-lived WebSocket upgrades — reconnect storms behind
+	// carrier-grade NAT would otherwise drain a bucket shared by many real users.
+	r.Use(mw.SkipPaths(
+		mw.IPRateLimit(rdb, "global", cfg.Security.GlobalRateLimitPerMin, time.Minute),
+		"/health", apiV1Prefix+"/ws/",
+	))
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
 
@@ -351,11 +359,14 @@ func main() {
 		respond.OK(w, map[string]string{"status": "ok"})
 	})
 
-	r.Get("/swagger", func(w http.ResponseWriter, r *http.Request) {
+	// API docs — gated: 404 when disabled (default in prod), optional Basic auth
+	// so the API surface isn't world-readable. Set SWAGGER_ENABLED / SWAGGER_BASIC_AUTH.
+	swaggerGate := mw.SwaggerGate(cfg.Security.SwaggerEnabled, cfg.Security.SwaggerBasicAuth)
+	r.With(swaggerGate).Get("/swagger", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(swaggerHTML))
 	})
-	r.Get("/swagger/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+	r.With(swaggerGate).Get("/swagger/openapi.json", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "config/openapi.json")
 	})
 	r.Get(apiV1Prefix+"/pricing", fareH.ListPublicPricing)
@@ -380,8 +391,10 @@ func main() {
 	if cfg.Env == "production" && cfg.Payments.WebhookSecret == "" {
 		log.Warn().Msg("MOMO_WEBHOOK_SECRET is unset in production — the MoMo callback is UNAUTHENTICATED; set it before enabling payments")
 	}
-	r.With(momoWebhookAuth(cfg.Payments.WebhookSecret)).
-		Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
+	r.With(
+		mw.IPRateLimit(rdb, "momo_webhook", 120, time.Minute),
+		momoWebhookAuth(cfg.Payments.WebhookSecret),
+	).Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
 
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
@@ -444,7 +457,10 @@ func main() {
 
 			r.Get("/packages", pkgH.ListPackages)
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
-			r.Post("/packages/purchase", pkgH.PurchasePackage)
+			// Cap purchase attempts per driver so a loop can't spam MoMo prompts
+			// (each one pushes a PIN request to the payer's phone).
+			r.With(mw.UserRateLimit(rdb, "pkg_purchase", 10, time.Minute)).
+				Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/packages/purchases/{purchaseID}", pkgH.GetPurchaseStatus)
 			r.Get("/packages/history", pkgH.PurchaseHistory)
 			r.Get("/credits", pkgH.GetCredits)
@@ -774,13 +790,18 @@ func main() {
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
 			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
 
-			// Money actions on purchases — restricted to finance roles.
-			// Manual settlement of a PENDING purchase, and admin-recorded
-			// purchases on a driver's behalf (cash / bank / manual MoMo).
-			r.With(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager)).
-				Post("/packages-purchases", pkgH.AdminCreatePurchase)
-			r.With(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager)).
-				Post("/packages-purchases/{id}/confirm", pkgH.AdminConfirmPurchase)
+			// Money actions on purchases — restricted to finance roles, rate-limited
+			// per admin (a compromised admin token can't mass-grant credits), and
+			// audit-logged in the handlers. Manual settlement of a PENDING purchase,
+			// and admin-recorded purchases on a driver's behalf (cash / bank / MoMo).
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/packages-purchases", pkgH.AdminCreatePurchase)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/packages-purchases/{id}/confirm", pkgH.AdminConfirmPurchase)
 
 			// Campaigns admin CRUD
 			r.Get("/campaigns", pkgH.AdminListCampaigns)
