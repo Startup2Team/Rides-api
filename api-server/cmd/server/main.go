@@ -80,6 +80,12 @@ func main() {
 		if cfg.Driver.DevAutoApprove {
 			log.Fatal().Msg("FATAL: DEV_AUTO_APPROVE_DRIVERS=true in production — refusing to start")
 		}
+		if cfg.JWT.AccessSecret == "local_dev_access_secret_change_before_any_shared_environment_0123456789" {
+			log.Fatal().Msg("FATAL: Default development JWT_ACCESS_SECRET detected in production — refusing to start")
+		}
+		if cfg.Payments.Enabled && cfg.MoMo.APIKey == "" {
+			log.Fatal().Msg("FATAL: Payments are enabled in production but MOMO_API_KEY is not set — refusing to start")
+		}
 	} else {
 		if cfg.Ride.DevSkipGeofence {
 			log.Warn().Msg("⚠️  DEV_SKIP_GEOFENCE=true — geofence checks disabled (dev only)")
@@ -93,7 +99,7 @@ func main() {
 	defer cancel()
 
 	// ── Database ──────────────────────────────────────────────────────────────
-	db, err := pgpkg.New(ctx, cfg.Database.URL)
+	db, err := pgpkg.New(ctx, cfg.Database.URL, cfg.Database.MaxConns, cfg.Database.MinConns)
 	if err != nil {
 		log.Fatal().Err(err).Msg("postgres: connect")
 	}
@@ -196,11 +202,11 @@ func main() {
 	// Go-online credit gate reads the same v4 ledger that ride deduction debits,
 	// so a driver with a real v4 package isn't wrongly blocked with NO_CREDITS.
 	driverSvc.SetCreditChecker(ledgerSvc)
-	// Dev (non-prod) with payments simulated: auto-confirm purchases inline since
-	// no real MoMo callback arrives. In production the webhook drives confirmation.
-	devAutoConfirm := cfg.Env != "production" && cfg.Payments.Enabled
+	// Dev: auto-confirm purchases without a real MoMo callback. In development
+	// this is always on; in other non-prod envs it follows PAYMENTS_ENABLED.
+	devAutoConfirm := cfg.Env == "development" || (cfg.Env != "production" && cfg.Payments.Enabled)
 	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
-	pkgH := packages.NewHandler(pkgSvc, auditLog)
+	pkgH := packages.NewHandler(pkgSvc, auditLog, cfg)
 	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
 	pkgH.SetLedger(ledgerSvc)     // v4 entitlements
 	pkgH.SetPurchase(purchaseSvc) // v4 purchase + MoMo
@@ -294,8 +300,11 @@ func main() {
 	r := chi.NewRouter()
 
 	// ── CORS ──────────────────────────────────────────────────────────────────
-	// Allow the admin Next.js dev server and any configured production origin.
-	allowedOrigins := []string{"http://localhost:3000", "http://localhost:3001"}
+	// Allow the admin Next.js dev server in non-production, and any configured production origin.
+	allowedOrigins := []string{}
+	if cfg.Env != "production" {
+		allowedOrigins = append(allowedOrigins, "http://localhost:3000", "http://localhost:3001")
+	}
 	if origin := cfg.AdminOrigin; origin != "" {
 		allowedOrigins = append(allowedOrigins, origin)
 	}
@@ -309,11 +318,10 @@ func main() {
 	}))
 
 	r.Use(chimw.RequestID)
-	// NOTE: chimw.RealIP is deliberately NOT used — it rewrites RemoteAddr from the
-	// spoofable X-Forwarded-For/X-Real-IP on EVERY request, which would let clients
-	// fake their IP for rate-limiting and logging. We use mw.trustedIP() instead,
-	// which only trusts those headers from a private/loopback peer (our edge proxy).
 	r.Use(chimw.Recoverer)
+	r.Use(mw.SecurityHeaders(cfg.Env))
+	// Global rate limiter to prevent application-layer DDoS (100 requests/minute per IP)
+	r.Use(mw.IPRateLimit(rdb, "global", 100, time.Minute))
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
 
@@ -483,13 +491,15 @@ func main() {
 		// panel can render document images via a plain URL. No-op on S3/R2.
 		if uploadH != nil {
 			r.Get("/objects/*", uploadH.GetObject)
+			// Proxy-mode PUT mirrors a presigned S3 URL — the random object key is
+			// the credential, so mobile can stream bytes without a bearer token.
+			r.Put("/objects/*", uploadH.PutObject)
 		}
-		// Authenticated: request an upload target, and (proxy mode) stream bytes.
+		// Authenticated: request an upload target.
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authenticate(cfg, rdb))
 			if uploadH != nil {
 				r.Post("/presigned-url", uploadH.PresignedURL)
-				r.Put("/objects/*", uploadH.PutObject)
 			}
 		})
 	})
@@ -510,10 +520,11 @@ func main() {
 	r.With(mw.Authenticate(cfg, rdb)).Get(apiV1Prefix+"/rides/active", locH.GetActiveRide)
 
 	// ── Admin auth (public — no admin JWT required) ───────────────────────────
-	r.Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
-	r.Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
-	r.Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
-	r.Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
+	// Rate limit administrative endpoints to prevent brute-force credential stuffing.
+	r.With(mw.IPRateLimit(rdb, "admin_login", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
+	r.With(mw.IPRateLimit(rdb, "admin_2fa", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
+	r.With(mw.IPRateLimit(rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+	r.With(mw.IPRateLimit(rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
 
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
@@ -735,6 +746,7 @@ func main() {
 
 			// Packages admin CRUD
 			r.Get("/packages", pkgH.AdminListPackages)
+			r.Get("/packages-purchases", pkgH.AdminListPurchases)
 			r.Post("/packages", pkgH.AdminCreatePackage)
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)

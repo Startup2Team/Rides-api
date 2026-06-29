@@ -43,7 +43,9 @@ type PaymentsConfig struct {
 }
 
 type DatabaseConfig struct {
-	URL string
+	URL      string
+	MaxConns int
+	MinConns int
 }
 
 type RedisConfig struct {
@@ -82,6 +84,8 @@ type MoMoConfig struct {
 	APIKey          string
 	SubscriptionKey string
 	Environment     string
+	WebhookSecret   string
+	IPWhitelist     string
 }
 
 type StorageConfig struct {
@@ -163,6 +167,8 @@ func Load() (*Config, error) {
 	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
+	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 25)
+	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 5)
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")
 
 	cfg.JWT.AccessSecret = requireEnv("JWT_ACCESS_SECRET")
@@ -186,6 +192,8 @@ func Load() (*Config, error) {
 	cfg.MoMo.APIKey = getEnv("MOMO_API_KEY", "")
 	cfg.MoMo.SubscriptionKey = getEnv("MOMO_SUBSCRIPTION_KEY", "")
 	cfg.MoMo.Environment = getEnv("MOMO_ENVIRONMENT", "sandbox")
+	cfg.MoMo.WebhookSecret = getEnv("MOMO_WEBHOOK_SECRET", "")
+	cfg.MoMo.IPWhitelist = getEnv("MOMO_IP_WHITELIST", "")
 
 	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
 	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")

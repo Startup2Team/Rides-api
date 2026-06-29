@@ -165,9 +165,26 @@ type CreateInput struct {
 // Create starts a purchase: resolves the offer, snapshots it, and either grants
 // immediately (free/promotional) or opens a PENDING MoMo charge. Idempotent on
 // idempotency_key.
+func (s *PurchaseService) devSettlePending(ctx context.Context, purchaseID, paymentRef string) (*Purchase, error) {
+	if !s.devAutoConfirm || paymentRef == "" {
+		return nil, nil
+	}
+	if err := s.confirm(ctx, paymentRef, "DEV-SIMULATED", true); err != nil {
+		return nil, err
+	}
+	return s.repo.getPurchaseByID(ctx, purchaseID)
+}
+
 func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateInput) (*Purchase, error) {
 	// Idempotency: return the existing purchase if this key was already used.
 	if existing, err := s.repo.getPurchaseByIdem(ctx, in.IdempotencyKey); err == nil && existing != nil {
+		if existing.Status == "PENDING" {
+			if settled, settleErr := s.devSettlePending(ctx, existing.ID, existing.PaymentRef); settleErr != nil {
+				s.log.Warn().Err(settleErr).Str("purchase_id", existing.ID).Msg("packages: dev auto-confirm on idempotent purchase failed")
+			} else if settled != nil {
+				return settled, nil
+			}
+		}
 		return existing, nil
 	}
 
@@ -214,7 +231,8 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 		s.log.Error().Err(err).Str("step", "create_purchase_row").Msg("purchase create failed")
 		return nil, err
 	}
-	if s.momo != nil && in.MomoPhone != "" {
+	// Dev: skip live MoMo — auto-confirm inline so mobile does not poll forever.
+	if !s.devAutoConfirm && s.momo != nil && in.MomoPhone != "" {
 		provider := "MTN_MOMO"
 		if in.MomoProvider == "airtel" {
 			provider = "AIRTEL_MONEY"
@@ -223,11 +241,11 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 			s.log.Warn().Err(err).Str("purchase_id", id).Msg("packages: momo prompt failed")
 		}
 	}
-	// Dev: no real callback will arrive — simulate success so the flow completes.
-	if s.devAutoConfirm {
-		if err := s.confirm(ctx, paymentRef, "DEV-SIMULATED", true); err != nil {
-			s.log.Warn().Err(err).Str("purchase_id", id).Msg("packages: dev auto-confirm failed")
-		}
+	if settled, err := s.devSettlePending(ctx, id, paymentRef); err != nil {
+		s.log.Error().Err(err).Str("purchase_id", id).Msg("packages: dev auto-confirm failed")
+		return nil, fmt.Errorf("dev auto-confirm: %w", err)
+	} else if settled != nil {
+		return settled, nil
 	}
 	return s.repo.getPurchaseByID(ctx, id)
 }
@@ -263,12 +281,52 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 
 // GetStatus returns a purchase for polling (must belong to the user).
 func (s *PurchaseService) GetStatus(ctx context.Context, userID, purchaseID string) (*Purchase, error) {
-	return s.repo.getPurchaseForUser(ctx, userID, purchaseID)
+	p, err := s.repo.getPurchaseForUser(ctx, userID, purchaseID)
+	if err != nil {
+		return nil, err
+	}
+	if p.Status == "PENDING" {
+		if settled, settleErr := s.devSettlePending(ctx, p.ID, p.PaymentRef); settleErr != nil {
+			s.log.Warn().Err(settleErr).Str("purchase_id", p.ID).Msg("packages: dev auto-confirm on status poll failed")
+		} else if settled != nil {
+			return settled, nil
+		}
+	}
+	return p, nil
 }
 
 // History lists a driver's purchases, newest first.
 func (s *PurchaseService) History(ctx context.Context, userID string) ([]*Purchase, error) {
 	return s.repo.listPurchasesForUser(ctx, userID)
+}
+
+type AdminPurchase struct {
+	ID                string     `json:"id"`
+	DriverID          string     `json:"driver_id"`
+	DriverName        string     `json:"driver_name"`
+	DriverPhone       string     `json:"driver_phone"`
+	VehicleID         *string    `json:"vehicle_id,omitempty"`
+	VehicleTypeCode   string     `json:"vehicle_type_code"`
+	VehiclePlate      string     `json:"vehicle_plate"`
+	PackageID         string     `json:"package_id"`
+	PackageName       string     `json:"package_name"`
+	PackageVersion    int        `json:"package_version"`
+	CampaignID        *string    `json:"campaign_id,omitempty"`
+	CampaignCode      *string    `json:"campaign_code,omitempty"`
+	CampaignName      *string    `json:"campaign_name,omitempty"`
+	PricePaidRWF      int        `json:"price_paid_rwf"`
+	RidesGranted      int        `json:"rides_granted"`
+	BonusRidesGranted int        `json:"bonus_rides_granted"`
+	Status            string     `json:"status"`
+	PaymentProvider   *string    `json:"payment_provider,omitempty"`
+	PaymentRef        string     `json:"payment_ref"`
+	CreatedAt         time.Time  `json:"created_at"`
+	PaidAt            *time.Time `json:"paid_at,omitempty"`
+}
+
+// ListAllPurchases lists all package purchases for the admin, newest first.
+func (s *PurchaseService) ListAllPurchases(ctx context.Context) ([]*AdminPurchase, error) {
+	return s.repo.listAllPurchases(ctx)
 }
 
 // ── purchase repository methods ──────────────────────────────────────────────
@@ -334,6 +392,44 @@ func (r *Repository) listPurchasesForUser(ctx context.Context, userID string) ([
 			return nil, err
 		}
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) listAllPurchases(ctx context.Context) ([]*AdminPurchase, error) {
+	query := `
+		SELECT pp.id, pp.driver_id, u.full_name, u.phone_number, pp.vehicle_id, vt.code, COALESCE(dp.vehicle_plate, ''),
+		       pp.package_id, pp.package_name, pp.package_version_number,
+		       pp.campaign_id, pp.campaign_code, c.name,
+		       pp.price_paid_rwf, pp.rides_granted, pp.bonus_rides_granted,
+		       pp.status, pp.payment_provider, pp.payment_ref, pp.created_at, pp.paid_at
+		FROM package_purchases pp
+		JOIN driver_profiles dp ON dp.id = pp.driver_id
+		JOIN users u ON u.id = dp.user_id
+		JOIN vehicle_types vt ON vt.id = pp.vehicle_type_id
+		LEFT JOIN campaigns c ON c.id = pp.campaign_id
+		ORDER BY pp.created_at DESC`
+
+	rows, err := r.db.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*AdminPurchase
+	for rows.Next() {
+		ap := &AdminPurchase{}
+		err := rows.Scan(
+			&ap.ID, &ap.DriverID, &ap.DriverName, &ap.DriverPhone, &ap.VehicleID, &ap.VehicleTypeCode, &ap.VehiclePlate,
+			&ap.PackageID, &ap.PackageName, &ap.PackageVersion,
+			&ap.CampaignID, &ap.CampaignCode, &ap.CampaignName,
+			&ap.PricePaidRWF, &ap.RidesGranted, &ap.BonusRidesGranted,
+			&ap.Status, &ap.PaymentProvider, &ap.PaymentRef, &ap.CreatedAt, &ap.PaidAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ap)
 	}
 	return out, rows.Err()
 }

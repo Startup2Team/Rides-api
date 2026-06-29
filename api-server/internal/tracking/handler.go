@@ -98,6 +98,7 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 	// stay assigned).
 	h.restoreDriverPresence(r.Context(), driverProfile.ID, driverProfile.TransportType)
 	defer func() {
+		client.Done()
 		h.hub.UnregisterDriver(driverProfile.ID)
 		h.clearDriverPresence(context.Background(), driverProfile.ID, driverProfile.TransportType)
 	}()

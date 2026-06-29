@@ -91,6 +91,11 @@ func Authenticate(cfg *config.Config, rdb *goredis.Client) func(http.Handler) ht
 				return
 			}
 
+			if claims.TokenType != "access" {
+				respond.Error(w, apperrors.ErrTokenInvalid)
+				return
+			}
+
 			// Check Redis session liveness — catches revoked/logged-out tokens.
 			jti := claims.ID
 			if jti != "" {

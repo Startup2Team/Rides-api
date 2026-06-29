@@ -2,15 +2,21 @@ package packages
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
 
+	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -28,13 +34,14 @@ type BonusAfterPurchase interface {
 type Handler struct {
 	svc      *Service
 	audit    *audit.Logger
+	cfg      *config.Config
 	bonus    BonusAfterPurchase // optional; nil = bonus disabled
 	ledger   *LedgerService     // v4 entitlement ledger
 	purchase *PurchaseService   // v4 purchase + MoMo lifecycle
 }
 
-func NewHandler(svc *Service, auditLog *audit.Logger) *Handler {
-	return &Handler{svc: svc, audit: auditLog}
+func NewHandler(svc *Service, auditLog *audit.Logger, cfg *config.Config) *Handler {
+	return &Handler{svc: svc, audit: auditLog, cfg: cfg}
 }
 
 // SetBonus wires the bonus service so purchases automatically trigger bonus grants.
@@ -158,6 +165,43 @@ func (h *Handler) PurchaseHistory(w http.ResponseWriter, r *http.Request) {
 // SUCCESS|SUCCESSFUL|PAID for success, anything else = failure.
 func (h *Handler) WebhookMoMo(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // cap at 1 MB
+
+	// 1. IP Whitelisting (if configured)
+	clientIP := middleware.TrustedIP(r)
+	if h.cfg != nil && h.cfg.MoMo.IPWhitelist != "" {
+		allowedIPs := strings.Split(h.cfg.MoMo.IPWhitelist, ",")
+		allowed := false
+		for _, ip := range allowedIPs {
+			if strings.TrimSpace(ip) == clientIP {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			respond.ErrorMsg(w, http.StatusForbidden, "IP_NOT_ALLOWED", "Unauthorized IP address")
+			return
+		}
+	}
+
+	// 2. Cryptographic signature verification (HMAC-SHA256)
+	if h.cfg != nil && h.cfg.MoMo.WebhookSecret != "" {
+		signature := r.Header.Get("X-Signature")
+		if signature == "" {
+			respond.ErrorMsg(w, http.StatusUnauthorized, "MISSING_SIGNATURE", "X-Signature header required")
+			return
+		}
+
+		mac := hmac.New(sha256.New, []byte(h.cfg.MoMo.WebhookSecret))
+		mac.Write(raw)
+		expectedMAC := mac.Sum(nil)
+		expectedSig := hex.EncodeToString(expectedMAC)
+
+		if subtle.ConstantTimeCompare([]byte(signature), []byte(expectedSig)) != 1 {
+			respond.ErrorMsg(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "Invalid cryptographic signature")
+			return
+		}
+	}
+
 	var body struct {
 		PaymentRef    string `json:"payment_ref"`
 		ProviderTxnID string `json:"provider_txn_id"`
@@ -427,4 +471,14 @@ func (h *Handler) AdminDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 	h.audit.Record(r.Context(), adminID, role, "campaign.delete", "campaigns", id, fmt.Sprintf("Soft-deleted (archived) campaign %s", campaignName), map[string]any{"campaign_id": id})
 
 	respond.OK(w, map[string]string{"status": "success"})
+}
+
+// GET /api/v1/admin/packages/purchases
+func (h *Handler) AdminListPurchases(w http.ResponseWriter, r *http.Request) {
+	purchases, err := h.purchase.ListAllPurchases(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, purchases)
 }
