@@ -472,3 +472,13 @@ func (h *Handler) AdminDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 
 	respond.OK(w, map[string]string{"status": "success"})
 }
+
+// GET /api/v1/admin/packages/purchases
+func (h *Handler) AdminListPurchases(w http.ResponseWriter, r *http.Request) {
+	purchases, err := h.purchase.ListAllPurchases(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, purchases)
+}

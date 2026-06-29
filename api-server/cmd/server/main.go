@@ -746,6 +746,7 @@ func main() {
 
 			// Packages admin CRUD
 			r.Get("/packages", pkgH.AdminListPackages)
+			r.Get("/packages/purchases", pkgH.AdminListPurchases)
 			r.Post("/packages", pkgH.AdminCreatePackage)
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
