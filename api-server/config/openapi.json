@@ -16,6 +16,537 @@
     }
   ],
   "paths": {
+  "/api/v1/driver/packages": {
+    "get": {
+      "tags": [
+        "Packages & Payments"
+      ],
+      "summary": "List package catalog",
+      "description": "Active package versions with any active campaign override applied. Optional ?vehicle_type=MOTO_BIKE.",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "vehicle_type",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Success",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/api/v1/driver/packages/purchase": {
+    "post": {
+      "tags": [
+        "Packages & Payments"
+      ],
+      "summary": "Buy a package (MoMo)",
+      "description": "Opens a PENDING MoMo charge (or grants free/promotional instantly). Rate-limited 10/min per driver. Poll the status endpoint for settlement.",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "package_id",
+                "idempotency_key"
+              ],
+              "properties": {
+                "package_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "idempotency_key": {
+                  "type": "string"
+                },
+                "momo_phone": {
+                  "type": "string",
+                  "example": "250788123456"
+                },
+                "momo_provider": {
+                  "type": "string",
+                  "enum": [
+                    "mtn",
+                    "airtel"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "201": {
+          "description": "Success",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "PENDING",
+                          "PAID",
+                          "FAILED"
+                        ]
+                      },
+                      "package_id": {
+                        "type": "string"
+                      },
+                      "package_name": {
+                        "type": "string"
+                      },
+                      "price_paid_rwf": {
+                        "type": "integer"
+                      },
+                      "rides_granted": {
+                        "type": "integer"
+                      },
+                      "bonus_rides_granted": {
+                        "type": "integer"
+                      },
+                      "vehicle_type_code": {
+                        "type": "string"
+                      },
+                      "payment_provider": {
+                        "type": "string"
+                      },
+                      "payment_ref": {
+                        "type": "string"
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "paid_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "429": {
+          "description": "Too many purchase attempts"
+        }
+      }
+    }
+  },
+  "/api/v1/driver/packages/purchases/{purchaseID}": {
+    "get": {
+      "tags": [
+        "Packages & Payments"
+      ],
+      "summary": "Poll purchase status",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "purchaseID",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Success",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "PENDING",
+                          "PAID",
+                          "FAILED"
+                        ]
+                      },
+                      "package_id": {
+                        "type": "string"
+                      },
+                      "package_name": {
+                        "type": "string"
+                      },
+                      "price_paid_rwf": {
+                        "type": "integer"
+                      },
+                      "rides_granted": {
+                        "type": "integer"
+                      },
+                      "bonus_rides_granted": {
+                        "type": "integer"
+                      },
+                      "vehicle_type_code": {
+                        "type": "string"
+                      },
+                      "payment_provider": {
+                        "type": "string"
+                      },
+                      "payment_ref": {
+                        "type": "string"
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "paid_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "404": {
+          "description": "Not found"
+        }
+      }
+    }
+  },
+  "/api/v1/webhooks/momo/callback": {
+    "post": {
+      "tags": [
+        "Packages & Payments"
+      ],
+      "summary": "MoMo payment callback (provider)",
+      "description": "Public, called by the payment provider (not the app). Gated by a shared secret (X-Webhook-Secret) and rate-limited. Live settlement is primarily driven by server-side status polling, not this callback.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "payment_ref": {
+                  "type": "string"
+                },
+                "provider_txn_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "example": "SUCCESS"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Acknowledged"
+        },
+        "401": {
+          "description": "Bad/missing secret"
+        }
+      }
+    }
+  },
+  "/api/v1/admin/packages-purchases": {
+    "get": {
+      "tags": [
+        "Admin Payments"
+      ],
+      "summary": "List all package purchases",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Success",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "post": {
+      "tags": [
+        "Admin Payments"
+      ],
+      "summary": "Record a purchase on a driver's behalf",
+      "description": "Finance roles only (SUPER_ADMIN, FINANCE_MANAGER). Records a manual purchase (cash/bank/MoMo); mark_paid=true grants credits immediately. Audit-logged, rate-limited 30/min per admin.",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "driver_id",
+                "package_id"
+              ],
+              "properties": {
+                "driver_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "driver_profiles.id"
+                },
+                "package_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "mark_paid": {
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "201": {
+          "description": "Success",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "PENDING",
+                          "PAID",
+                          "FAILED"
+                        ]
+                      },
+                      "package_id": {
+                        "type": "string"
+                      },
+                      "package_name": {
+                        "type": "string"
+                      },
+                      "price_paid_rwf": {
+                        "type": "integer"
+                      },
+                      "rides_granted": {
+                        "type": "integer"
+                      },
+                      "bonus_rides_granted": {
+                        "type": "integer"
+                      },
+                      "vehicle_type_code": {
+                        "type": "string"
+                      },
+                      "payment_provider": {
+                        "type": "string"
+                      },
+                      "payment_ref": {
+                        "type": "string"
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "paid_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "403": {
+          "description": "Insufficient role"
+        }
+      }
+    }
+  },
+  "/api/v1/admin/packages-purchases/{id}/confirm": {
+    "post": {
+      "tags": [
+        "Admin Payments"
+      ],
+      "summary": "Manually settle a PENDING purchase",
+      "description": "Finance roles only. Flips a PENDING purchase to PAID (grants credits) or FAILED after out-of-band payment verification. Audit-logged, rate-limited 30/min per admin.",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "requestBody": {
+        "required": false,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "success": {
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Success",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "PENDING",
+                          "PAID",
+                          "FAILED"
+                        ]
+                      },
+                      "package_id": {
+                        "type": "string"
+                      },
+                      "package_name": {
+                        "type": "string"
+                      },
+                      "price_paid_rwf": {
+                        "type": "integer"
+                      },
+                      "rides_granted": {
+                        "type": "integer"
+                      },
+                      "bonus_rides_granted": {
+                        "type": "integer"
+                      },
+                      "vehicle_type_code": {
+                        "type": "string"
+                      },
+                      "payment_provider": {
+                        "type": "string"
+                      },
+                      "payment_ref": {
+                        "type": "string"
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "paid_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "403": {
+          "description": "Insufficient role"
+        },
+        "404": {
+          "description": "Not found"
+        }
+      }
+    }
+  },
     "/health": {
       "get": {
         "summary": "Health Check",
