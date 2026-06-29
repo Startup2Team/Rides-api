@@ -296,6 +296,28 @@ func main() {
 		}
 	}()
 
+	// ── MoMo reconciliation ───────────────────────────────────────────────────
+	// Live mobile-money settlement is driven by polling the provider, not the
+	// inbound webhook (MTN does not sign callbacks the way our guard expects).
+	// Every 30s we sweep PENDING MoMo charges: confirm the paid ones, fail the
+	// rejected/expired ones. No-op when no live charges are outstanding.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := purchaseSvc.ReconcilePending(bgCtx); err != nil {
+					log.Error().Err(err).Msg("momo-reconcile: sweep failed")
+				} else if n > 0 {
+					log.Info().Int("settled", n).Msg("momo-reconcile: settled pending charges")
+				}
+			}
+		}
+	}()
+
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
 
@@ -752,6 +774,14 @@ func main() {
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
 			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
 
+			// Money actions on purchases — restricted to finance roles.
+			// Manual settlement of a PENDING purchase, and admin-recorded
+			// purchases on a driver's behalf (cash / bank / manual MoMo).
+			r.With(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager)).
+				Post("/packages-purchases", pkgH.AdminCreatePurchase)
+			r.With(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager)).
+				Post("/packages-purchases/{id}/confirm", pkgH.AdminConfirmPurchase)
+
 			// Campaigns admin CRUD
 			r.Get("/campaigns", pkgH.AdminListCampaigns)
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
@@ -828,6 +858,10 @@ func (g momoGateway) RequestPayment(ctx context.Context, provider, phone string,
 		return "", "", err
 	}
 	return res.TransactionID, res.Status, nil
+}
+
+func (g momoGateway) QueryStatus(ctx context.Context, provider, externalRef string) (string, error) {
+	return g.p.QueryStatus(ctx, payment.Provider(provider), externalRef)
 }
 
 // momoWebhookAuth gates the public MoMo callback with a shared secret. When the

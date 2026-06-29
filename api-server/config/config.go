@@ -86,6 +86,15 @@ type MoMoConfig struct {
 	Environment     string
 	WebhookSecret   string
 	IPWhitelist     string
+
+	// Live MTN MoMo Collections credentials. When APIUser + APIKey +
+	// SubscriptionKey are all set, the payment service makes real RequestToPay
+	// calls; otherwise it stays inert (returns a mock PENDING) so the rest of
+	// the flow keeps working in dev / before provisioning.
+	APIUser     string // MOMO_API_USER — the provisioned API user UUID
+	BaseURL     string // MOMO_BASE_URL — override; defaults by Environment
+	Currency    string // MOMO_CURRENCY — "EUR" in sandbox, "RWF" in production
+	CallbackURL string // MOMO_CALLBACK_URL — optional X-Callback-Url for RequestToPay
 }
 
 type StorageConfig struct {
@@ -194,6 +203,10 @@ func Load() (*Config, error) {
 	cfg.MoMo.Environment = getEnv("MOMO_ENVIRONMENT", "sandbox")
 	cfg.MoMo.WebhookSecret = getEnv("MOMO_WEBHOOK_SECRET", "")
 	cfg.MoMo.IPWhitelist = getEnv("MOMO_IP_WHITELIST", "")
+	cfg.MoMo.APIUser = getEnv("MOMO_API_USER", "")
+	cfg.MoMo.BaseURL = getEnv("MOMO_BASE_URL", "")
+	cfg.MoMo.Currency = getEnv("MOMO_CURRENCY", "")
+	cfg.MoMo.CallbackURL = getEnv("MOMO_CALLBACK_URL", "")
 
 	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
 	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
