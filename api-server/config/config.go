@@ -55,6 +55,12 @@ type PaymentsConfig struct {
 	// present it in the X-Webhook-Secret header (constant-time compared). Empty
 	// disables the check (dev only) — it MUST be set in production.
 	WebhookSecret string
+
+	// Manual-payment instructions shown to riders who pay off-platform (send
+	// MoMo to the merchant number, then submit proof for admin verification).
+	ManualMomoCode     string // e.g. "*182*8*1*123456#" or a merchant number
+	ManualMomoName     string // merchant/account name to confirm against
+	ManualInstructions string // free-text steps shown in the app
 }
 
 type DatabaseConfig struct {
@@ -266,6 +272,9 @@ func Load() (*Config, error) {
 	// Real-money wallet movement stays OFF until a verified payment gateway exists.
 	cfg.Payments.Enabled = getEnvBool("PAYMENTS_ENABLED", false)
 	cfg.Payments.WebhookSecret = getEnv("MOMO_WEBHOOK_SECRET", "")
+	cfg.Payments.ManualMomoCode = getEnv("MANUAL_PAY_MOMO_CODE", "")
+	cfg.Payments.ManualMomoName = getEnv("MANUAL_PAY_MOMO_NAME", "")
+	cfg.Payments.ManualInstructions = getEnv("MANUAL_PAY_INSTRUCTIONS", "")
 
 	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 300)
 	cfg.Security.MaxRequestBodyBytes = int64(getEnvInt("MAX_REQUEST_BODY_BYTES", 1<<20)) // 1 MiB

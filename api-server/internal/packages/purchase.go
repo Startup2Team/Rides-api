@@ -303,6 +303,36 @@ func (s *PurchaseService) History(ctx context.Context, userID string) ([]*Purcha
 	return s.repo.listPurchasesForUser(ctx, userID)
 }
 
+// ── Rider proof of manual payment ────────────────────────────────────────────
+
+// ProofInput is a rider's evidence that they paid for a PENDING purchase
+// out-of-band (e.g. sent MoMo to the merchant number). At least a reference or
+// a screenshot URL must be present.
+type ProofInput struct {
+	Reference     string `json:"reference"`      // MoMo transaction id from the SMS
+	Phone         string `json:"phone"`          // number they paid from
+	ScreenshotURL string `json:"screenshot_url"` // optional; uploaded via the upload API
+	Note          string `json:"note"`           // optional free text
+}
+
+// SubmitProof attaches proof to the rider's own PENDING purchase so an admin can
+// verify and settle it. Ownership + PENDING status are enforced in SQL.
+func (s *PurchaseService) SubmitProof(ctx context.Context, userID, purchaseID string, in ProofInput) (*Purchase, error) {
+	if in.Reference == "" && in.ScreenshotURL == "" {
+		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "provide a transaction reference or a screenshot")
+	}
+	ok, err := s.repo.savePaymentProof(ctx, userID, purchaseID, in)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// Either not the rider's purchase, or it isn't PENDING anymore.
+		return nil, apperrors.New(http.StatusConflict, "NOT_PENDING", "purchase not found or no longer awaiting payment")
+	}
+	s.log.Info().Str("purchase_id", purchaseID).Msg("packages: rider submitted payment proof")
+	return s.repo.getPurchaseForUser(ctx, userID, purchaseID)
+}
+
 // ── Admin manual confirmation (Option B) ─────────────────────────────────────
 
 // AdminConfirm settles a PENDING purchase out-of-band: an admin who has verified
@@ -451,6 +481,13 @@ type AdminPurchase struct {
 	PaymentRef        string     `json:"payment_ref"`
 	CreatedAt         time.Time  `json:"created_at"`
 	PaidAt            *time.Time `json:"paid_at,omitempty"`
+
+	// Rider-submitted proof of a manual payment (for admin verification).
+	PaymentProofRef   *string    `json:"payment_proof_ref,omitempty"`
+	PaymentProofPhone *string    `json:"payment_proof_phone,omitempty"`
+	PaymentProofURL   *string    `json:"payment_proof_url,omitempty"`
+	PaymentProofNote  *string    `json:"payment_proof_note,omitempty"`
+	PaymentProofAt    *time.Time `json:"payment_proof_at,omitempty"`
 }
 
 // ListAllPurchases lists all package purchases for the admin, newest first.
@@ -531,7 +568,8 @@ func (r *Repository) listAllPurchases(ctx context.Context) ([]*AdminPurchase, er
 		       pp.package_id, pp.package_name, pp.package_version_number,
 		       pp.campaign_id, pp.campaign_code, c.name,
 		       pp.price_paid_rwf, pp.rides_granted, pp.bonus_rides_granted,
-		       pp.status, pp.payment_provider, pp.payment_ref, pp.created_at, pp.paid_at
+		       pp.status, pp.payment_provider, pp.payment_ref, pp.created_at, pp.paid_at,
+		       pp.payment_proof_ref, pp.payment_proof_phone, pp.payment_proof_url, pp.payment_proof_note, pp.payment_proof_at
 		FROM package_purchases pp
 		JOIN driver_profiles dp ON dp.id = pp.driver_id
 		JOIN users u ON u.id = dp.user_id
@@ -554,6 +592,7 @@ func (r *Repository) listAllPurchases(ctx context.Context) ([]*AdminPurchase, er
 			&ap.CampaignID, &ap.CampaignCode, &ap.CampaignName,
 			&ap.PricePaidRWF, &ap.RidesGranted, &ap.BonusRidesGranted,
 			&ap.Status, &ap.PaymentProvider, &ap.PaymentRef, &ap.CreatedAt, &ap.PaidAt,
+			&ap.PaymentProofRef, &ap.PaymentProofPhone, &ap.PaymentProofURL, &ap.PaymentProofNote, &ap.PaymentProofAt,
 		)
 		if err != nil {
 			return nil, err
@@ -561,6 +600,27 @@ func (r *Repository) listAllPurchases(ctx context.Context) ([]*AdminPurchase, er
 		out = append(out, ap)
 	}
 	return out, rows.Err()
+}
+
+// savePaymentProof attaches a rider's proof to their own PENDING purchase.
+// Ownership (user_id → driver_profiles → purchase) and PENDING status are
+// enforced in the WHERE clause; returns false if nothing matched.
+func (r *Repository) savePaymentProof(ctx context.Context, userID, purchaseID string, in ProofInput) (bool, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE package_purchases pp
+		SET payment_proof_ref   = NULLIF($3,''),
+		    payment_proof_phone = NULLIF($4,''),
+		    payment_proof_url   = NULLIF($5,''),
+		    payment_proof_note  = NULLIF($6,''),
+		    payment_proof_at    = now(),
+		    updated_at          = now()
+		FROM driver_profiles dp
+		WHERE pp.id = $1 AND dp.id = pp.driver_id AND dp.user_id = $2 AND pp.status = 'PENDING'`,
+		purchaseID, userID, in.Reference, in.Phone, in.ScreenshotURL, in.Note)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // driverProfileAndActiveVehicle maps an auth user_id to driver_profiles.id.

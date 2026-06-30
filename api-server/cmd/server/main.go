@@ -462,6 +462,10 @@ func main() {
 			r.With(mw.UserRateLimit(rdb, "pkg_purchase", 10, time.Minute)).
 				Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/packages/purchases/{purchaseID}", pkgH.GetPurchaseStatus)
+			// Manual-payment flow: where to pay, and submit proof for admin review.
+			r.Get("/packages/payment-info", pkgH.ManualPaymentInfo)
+			r.With(mw.UserRateLimit(rdb, "pkg_proof", 12, time.Minute)).
+				Post("/packages/purchases/{purchaseID}/proof", pkgH.SubmitPaymentProof)
 			r.Get("/packages/history", pkgH.PurchaseHistory)
 			r.Get("/credits", pkgH.GetCredits)
 			r.Get("/entitlements", pkgH.GetEntitlements)

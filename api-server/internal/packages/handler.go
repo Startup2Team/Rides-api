@@ -145,6 +145,43 @@ func (h *Handler) GetPurchaseStatus(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, p)
 }
 
+// GET /api/v1/driver/packages/payment-info — where/how to pay manually.
+// Returns the merchant MoMo code + instructions the rider follows before
+// submitting proof. Lets the app render the manual-payment screen without
+// hard-coding the merchant details.
+func (h *Handler) ManualPaymentInfo(w http.ResponseWriter, r *http.Request) {
+	cfg := h.cfg
+	respond.OK(w, map[string]interface{}{
+		"momo_code":    cfg.Payments.ManualMomoCode,
+		"momo_name":    cfg.Payments.ManualMomoName,
+		"instructions": cfg.Payments.ManualInstructions,
+		"enabled":      cfg.Payments.ManualMomoCode != "",
+	})
+}
+
+// POST /api/v1/driver/packages/purchases/{purchaseID}/proof
+// Rider submits proof of an off-platform MoMo payment for their PENDING
+// purchase. Body: { reference, phone, screenshot_url, note }. An admin then
+// verifies and settles it via the admin confirm endpoint.
+func (h *Handler) SubmitPaymentProof(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		respond.Error(w, apperrors.ErrUnauthorized)
+		return
+	}
+	var in ProofInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	p, err := h.purchase.SubmitProof(r.Context(), claims.UserID, chi.URLParam(r, "purchaseID"), in)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, p)
+}
+
 // GET /api/v1/driver/packages/history — the driver's purchase history.
 func (h *Handler) PurchaseHistory(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)

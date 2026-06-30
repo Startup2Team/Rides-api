@@ -16,6 +16,109 @@
     }
   ],
   "paths": {
+  "/api/v1/driver/packages/payment-info": {
+    "get": {
+      "tags": [
+        "Packages & Payments"
+      ],
+      "summary": "Manual-payment instructions",
+      "description": "Merchant MoMo code + steps the rider follows to pay off-platform before submitting proof.",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Success",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "momo_code": {
+                        "type": "string"
+                      },
+                      "momo_name": {
+                        "type": "string"
+                      },
+                      "instructions": {
+                        "type": "string"
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/api/v1/driver/packages/purchases/{purchaseID}/proof": {
+    "post": {
+      "tags": [
+        "Packages & Payments"
+      ],
+      "summary": "Submit proof of manual payment",
+      "description": "Rider attaches proof (MoMo transaction reference / phone / optional screenshot) to their PENDING purchase. An admin then verifies and settles it. At least a reference or screenshot_url is required.",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "name": "purchaseID",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "reference": {
+                  "type": "string",
+                  "description": "MoMo transaction id from the SMS"
+                },
+                "phone": {
+                  "type": "string"
+                },
+                "screenshot_url": {
+                  "type": "string",
+                  "description": "optional; upload via the upload API first"
+                },
+                "note": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Proof recorded (purchase still PENDING until an admin confirms)"
+        },
+        "409": {
+          "description": "Purchase not found or no longer pending"
+        }
+      }
+    }
+  },
   "/api/v1/driver/packages": {
     "get": {
       "tags": [
