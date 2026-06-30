@@ -18,18 +18,21 @@ type Config struct {
 	Redis    RedisConfig
 	JWT      JWTConfig
 	AT       ATConfig
-	Firebase FirebaseConfig
-	GMaps    GoogleMapsConfig
-	MoMo     MoMoConfig
-	Storage  StorageConfig
-	Matching MatchingConfig
-	Ride     RideConfig
-	GPS      GPSConfig
-	Driver   DriverConfig
-	Customer CustomerConfig
-	Penalty  PenaltyConfig
-	Payments PaymentsConfig
-	Security SecurityConfig
+	Pindo    PindoConfig
+	// SMSProvider selects the SMS gateway: "africastalking" (default) or "pindo".
+	SMSProvider string
+	Firebase    FirebaseConfig
+	GMaps       GoogleMapsConfig
+	MoMo        MoMoConfig
+	Storage     StorageConfig
+	Matching    MatchingConfig
+	Ride        RideConfig
+	GPS         GPSConfig
+	Driver      DriverConfig
+	Customer    CustomerConfig
+	Penalty     PenaltyConfig
+	Payments    PaymentsConfig
+	Security    SecurityConfig
 }
 
 // SecurityConfig holds API-protection tunables.
@@ -91,6 +94,13 @@ type ATConfig struct {
 	// Set AT_WHATSAPP_ENABLED=true + AT_WHATSAPP_SENDER to a registered WA number.
 	WhatsAppEnabled bool
 	WhatsAppSender  string
+}
+
+// PindoConfig holds Pindo (pindo.io) SMS credentials — the cheaper Rwanda-local
+// alternative to Africa's Talking. Used when SMSProvider == "pindo".
+type PindoConfig struct {
+	APIToken string // Bearer token from the Pindo dashboard
+	Sender   string // approved Sender ID (e.g. "Rides")
 }
 
 type FirebaseConfig struct {
@@ -214,6 +224,10 @@ func Load() (*Config, error) {
 	cfg.AT.MaskingNumber = getEnv("AT_MASKING_NUMBER", "")
 	cfg.AT.WhatsAppEnabled = getEnvBool("AT_WHATSAPP_ENABLED", false)
 	cfg.AT.WhatsAppSender = getEnv("AT_WHATSAPP_SENDER", "")
+
+	cfg.SMSProvider = getEnv("SMS_PROVIDER", "africastalking")
+	cfg.Pindo.APIToken = getEnv("PINDO_API_TOKEN", "")
+	cfg.Pindo.Sender = getEnv("PINDO_SENDER", "")
 
 	cfg.Firebase.ServiceAccountPath = getEnv("FIREBASE_SERVICE_ACCOUNT_PATH", "./firebase-service-account.json")
 
