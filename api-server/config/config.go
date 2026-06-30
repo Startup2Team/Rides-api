@@ -130,18 +130,6 @@ type StorageConfig struct {
 	Endpoint string
 }
 
-type StorageConfig struct {
-	Provider string
-	Bucket   string
-	Region   string
-	KeyID    string
-	Secret   string
-	CDNURL   string
-	// Endpoint overrides the S3 API host for S3-compatible stores (MinIO in dev,
-	// or any self-hosted gateway). Empty = real AWS S3 (default endpoints).
-	Endpoint string
-}
-
 type MatchingConfig struct {
 	PrimaryRadiusM  int
 	ExpandedRadiusM int
@@ -240,14 +228,6 @@ func Load() (*Config, error) {
 	cfg.MoMo.BaseURL = getEnv("MOMO_BASE_URL", "")
 	cfg.MoMo.Currency = getEnv("MOMO_CURRENCY", "")
 	cfg.MoMo.CallbackURL = getEnv("MOMO_CALLBACK_URL", "")
-
-	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
-	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
-	cfg.Storage.Region = getEnv("STORAGE_REGION", "auto")
-	cfg.Storage.KeyID = getEnv("STORAGE_KEY_ID", "")
-	cfg.Storage.Secret = getEnv("STORAGE_SECRET", "")
-	cfg.Storage.CDNURL = getEnv("STORAGE_CDN_URL", "")
-	cfg.Storage.Endpoint = getEnv("STORAGE_ENDPOINT", "")
 
 	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
 	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
