@@ -2,15 +2,21 @@ package packages
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
 
+	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -28,13 +34,14 @@ type BonusAfterPurchase interface {
 type Handler struct {
 	svc      *Service
 	audit    *audit.Logger
+	cfg      *config.Config
 	bonus    BonusAfterPurchase // optional; nil = bonus disabled
 	ledger   *LedgerService     // v4 entitlement ledger
 	purchase *PurchaseService   // v4 purchase + MoMo lifecycle
 }
 
-func NewHandler(svc *Service, auditLog *audit.Logger) *Handler {
-	return &Handler{svc: svc, audit: auditLog}
+func NewHandler(svc *Service, auditLog *audit.Logger, cfg *config.Config) *Handler {
+	return &Handler{svc: svc, audit: auditLog, cfg: cfg}
 }
 
 // SetBonus wires the bonus service so purchases automatically trigger bonus grants.
@@ -138,6 +145,43 @@ func (h *Handler) GetPurchaseStatus(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, p)
 }
 
+// GET /api/v1/driver/packages/payment-info — where/how to pay manually.
+// Returns the merchant MoMo code + instructions the rider follows before
+// submitting proof. Lets the app render the manual-payment screen without
+// hard-coding the merchant details.
+func (h *Handler) ManualPaymentInfo(w http.ResponseWriter, r *http.Request) {
+	cfg := h.cfg
+	respond.OK(w, map[string]interface{}{
+		"momo_code":    cfg.Payments.ManualMomoCode,
+		"momo_name":    cfg.Payments.ManualMomoName,
+		"instructions": cfg.Payments.ManualInstructions,
+		"enabled":      cfg.Payments.ManualMomoCode != "",
+	})
+}
+
+// POST /api/v1/driver/packages/purchases/{purchaseID}/proof
+// Rider submits proof of an off-platform MoMo payment for their PENDING
+// purchase. Body: { reference, phone, screenshot_url, note }. An admin then
+// verifies and settles it via the admin confirm endpoint.
+func (h *Handler) SubmitPaymentProof(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		respond.Error(w, apperrors.ErrUnauthorized)
+		return
+	}
+	var in ProofInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	p, err := h.purchase.SubmitProof(r.Context(), claims.UserID, chi.URLParam(r, "purchaseID"), in)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, p)
+}
+
 // GET /api/v1/driver/packages/history — the driver's purchase history.
 func (h *Handler) PurchaseHistory(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
@@ -158,6 +202,43 @@ func (h *Handler) PurchaseHistory(w http.ResponseWriter, r *http.Request) {
 // SUCCESS|SUCCESSFUL|PAID for success, anything else = failure.
 func (h *Handler) WebhookMoMo(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // cap at 1 MB
+
+	// 1. IP Whitelisting (if configured)
+	clientIP := middleware.TrustedIP(r)
+	if h.cfg != nil && h.cfg.MoMo.IPWhitelist != "" {
+		allowedIPs := strings.Split(h.cfg.MoMo.IPWhitelist, ",")
+		allowed := false
+		for _, ip := range allowedIPs {
+			if strings.TrimSpace(ip) == clientIP {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			respond.ErrorMsg(w, http.StatusForbidden, "IP_NOT_ALLOWED", "Unauthorized IP address")
+			return
+		}
+	}
+
+	// 2. Cryptographic signature verification (HMAC-SHA256)
+	if h.cfg != nil && h.cfg.MoMo.WebhookSecret != "" {
+		signature := r.Header.Get("X-Signature")
+		if signature == "" {
+			respond.ErrorMsg(w, http.StatusUnauthorized, "MISSING_SIGNATURE", "X-Signature header required")
+			return
+		}
+
+		mac := hmac.New(sha256.New, []byte(h.cfg.MoMo.WebhookSecret))
+		mac.Write(raw)
+		expectedMAC := mac.Sum(nil)
+		expectedSig := hex.EncodeToString(expectedMAC)
+
+		if subtle.ConstantTimeCompare([]byte(signature), []byte(expectedSig)) != 1 {
+			respond.ErrorMsg(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "Invalid cryptographic signature")
+			return
+		}
+	}
+
 	var body struct {
 		PaymentRef    string `json:"payment_ref"`
 		ProviderTxnID string `json:"provider_txn_id"`
@@ -427,4 +508,72 @@ func (h *Handler) AdminDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 	h.audit.Record(r.Context(), adminID, role, "campaign.delete", "campaigns", id, fmt.Sprintf("Soft-deleted (archived) campaign %s", campaignName), map[string]any{"campaign_id": id})
 
 	respond.OK(w, map[string]string{"status": "success"})
+}
+
+// GET /api/v1/admin/packages/purchases
+func (h *Handler) AdminListPurchases(w http.ResponseWriter, r *http.Request) {
+	purchases, err := h.purchase.ListAllPurchases(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, purchases)
+}
+
+// POST /api/v1/admin/packages/purchases — admin records a purchase on a driver's
+// behalf (cash / bank / their own MoMo). Body: { driver_id, package_id, mark_paid }.
+// With mark_paid=true (default) credits are granted immediately.
+func (h *Handler) AdminCreatePurchase(w http.ResponseWriter, r *http.Request) {
+	adminID, role := adminCtx(r)
+	var body struct {
+		DriverID  string `json:"driver_id"`
+		PackageID string `json:"package_id"`
+		MarkPaid  *bool  `json:"mark_paid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	in := AdminCreateInput{DriverID: body.DriverID, PackageID: body.PackageID, MarkPaid: true}
+	if body.MarkPaid != nil {
+		in.MarkPaid = *body.MarkPaid
+	}
+	if err := validate.Struct(in); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+	p, err := h.purchase.AdminCreateOnBehalf(r.Context(), adminID, in)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	h.audit.Record(r.Context(), adminID, role, "package_purchase.admin_create", "package_purchases", p.ID,
+		fmt.Sprintf("Admin recorded purchase for driver %s (mark_paid=%t)", in.DriverID, in.MarkPaid),
+		map[string]any{"driver_id": in.DriverID, "package_id": in.PackageID, "mark_paid": in.MarkPaid, "status": p.Status})
+	respond.Created(w, p)
+}
+
+// POST /api/v1/admin/packages/purchases/{id}/confirm — admin settles a PENDING
+// purchase after verifying payment out-of-band. Body: { success } (default true).
+func (h *Handler) AdminConfirmPurchase(w http.ResponseWriter, r *http.Request) {
+	adminID, role := adminCtx(r)
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Success *bool `json:"success"`
+	}
+	// Body is optional — default to success=true.
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	success := true
+	if body.Success != nil {
+		success = *body.Success
+	}
+	p, err := h.purchase.AdminConfirm(r.Context(), id, adminID, success)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	h.audit.Record(r.Context(), adminID, role, "package_purchase.admin_confirm", "package_purchases", id,
+		fmt.Sprintf("Admin manually settled purchase %s (success=%t) → %s", id, success, p.Status),
+		map[string]any{"purchase_id": id, "success": success, "status": p.Status})
+	respond.OK(w, p)
 }

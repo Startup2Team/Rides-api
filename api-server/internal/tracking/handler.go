@@ -9,6 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
+	"golang.org/x/time/rate"
 
 	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/driver"
@@ -33,6 +34,10 @@ const (
 	pongWait   = 60 * time.Second
 	pingPeriod = (pongWait * 9) / 10
 	maxMsgSize = 512
+
+	// Per-connection inbound message throttle (see read pump).
+	wsMsgRatePerSec = 5
+	wsMsgBurst      = 10
 )
 
 // Handler manages WebSocket upgrades for drivers and customers.
@@ -98,6 +103,7 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 	// stay assigned).
 	h.restoreDriverPresence(r.Context(), driverProfile.ID, driverProfile.TransportType)
 	defer func() {
+		client.Done()
 		h.hub.UnregisterDriver(driverProfile.ID)
 		h.clearDriverPresence(context.Background(), driverProfile.ID, driverProfile.TransportType)
 	}()
@@ -160,6 +166,13 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
+	// Per-connection throttle on processed messages. Drivers send a location
+	// every 5–12 s, so 5/s sustained with a burst of 10 is generous headroom;
+	// anything beyond that (a misbehaving or malicious client flooding frames)
+	// is dropped before the expensive Redis geo-index writes, without tearing
+	// down the socket.
+	msgLimiter := rate.NewLimiter(rate.Limit(wsMsgRatePerSec), wsMsgBurst)
+
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
@@ -167,6 +180,10 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 				h.log.Error().Err(err).Str("user_id", claims.UserID).Msg("ws: driver unexpected close")
 			}
 			break
+		}
+
+		if !msgLimiter.Allow() {
+			continue // over the per-connection rate — drop this frame
 		}
 
 		var incoming struct {

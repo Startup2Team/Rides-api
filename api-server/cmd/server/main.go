@@ -80,6 +80,12 @@ func main() {
 		if cfg.Driver.DevAutoApprove {
 			log.Fatal().Msg("FATAL: DEV_AUTO_APPROVE_DRIVERS=true in production — refusing to start")
 		}
+		if cfg.JWT.AccessSecret == "local_dev_access_secret_change_before_any_shared_environment_0123456789" {
+			log.Fatal().Msg("FATAL: Default development JWT_ACCESS_SECRET detected in production — refusing to start")
+		}
+		if cfg.Payments.Enabled && cfg.MoMo.APIKey == "" {
+			log.Fatal().Msg("FATAL: Payments are enabled in production but MOMO_API_KEY is not set — refusing to start")
+		}
 	} else {
 		if cfg.Ride.DevSkipGeofence {
 			log.Warn().Msg("⚠️  DEV_SKIP_GEOFENCE=true — geofence checks disabled (dev only)")
@@ -93,7 +99,7 @@ func main() {
 	defer cancel()
 
 	// ── Database ──────────────────────────────────────────────────────────────
-	db, err := pgpkg.New(ctx, cfg.Database.URL)
+	db, err := pgpkg.New(ctx, cfg.Database.URL, cfg.Database.MaxConns, cfg.Database.MinConns)
 	if err != nil {
 		log.Fatal().Err(err).Msg("postgres: connect")
 	}
@@ -196,11 +202,11 @@ func main() {
 	// Go-online credit gate reads the same v4 ledger that ride deduction debits,
 	// so a driver with a real v4 package isn't wrongly blocked with NO_CREDITS.
 	driverSvc.SetCreditChecker(ledgerSvc)
-	// Dev (non-prod) with payments simulated: auto-confirm purchases inline since
-	// no real MoMo callback arrives. In production the webhook drives confirmation.
-	devAutoConfirm := cfg.Env != "production" && cfg.Payments.Enabled
+	// Dev: auto-confirm purchases without a real MoMo callback. In development
+	// this is always on; in other non-prod envs it follows PAYMENTS_ENABLED.
+	devAutoConfirm := cfg.Env == "development" || (cfg.Env != "production" && cfg.Payments.Enabled)
 	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
-	pkgH := packages.NewHandler(pkgSvc, auditLog)
+	pkgH := packages.NewHandler(pkgSvc, auditLog, cfg)
 	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
 	pkgH.SetLedger(ledgerSvc)     // v4 entitlements
 	pkgH.SetPurchase(purchaseSvc) // v4 purchase + MoMo
@@ -290,12 +296,37 @@ func main() {
 		}
 	}()
 
+	// ── MoMo reconciliation ───────────────────────────────────────────────────
+	// Live mobile-money settlement is driven by polling the provider, not the
+	// inbound webhook (MTN does not sign callbacks the way our guard expects).
+	// Every 30s we sweep PENDING MoMo charges: confirm the paid ones, fail the
+	// rejected/expired ones. No-op when no live charges are outstanding.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := purchaseSvc.ReconcilePending(bgCtx); err != nil {
+					log.Error().Err(err).Msg("momo-reconcile: sweep failed")
+				} else if n > 0 {
+					log.Info().Int("settled", n).Msg("momo-reconcile: settled pending charges")
+				}
+			}
+		}
+	}()
+
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
 
 	// ── CORS ──────────────────────────────────────────────────────────────────
-	// Allow the admin Next.js dev server and any configured production origin.
-	allowedOrigins := []string{"http://localhost:3000", "http://localhost:3001"}
+	// Allow the admin Next.js dev server in non-production, and any configured production origin.
+	allowedOrigins := []string{}
+	if cfg.Env != "production" {
+		allowedOrigins = append(allowedOrigins, "http://localhost:3000", "http://localhost:3001")
+	}
 	if origin := cfg.AdminOrigin; origin != "" {
 		allowedOrigins = append(allowedOrigins, origin)
 	}
@@ -309,11 +340,18 @@ func main() {
 	}))
 
 	r.Use(chimw.RequestID)
-	// NOTE: chimw.RealIP is deliberately NOT used — it rewrites RemoteAddr from the
-	// spoofable X-Forwarded-For/X-Real-IP on EVERY request, which would let clients
-	// fake their IP for rate-limiting and logging. We use mw.trustedIP() instead,
-	// which only trusts those headers from a private/loopback peer (our edge proxy).
 	r.Use(chimw.Recoverer)
+	r.Use(mw.SecurityHeaders(cfg.Env))
+	// Global request-body cap (memory-exhaustion guard), except large-upload
+	// routes which set their own higher per-handler limit.
+	r.Use(mw.SkipPaths(mw.BodyLimit(cfg.Security.MaxRequestBodyBytes), apiV1Prefix+"/uploads/objects/"))
+	// Global per-IP rate limit (application-layer DDoS/abuse backstop). Skip health
+	// checks and the long-lived WebSocket upgrades — reconnect storms behind
+	// carrier-grade NAT would otherwise drain a bucket shared by many real users.
+	r.Use(mw.SkipPaths(
+		mw.IPRateLimit(rdb, "global", cfg.Security.GlobalRateLimitPerMin, time.Minute),
+		"/health", apiV1Prefix+"/ws/",
+	))
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
 
@@ -321,11 +359,14 @@ func main() {
 		respond.OK(w, map[string]string{"status": "ok"})
 	})
 
-	r.Get("/swagger", func(w http.ResponseWriter, r *http.Request) {
+	// API docs — gated: 404 when disabled (default in prod), optional Basic auth
+	// so the API surface isn't world-readable. Set SWAGGER_ENABLED / SWAGGER_BASIC_AUTH.
+	swaggerGate := mw.SwaggerGate(cfg.Security.SwaggerEnabled, cfg.Security.SwaggerBasicAuth)
+	r.With(swaggerGate).Get("/swagger", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(swaggerHTML))
 	})
-	r.Get("/swagger/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+	r.With(swaggerGate).Get("/swagger/openapi.json", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "config/openapi.json")
 	})
 	r.Get(apiV1Prefix+"/pricing", fareH.ListPublicPricing)
@@ -350,8 +391,10 @@ func main() {
 	if cfg.Env == "production" && cfg.Payments.WebhookSecret == "" {
 		log.Warn().Msg("MOMO_WEBHOOK_SECRET is unset in production — the MoMo callback is UNAUTHENTICATED; set it before enabling payments")
 	}
-	r.With(momoWebhookAuth(cfg.Payments.WebhookSecret)).
-		Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
+	r.With(
+		mw.IPRateLimit(rdb, "momo_webhook", 120, time.Minute),
+		momoWebhookAuth(cfg.Payments.WebhookSecret),
+	).Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
 
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
@@ -414,8 +457,15 @@ func main() {
 
 			r.Get("/packages", pkgH.ListPackages)
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
-			r.Post("/packages/purchase", pkgH.PurchasePackage)
+			// Cap purchase attempts per driver so a loop can't spam MoMo prompts
+			// (each one pushes a PIN request to the payer's phone).
+			r.With(mw.UserRateLimit(rdb, "pkg_purchase", 10, time.Minute)).
+				Post("/packages/purchase", pkgH.PurchasePackage)
 			r.Get("/packages/purchases/{purchaseID}", pkgH.GetPurchaseStatus)
+			// Manual-payment flow: where to pay, and submit proof for admin review.
+			r.Get("/packages/payment-info", pkgH.ManualPaymentInfo)
+			r.With(mw.UserRateLimit(rdb, "pkg_proof", 12, time.Minute)).
+				Post("/packages/purchases/{purchaseID}/proof", pkgH.SubmitPaymentProof)
 			r.Get("/packages/history", pkgH.PurchaseHistory)
 			r.Get("/credits", pkgH.GetCredits)
 			r.Get("/entitlements", pkgH.GetEntitlements)
@@ -483,13 +533,15 @@ func main() {
 		// panel can render document images via a plain URL. No-op on S3/R2.
 		if uploadH != nil {
 			r.Get("/objects/*", uploadH.GetObject)
+			// Proxy-mode PUT mirrors a presigned S3 URL — the random object key is
+			// the credential, so mobile can stream bytes without a bearer token.
+			r.Put("/objects/*", uploadH.PutObject)
 		}
-		// Authenticated: request an upload target, and (proxy mode) stream bytes.
+		// Authenticated: request an upload target.
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authenticate(cfg, rdb))
 			if uploadH != nil {
 				r.Post("/presigned-url", uploadH.PresignedURL)
-				r.Put("/objects/*", uploadH.PutObject)
 			}
 		})
 	})
@@ -510,10 +562,11 @@ func main() {
 	r.With(mw.Authenticate(cfg, rdb)).Get(apiV1Prefix+"/rides/active", locH.GetActiveRide)
 
 	// ── Admin auth (public — no admin JWT required) ───────────────────────────
-	r.Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
-	r.Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
-	r.Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
-	r.Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
+	// Rate limit administrative endpoints to prevent brute-force credential stuffing.
+	r.With(mw.IPRateLimit(rdb, "admin_login", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
+	r.With(mw.IPRateLimit(rdb, "admin_2fa", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
+	r.With(mw.IPRateLimit(rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+	r.With(mw.IPRateLimit(rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
 
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
@@ -735,10 +788,24 @@ func main() {
 
 			// Packages admin CRUD
 			r.Get("/packages", pkgH.AdminListPackages)
+			r.Get("/packages-purchases", pkgH.AdminListPurchases)
 			r.Post("/packages", pkgH.AdminCreatePackage)
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
 			r.Delete("/packages/{id}", pkgH.AdminDeletePackage)
+
+			// Money actions on purchases — restricted to finance roles, rate-limited
+			// per admin (a compromised admin token can't mass-grant credits), and
+			// audit-logged in the handlers. Manual settlement of a PENDING purchase,
+			// and admin-recorded purchases on a driver's behalf (cash / bank / MoMo).
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/packages-purchases", pkgH.AdminCreatePurchase)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/packages-purchases/{id}/confirm", pkgH.AdminConfirmPurchase)
 
 			// Campaigns admin CRUD
 			r.Get("/campaigns", pkgH.AdminListCampaigns)
@@ -816,6 +883,10 @@ func (g momoGateway) RequestPayment(ctx context.Context, provider, phone string,
 		return "", "", err
 	}
 	return res.TransactionID, res.Status, nil
+}
+
+func (g momoGateway) QueryStatus(ctx context.Context, provider, externalRef string) (string, error) {
+	return g.p.QueryStatus(ctx, payment.Provider(provider), externalRef)
 }
 
 // momoWebhookAuth gates the public MoMo callback with a shared secret. When the

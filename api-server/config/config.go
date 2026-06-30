@@ -29,6 +29,21 @@ type Config struct {
 	Customer CustomerConfig
 	Penalty  PenaltyConfig
 	Payments PaymentsConfig
+	Security SecurityConfig
+}
+
+// SecurityConfig holds API-protection tunables.
+type SecurityConfig struct {
+	// GlobalRateLimitPerMin caps requests per client IP per minute across all
+	// routes (DDoS / abuse backstop). Higher than the old hard-coded 100 so that
+	// many users behind one carrier-grade-NAT IP don't share a tiny bucket.
+	GlobalRateLimitPerMin int
+	// MaxRequestBodyBytes caps non-upload request bodies (memory-exhaustion guard).
+	MaxRequestBodyBytes int64
+	// SwaggerEnabled exposes /swagger. Off by default in production.
+	SwaggerEnabled bool
+	// SwaggerBasicAuth, when "user:pass", protects /swagger with HTTP Basic auth.
+	SwaggerBasicAuth string
 }
 
 // PaymentsConfig gates real-money wallet movement. Until a payment gateway
@@ -40,10 +55,18 @@ type PaymentsConfig struct {
 	// present it in the X-Webhook-Secret header (constant-time compared). Empty
 	// disables the check (dev only) — it MUST be set in production.
 	WebhookSecret string
+
+	// Manual-payment instructions shown to riders who pay off-platform (send
+	// MoMo to the merchant number, then submit proof for admin verification).
+	ManualMomoCode     string // e.g. "*182*8*1*123456#" or a merchant number
+	ManualMomoName     string // merchant/account name to confirm against
+	ManualInstructions string // free-text steps shown in the app
 }
 
 type DatabaseConfig struct {
-	URL string
+	URL      string
+	MaxConns int
+	MinConns int
 }
 
 type RedisConfig struct {
@@ -82,6 +105,29 @@ type MoMoConfig struct {
 	APIKey          string
 	SubscriptionKey string
 	Environment     string
+	WebhookSecret   string
+	IPWhitelist     string
+
+	// Live MTN MoMo Collections credentials. When APIUser + APIKey +
+	// SubscriptionKey are all set, the payment service makes real RequestToPay
+	// calls; otherwise it stays inert (returns a mock PENDING) so the rest of
+	// the flow keeps working in dev / before provisioning.
+	APIUser     string // MOMO_API_USER — the provisioned API user UUID
+	BaseURL     string // MOMO_BASE_URL — override; defaults by Environment
+	Currency    string // MOMO_CURRENCY — "EUR" in sandbox, "RWF" in production
+	CallbackURL string // MOMO_CALLBACK_URL — optional X-Callback-Url for RequestToPay
+}
+
+type StorageConfig struct {
+	Provider string
+	Bucket   string
+	Region   string
+	KeyID    string
+	Secret   string
+	CDNURL   string
+	// Endpoint overrides the S3 API host for S3-compatible stores (MinIO in dev,
+	// or any self-hosted gateway). Empty = real AWS S3 (default endpoints).
+	Endpoint string
 }
 
 type StorageConfig struct {
@@ -163,6 +209,8 @@ func Load() (*Config, error) {
 	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
+	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 25)
+	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 5)
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")
 
 	cfg.JWT.AccessSecret = requireEnv("JWT_ACCESS_SECRET")
@@ -186,6 +234,20 @@ func Load() (*Config, error) {
 	cfg.MoMo.APIKey = getEnv("MOMO_API_KEY", "")
 	cfg.MoMo.SubscriptionKey = getEnv("MOMO_SUBSCRIPTION_KEY", "")
 	cfg.MoMo.Environment = getEnv("MOMO_ENVIRONMENT", "sandbox")
+	cfg.MoMo.WebhookSecret = getEnv("MOMO_WEBHOOK_SECRET", "")
+	cfg.MoMo.IPWhitelist = getEnv("MOMO_IP_WHITELIST", "")
+	cfg.MoMo.APIUser = getEnv("MOMO_API_USER", "")
+	cfg.MoMo.BaseURL = getEnv("MOMO_BASE_URL", "")
+	cfg.MoMo.Currency = getEnv("MOMO_CURRENCY", "")
+	cfg.MoMo.CallbackURL = getEnv("MOMO_CALLBACK_URL", "")
+
+	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
+	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
+	cfg.Storage.Region = getEnv("STORAGE_REGION", "auto")
+	cfg.Storage.KeyID = getEnv("STORAGE_KEY_ID", "")
+	cfg.Storage.Secret = getEnv("STORAGE_SECRET", "")
+	cfg.Storage.CDNURL = getEnv("STORAGE_CDN_URL", "")
+	cfg.Storage.Endpoint = getEnv("STORAGE_ENDPOINT", "")
 
 	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
 	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
@@ -230,6 +292,14 @@ func Load() (*Config, error) {
 	// Real-money wallet movement stays OFF until a verified payment gateway exists.
 	cfg.Payments.Enabled = getEnvBool("PAYMENTS_ENABLED", false)
 	cfg.Payments.WebhookSecret = getEnv("MOMO_WEBHOOK_SECRET", "")
+	cfg.Payments.ManualMomoCode = getEnv("MANUAL_PAY_MOMO_CODE", "")
+	cfg.Payments.ManualMomoName = getEnv("MANUAL_PAY_MOMO_NAME", "")
+	cfg.Payments.ManualInstructions = getEnv("MANUAL_PAY_INSTRUCTIONS", "")
+
+	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 300)
+	cfg.Security.MaxRequestBodyBytes = int64(getEnvInt("MAX_REQUEST_BODY_BYTES", 1<<20)) // 1 MiB
+	cfg.Security.SwaggerEnabled = getEnvBool("SWAGGER_ENABLED", cfg.Env != "production")
+	cfg.Security.SwaggerBasicAuth = getEnv("SWAGGER_BASIC_AUTH", "")
 
 	return cfg, nil
 }

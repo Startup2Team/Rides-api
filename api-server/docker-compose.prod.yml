@@ -23,26 +23,36 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Bound to loopback ONLY — never the public interface. Reach it for a GUI
+    # (TablePlus/DBeaver) via an SSH tunnel: ssh -L 5432:127.0.0.1:5432 root@host
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # No port exposed — only reachable by other containers.
 
   # ── Redis ──────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: always
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    # noeviction (not LRU): this Redis holds operational state (sessions, geo
+    # index, rate limits), so it must fail visibly at the cap rather than
+    # silently dropping keys. 2 GB ceiling keeps it from starving the box.
+    command: >-
+      redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+      --maxmemory 2gb --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
+    # Loopback ONLY — reach it via SSH tunnel for RedisInsight/TablePlus.
+    ports:
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # No port exposed — only reachable by other containers.
 
   # ── API Server (Go) ────────────────────────────────────────────────────────
   api:

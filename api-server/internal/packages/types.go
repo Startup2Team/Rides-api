@@ -48,10 +48,12 @@ type CatalogPackage struct {
 	IsUnlimited     bool `json:"is_unlimited"`
 	LaunchOffer     bool `json:"launch_offer"` // promotional / auto-granted
 
-	VersionID     string  `json:"version_id"`
-	VersionNumber int     `json:"version_number"`
-	CampaignID    *string `json:"campaign_id,omitempty"`
-	CampaignCode  *string `json:"campaign_code,omitempty"`
+	VersionID           string  `json:"version_id"`
+	VersionNumber       int     `json:"version_number"`
+	CampaignID          *string `json:"campaign_id,omitempty"`
+	CampaignCode        *string `json:"campaign_code,omitempty"`
+	CampaignName        *string `json:"campaign_name,omitempty"`
+	CampaignDescription *string `json:"campaign_description,omitempty"`
 
 	// Legacy fields kept so the pre-v4 mobile mapping still works.
 	PriceRWF      int  `json:"price_rwf"`
@@ -61,15 +63,17 @@ type CatalogPackage struct {
 
 // Campaign is the mobile-facing view of an active campaign.
 type Campaign struct {
-	ID                 string     `json:"id"`
-	Code               string     `json:"code"`
-	Name               string     `json:"name"`
-	Type               string     `json:"type"`
-	StartsAt           *time.Time `json:"starts_at,omitempty"`
-	EndsAt             *time.Time `json:"ends_at,omitempty"`
-	OverridePriceRWF   *int       `json:"override_price_rwf,omitempty"`
-	OverrideRides      *int       `json:"override_rides,omitempty"`
-	OverrideBonusRides *int       `json:"override_bonus_rides,omitempty"`
+	ID                    string     `json:"id"`
+	Code                  string     `json:"code"`
+	Name                  string     `json:"name"`
+	Description           string     `json:"description,omitempty"`
+	Type                  string     `json:"type"`
+	TargetVehicleTypeCode *string    `json:"target_vehicle_type_code,omitempty"`
+	StartsAt              *time.Time `json:"starts_at,omitempty"`
+	EndsAt                *time.Time `json:"ends_at,omitempty"`
+	OverridePriceRWF      *int       `json:"override_price_rwf,omitempty"`
+	OverrideRides         *int       `json:"override_rides,omitempty"`
+	OverrideBonusRides    *int       `json:"override_bonus_rides,omitempty"`
 }
 
 // Entitlement is a driver's current credit balance for one vehicle type,
