@@ -1,39 +1,35 @@
-name: CD
+name: CD (Vultr JNB)
 
-# Triggers after code lands on dev (→ staging) or main (→ production).
-# Branch protection guarantees CI already passed before this runs.
+# Continuous deployment to the production box in Johannesburg.
+# The GitHub runner checks out this repo, ships the code to the server over SSH
+# (git archive → tar), and rebuilds the Docker stack. No deploy keys needed —
+# the runner already has read access to its own repo.
 #
-# Required GitHub Secrets:
-#   RAILWAY_TOKEN               — from railway.app → Account Settings → Tokens
-#   RAILWAY_SERVICE_ID_STAGING  — Railway service ID for staging (dev branch)
-#   RAILWAY_SERVICE_ID_PROD     — Railway service ID for production (main branch)
+# Required GitHub Secret:
+#   DEPLOY_SSH_KEY — private SSH key trusted by root@139.84.251.242
 
 on:
   push:
-    branches: [dev, main]
-    paths:
-      - "api-server/**"
-      - ".github/workflows/cd.yml"
+    branches: [main]
+  workflow_dispatch:   # lets you trigger a deploy manually from the Actions tab
 
 jobs:
   deploy:
-    name: Deploy (${{ github.ref_name }})
+    name: Deploy to Vultr (Johannesburg)
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -H 139.84.251.242 >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy to staging (dev branch)
-        if: github.ref_name == 'dev'
-        run: railway up --service ${{ secrets.RAILWAY_SERVICE_ID_STAGING }} --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
-      - name: Deploy to production (main branch)
-        if: github.ref_name == 'main'
-        run: railway up --service ${{ secrets.RAILWAY_SERVICE_ID_PROD }} --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Ship code to the box and rebuild
+        run: |
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          # Overlay tracked files (keeps the box's .env + nginx/certs untouched).
+          git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
+          $SSH 'cd /opt/rides/Rides-api/api-server && docker compose -f docker-compose.prod.yml up -d --build api && docker image prune -f'
