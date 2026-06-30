@@ -145,6 +145,43 @@ func (h *Handler) GetPurchaseStatus(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, p)
 }
 
+// GET /api/v1/driver/packages/payment-info — where/how to pay manually.
+// Returns the merchant MoMo code + instructions the rider follows before
+// submitting proof. Lets the app render the manual-payment screen without
+// hard-coding the merchant details.
+func (h *Handler) ManualPaymentInfo(w http.ResponseWriter, r *http.Request) {
+	cfg := h.cfg
+	respond.OK(w, map[string]interface{}{
+		"momo_code":    cfg.Payments.ManualMomoCode,
+		"momo_name":    cfg.Payments.ManualMomoName,
+		"instructions": cfg.Payments.ManualInstructions,
+		"enabled":      cfg.Payments.ManualMomoCode != "",
+	})
+}
+
+// POST /api/v1/driver/packages/purchases/{purchaseID}/proof
+// Rider submits proof of an off-platform MoMo payment for their PENDING
+// purchase. Body: { reference, phone, screenshot_url, note }. An admin then
+// verifies and settles it via the admin confirm endpoint.
+func (h *Handler) SubmitPaymentProof(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		respond.Error(w, apperrors.ErrUnauthorized)
+		return
+	}
+	var in ProofInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	p, err := h.purchase.SubmitProof(r.Context(), claims.UserID, chi.URLParam(r, "purchaseID"), in)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, p)
+}
+
 // GET /api/v1/driver/packages/history — the driver's purchase history.
 func (h *Handler) PurchaseHistory(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
@@ -481,4 +518,62 @@ func (h *Handler) AdminListPurchases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, purchases)
+}
+
+// POST /api/v1/admin/packages/purchases — admin records a purchase on a driver's
+// behalf (cash / bank / their own MoMo). Body: { driver_id, package_id, mark_paid }.
+// With mark_paid=true (default) credits are granted immediately.
+func (h *Handler) AdminCreatePurchase(w http.ResponseWriter, r *http.Request) {
+	adminID, role := adminCtx(r)
+	var body struct {
+		DriverID  string `json:"driver_id"`
+		PackageID string `json:"package_id"`
+		MarkPaid  *bool  `json:"mark_paid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	in := AdminCreateInput{DriverID: body.DriverID, PackageID: body.PackageID, MarkPaid: true}
+	if body.MarkPaid != nil {
+		in.MarkPaid = *body.MarkPaid
+	}
+	if err := validate.Struct(in); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+	p, err := h.purchase.AdminCreateOnBehalf(r.Context(), adminID, in)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	h.audit.Record(r.Context(), adminID, role, "package_purchase.admin_create", "package_purchases", p.ID,
+		fmt.Sprintf("Admin recorded purchase for driver %s (mark_paid=%t)", in.DriverID, in.MarkPaid),
+		map[string]any{"driver_id": in.DriverID, "package_id": in.PackageID, "mark_paid": in.MarkPaid, "status": p.Status})
+	respond.Created(w, p)
+}
+
+// POST /api/v1/admin/packages/purchases/{id}/confirm — admin settles a PENDING
+// purchase after verifying payment out-of-band. Body: { success } (default true).
+func (h *Handler) AdminConfirmPurchase(w http.ResponseWriter, r *http.Request) {
+	adminID, role := adminCtx(r)
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Success *bool `json:"success"`
+	}
+	// Body is optional — default to success=true.
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	success := true
+	if body.Success != nil {
+		success = *body.Success
+	}
+	p, err := h.purchase.AdminConfirm(r.Context(), id, adminID, success)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	h.audit.Record(r.Context(), adminID, role, "package_purchase.admin_confirm", "package_purchases", id,
+		fmt.Sprintf("Admin manually settled purchase %s (success=%t) → %s", id, success, p.Status),
+		map[string]any{"purchase_id": id, "success": success, "status": p.Status})
+	respond.OK(w, p)
 }

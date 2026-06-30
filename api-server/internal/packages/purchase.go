@@ -19,6 +19,9 @@ import (
 // gateway (dev): purchases are auto-confirmed when DevAutoConfirm is set.
 type MoMoGateway interface {
 	RequestPayment(ctx context.Context, provider, phone string, amountRWF int, externalRef string) (txnID, status string, err error)
+	// QueryStatus polls the provider for the live state of a charge previously
+	// opened with externalRef. Returns "SUCCESS" | "FAILED" | "PENDING".
+	QueryStatus(ctx context.Context, provider, externalRef string) (status string, err error)
 }
 
 // Purchase mirrors a package_purchases row (immutable snapshot + lifecycle).
@@ -300,6 +303,162 @@ func (s *PurchaseService) History(ctx context.Context, userID string) ([]*Purcha
 	return s.repo.listPurchasesForUser(ctx, userID)
 }
 
+// ── Rider proof of manual payment ────────────────────────────────────────────
+
+// ProofInput is a rider's evidence that they paid for a PENDING purchase
+// out-of-band (e.g. sent MoMo to the merchant number). At least a reference or
+// a screenshot URL must be present.
+type ProofInput struct {
+	Reference     string `json:"reference"`      // MoMo transaction id from the SMS
+	Phone         string `json:"phone"`          // number they paid from
+	ScreenshotURL string `json:"screenshot_url"` // optional; uploaded via the upload API
+	Note          string `json:"note"`           // optional free text
+}
+
+// SubmitProof attaches proof to the rider's own PENDING purchase so an admin can
+// verify and settle it. Ownership + PENDING status are enforced in SQL.
+func (s *PurchaseService) SubmitProof(ctx context.Context, userID, purchaseID string, in ProofInput) (*Purchase, error) {
+	if in.Reference == "" && in.ScreenshotURL == "" {
+		return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "provide a transaction reference or a screenshot")
+	}
+	ok, err := s.repo.savePaymentProof(ctx, userID, purchaseID, in)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// Either not the rider's purchase, or it isn't PENDING anymore.
+		return nil, apperrors.New(http.StatusConflict, "NOT_PENDING", "purchase not found or no longer awaiting payment")
+	}
+	s.log.Info().Str("purchase_id", purchaseID).Msg("packages: rider submitted payment proof")
+	return s.repo.getPurchaseForUser(ctx, userID, purchaseID)
+}
+
+// ── Admin manual confirmation (Option B) ─────────────────────────────────────
+
+// AdminConfirm settles a PENDING purchase out-of-band: an admin who has verified
+// payment in their MoMo/bank app (or is recording a cash sale) flips it to PAID
+// (success=true) — which grants credits via the same path as a real callback —
+// or to FAILED (success=false). Idempotent; a non-PENDING purchase is returned
+// unchanged.
+func (s *PurchaseService) AdminConfirm(ctx context.Context, purchaseID, adminID string, success bool) (*Purchase, error) {
+	paymentRef, status, err := s.repo.purchaseRefAndStatus(ctx, purchaseID)
+	if err != nil {
+		return nil, err
+	}
+	if status == "PENDING" {
+		txnRef := "MANUAL-" + adminID
+		if err := s.confirm(ctx, paymentRef, txnRef, success); err != nil {
+			return nil, err
+		}
+	}
+	return s.repo.getPurchaseByID(ctx, purchaseID)
+}
+
+// AdminCreateInput is an admin-initiated purchase on a driver's behalf.
+type AdminCreateInput struct {
+	DriverID  string `json:"driver_id" validate:"required,uuid"` // driver_profiles.id
+	PackageID string `json:"package_id" validate:"required,uuid"`
+	MarkPaid  bool   `json:"mark_paid"` // true = record payment + grant immediately
+}
+
+// AdminCreateOnBehalf snapshots the current offer for a driver and creates a
+// purchase the admin is recording manually (cash/bank/their own MoMo). When
+// MarkPaid is true it grants credits immediately (provider MANUAL); otherwise it
+// opens a PENDING purchase the admin can confirm later via AdminConfirm.
+func (s *PurchaseService) AdminCreateOnBehalf(ctx context.Context, adminID string, in AdminCreateInput) (*Purchase, error) {
+	offer, err := s.repo.resolveOffer(ctx, in.PackageID, in.DriverID)
+	if err != nil {
+		return nil, err
+	}
+
+	var vehicleID *string
+	_ = s.repo.db.QueryRow(ctx, `
+		SELECT id FROM driver_vehicles WHERE driver_id=$1 AND vehicle_type_id=$2 AND is_active=TRUE ORDER BY created_at LIMIT 1
+	`, in.DriverID, offer.vehicleTypeID).Scan(&vehicleID)
+
+	paymentRef := uuid.NewString()
+	idemKey := "admin-" + paymentRef
+
+	status := "PENDING"
+	if in.MarkPaid {
+		status = "PAID"
+	}
+	id, err := s.repo.createPurchaseRow(ctx, in.DriverID, vehicleID, offer, status, "MANUAL", "", paymentRef, idemKey, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if in.MarkPaid {
+		if err := s.repo.markPaid(ctx, id, "MANUAL-"+adminID); err != nil {
+			return nil, err
+		}
+		expiresAt := time.Now().Add(time.Duration(offer.validityDays) * 24 * time.Hour)
+		if err := s.ledger.GrantPurchase(ctx, in.DriverID, vehicleID, offer.vehicleTypeID, id, offer.rides, offer.bonus, expiresAt); err != nil {
+			return nil, fmt.Errorf("admin grant: %w", err)
+		}
+		_ = s.repo.markCreditsGranted(ctx, id)
+	}
+	return s.repo.getPurchaseByID(ctx, id)
+}
+
+// ── MoMo reconciliation (Option A) ───────────────────────────────────────────
+
+// ReconcilePending is the authoritative settlement path for live MoMo: it polls
+// the provider for every PENDING MoMo charge and confirms or fails it. This does
+// not depend on an inbound webhook (which MTN does not sign the way our callback
+// guard expects). Charges past their payment window are marked FAILED. Returns
+// the number of purchases whose status changed.
+func (s *PurchaseService) ReconcilePending(ctx context.Context) (int, error) {
+	if s.momo == nil {
+		return 0, nil
+	}
+	pend, err := s.repo.listPendingMoMoPurchases(ctx, 200)
+	if err != nil {
+		return 0, err
+	}
+	settled := 0
+	for _, p := range pend {
+		// Window elapsed with no settlement → give up and free the row.
+		if p.expired {
+			if err := s.confirm(ctx, p.paymentRef, "", false); err != nil {
+				s.log.Warn().Err(err).Str("payment_ref", p.paymentRef).Msg("reconcile: expire failed")
+				continue
+			}
+			settled++
+			continue
+		}
+		status, err := s.momo.QueryStatus(ctx, providerCode(p.provider), p.paymentRef)
+		if err != nil {
+			s.log.Warn().Err(err).Str("payment_ref", p.paymentRef).Msg("reconcile: status query failed")
+			continue
+		}
+		switch status {
+		case "SUCCESS":
+			if err := s.confirm(ctx, p.paymentRef, "MOMO-"+p.paymentRef, true); err != nil {
+				s.log.Error().Err(err).Str("payment_ref", p.paymentRef).Msg("reconcile: confirm failed")
+				continue
+			}
+			settled++
+		case "FAILED":
+			if err := s.confirm(ctx, p.paymentRef, "", false); err != nil {
+				s.log.Warn().Err(err).Str("payment_ref", p.paymentRef).Msg("reconcile: mark-failed failed")
+				continue
+			}
+			settled++
+		}
+	}
+	return settled, nil
+}
+
+// providerCode maps the stored payment_provider ("mtn"/"airtel") to the gateway
+// provider constant.
+func providerCode(stored string) string {
+	if stored == "airtel" {
+		return "AIRTEL_MONEY"
+	}
+	return "MTN_MOMO"
+}
+
 type AdminPurchase struct {
 	ID                string     `json:"id"`
 	DriverID          string     `json:"driver_id"`
@@ -322,6 +481,13 @@ type AdminPurchase struct {
 	PaymentRef        string     `json:"payment_ref"`
 	CreatedAt         time.Time  `json:"created_at"`
 	PaidAt            *time.Time `json:"paid_at,omitempty"`
+
+	// Rider-submitted proof of a manual payment (for admin verification).
+	PaymentProofRef   *string    `json:"payment_proof_ref,omitempty"`
+	PaymentProofPhone *string    `json:"payment_proof_phone,omitempty"`
+	PaymentProofURL   *string    `json:"payment_proof_url,omitempty"`
+	PaymentProofNote  *string    `json:"payment_proof_note,omitempty"`
+	PaymentProofAt    *time.Time `json:"payment_proof_at,omitempty"`
 }
 
 // ListAllPurchases lists all package purchases for the admin, newest first.
@@ -402,7 +568,8 @@ func (r *Repository) listAllPurchases(ctx context.Context) ([]*AdminPurchase, er
 		       pp.package_id, pp.package_name, pp.package_version_number,
 		       pp.campaign_id, pp.campaign_code, c.name,
 		       pp.price_paid_rwf, pp.rides_granted, pp.bonus_rides_granted,
-		       pp.status, pp.payment_provider, pp.payment_ref, pp.created_at, pp.paid_at
+		       pp.status, pp.payment_provider, pp.payment_ref, pp.created_at, pp.paid_at,
+		       pp.payment_proof_ref, pp.payment_proof_phone, pp.payment_proof_url, pp.payment_proof_note, pp.payment_proof_at
 		FROM package_purchases pp
 		JOIN driver_profiles dp ON dp.id = pp.driver_id
 		JOIN users u ON u.id = dp.user_id
@@ -425,6 +592,7 @@ func (r *Repository) listAllPurchases(ctx context.Context) ([]*AdminPurchase, er
 			&ap.CampaignID, &ap.CampaignCode, &ap.CampaignName,
 			&ap.PricePaidRWF, &ap.RidesGranted, &ap.BonusRidesGranted,
 			&ap.Status, &ap.PaymentProvider, &ap.PaymentRef, &ap.CreatedAt, &ap.PaidAt,
+			&ap.PaymentProofRef, &ap.PaymentProofPhone, &ap.PaymentProofURL, &ap.PaymentProofNote, &ap.PaymentProofAt,
 		)
 		if err != nil {
 			return nil, err
@@ -432,6 +600,27 @@ func (r *Repository) listAllPurchases(ctx context.Context) ([]*AdminPurchase, er
 		out = append(out, ap)
 	}
 	return out, rows.Err()
+}
+
+// savePaymentProof attaches a rider's proof to their own PENDING purchase.
+// Ownership (user_id → driver_profiles → purchase) and PENDING status are
+// enforced in the WHERE clause; returns false if nothing matched.
+func (r *Repository) savePaymentProof(ctx context.Context, userID, purchaseID string, in ProofInput) (bool, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE package_purchases pp
+		SET payment_proof_ref   = NULLIF($3,''),
+		    payment_proof_phone = NULLIF($4,''),
+		    payment_proof_url   = NULLIF($5,''),
+		    payment_proof_note  = NULLIF($6,''),
+		    payment_proof_at    = now(),
+		    updated_at          = now()
+		FROM driver_profiles dp
+		WHERE pp.id = $1 AND dp.id = pp.driver_id AND dp.user_id = $2 AND pp.status = 'PENDING'`,
+		purchaseID, userID, in.Reference, in.Phone, in.ScreenshotURL, in.Note)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // driverProfileAndActiveVehicle maps an auth user_id to driver_profiles.id.
@@ -460,6 +649,51 @@ func (r *Repository) markPaid(ctx context.Context, id, providerTxnID string) err
 func (r *Repository) markFailed(ctx context.Context, id string) error {
 	_, err := r.db.Exec(ctx, `UPDATE package_purchases SET status='FAILED', updated_at=now() WHERE id=$1`, id)
 	return err
+}
+
+// purchaseRefAndStatus returns the payment_ref + current status for a purchase
+// id (used by admin manual confirmation).
+func (r *Repository) purchaseRefAndStatus(ctx context.Context, id string) (paymentRef, status string, err error) {
+	err = r.db.QueryRow(ctx, `SELECT payment_ref, status FROM package_purchases WHERE id=$1`, id).Scan(&paymentRef, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = apperrors.ErrNotFound
+	}
+	return
+}
+
+// pendingMoMo is one PENDING mobile-money charge awaiting reconciliation.
+type pendingMoMo struct {
+	paymentRef string
+	provider   string // stored payment_provider: "mtn" | "airtel"
+	expired    bool   // payment window elapsed
+}
+
+// listPendingMoMoPurchases returns PENDING charges initiated through a live
+// mobile-money provider (excludes MANUAL/admin and free grants), flagging those
+// whose payment window has elapsed.
+func (r *Repository) listPendingMoMoPurchases(ctx context.Context, limit int) ([]pendingMoMo, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT payment_ref, COALESCE(payment_provider, ''),
+		       (expires_at IS NOT NULL AND expires_at < now()) AS expired
+		FROM package_purchases
+		WHERE status = 'PENDING'
+		  AND payment_provider IN ('mtn', 'airtel')
+		  AND payment_ref <> ''
+		ORDER BY created_at ASC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []pendingMoMo
+	for rows.Next() {
+		var p pendingMoMo
+		if err := rows.Scan(&p.paymentRef, &p.provider, &p.expired); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // lockPurchaseForConfirm loads the snapshot needed to grant credits on a
