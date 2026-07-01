@@ -59,16 +59,17 @@ func WithLogger(log zerolog.Logger) func(http.Handler) http.Handler {
 
 // Authenticate validates the Bearer JWT and checks session liveness in Redis.
 // Role enforcement is done separately by RequireRole middleware.
-func Authenticate(cfg *config.Config, rdb *goredis.Client) func(http.Handler) http.Handler {
+func Authenticate(cfg *config.Config, rdb goredis.UniversalClient) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tokenStr := ""
 			if header := r.Header.Get("Authorization"); header != "" && strings.HasPrefix(header, "Bearer ") {
 				tokenStr = strings.TrimPrefix(header, "Bearer ")
+			} else if q := r.URL.Query().Get("ticket"); q != "" {
+				tokenStr = q
 			} else if q := r.URL.Query().Get("token"); q != "" {
-				// SECURITY TODO: Implement a short-lived, single-use ticket exchange mechanism for WS
-				// authentication instead of exposing the long-lived JWT in URL query parameters.
-				// Mobile WebSocket clients cannot set Authorization headers; they pass JWT via query.
+				l := zerolog.Ctx(r.Context())
+				l.Warn().Msg("DEPRECATION: Passing access token via '?token=' query parameter is deprecated. Please upgrade to '?ticket='.")
 				tokenStr = q
 			}
 			if tokenStr == "" {
@@ -82,6 +83,79 @@ func Authenticate(cfg *config.Config, rdb *goredis.Client) func(http.Handler) ht
 					return nil, apperrors.ErrTokenInvalid
 				}
 				return []byte(cfg.JWT.AccessSecret), nil
+			})
+
+			if err != nil || !token.Valid {
+				if err != nil && strings.Contains(err.Error(), "expired") {
+					respond.Error(w, apperrors.ErrTokenExpired)
+					return
+				}
+				respond.Error(w, apperrors.ErrTokenInvalid)
+				return
+			}
+
+			if claims.TokenType != "access" {
+				if claims.TokenType == "ws" {
+					if !strings.Contains(r.URL.Path, "/ws/") {
+						respond.Error(w, apperrors.ErrTokenInvalid)
+						return
+					}
+					jti := claims.ID
+					if jti == "" {
+						respond.Error(w, apperrors.ErrTokenInvalid)
+						return
+					}
+					ticketKey := "ws-ticket:" + jti
+					val, redisErr := rdb.Get(r.Context(), ticketKey).Result()
+					if redisErr != nil || val != "valid" {
+						respond.Error(w, apperrors.ErrTokenRevoked)
+						return
+					}
+					rdb.Del(r.Context(), ticketKey)
+				} else {
+					respond.Error(w, apperrors.ErrTokenInvalid)
+					return
+				}
+			} else {
+				// Check Redis session liveness — catches revoked/logged-out tokens.
+				jti := claims.ID
+				if jti == "" {
+					respond.Error(w, apperrors.ErrTokenInvalid)
+					return
+				}
+				key := rkeys.K.Session(claims.UserID, jti)
+				val, redisErr := rdb.Get(r.Context(), key).Result()
+				if redisErr != nil || val != "valid" {
+					respond.Error(w, apperrors.ErrTokenRevoked)
+					return
+				}
+			}
+
+			ctx := context.WithValue(r.Context(), ContextKeyClaims, claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// AuthenticateAdmin validates the admin Bearer JWT and checks session liveness in Redis.
+func AuthenticateAdmin(cfg *config.Config, rdb goredis.UniversalClient) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenStr := ""
+			if header := r.Header.Get("Authorization"); header != "" && strings.HasPrefix(header, "Bearer ") {
+				tokenStr = strings.TrimPrefix(header, "Bearer ")
+			}
+			if tokenStr == "" {
+				respond.Error(w, apperrors.ErrUnauthorized)
+				return
+			}
+
+			claims := &Claims{}
+			token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, apperrors.ErrTokenInvalid
+				}
+				return []byte(cfg.JWT.AdminAccessSecret), nil
 			})
 
 			if err != nil || !token.Valid {
