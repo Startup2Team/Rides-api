@@ -2,8 +2,14 @@ package team
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -200,17 +206,87 @@ func (r *Repository) GetTOTPSecret(ctx context.Context, id string) (*string, err
 	var secret *string
 	err := r.db.QueryRow(ctx,
 		`SELECT totp_secret FROM admin_accounts WHERE id=$1`, id).Scan(&secret)
-	return secret, err
+	if err != nil {
+		return nil, err
+	}
+	if secret == nil {
+		return nil, nil
+	}
+	decrypted, err := decryptTOTP(*secret)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt totp: %w", err)
+	}
+	return &decrypted, nil
 }
 
 // SaveTOTP stores the verified TOTP secret and marks two_factor = true.
 func (r *Repository) SaveTOTP(ctx context.Context, id, secret string) error {
-	_, err := r.db.Exec(ctx, `
+	encrypted, err := encryptTOTP(secret)
+	if err != nil {
+		return fmt.Errorf("encrypt totp: %w", err)
+	}
+	_, err = r.db.Exec(ctx, `
 		UPDATE admin_accounts
 		SET totp_secret=$1, two_factor=TRUE, updated_at=NOW()
 		WHERE id=$2
-	`, secret, id)
+	`, encrypted, id)
 	return err
+}
+
+func getEncryptionKey() []byte {
+	k := os.Getenv("TOTP_ENCRYPTION_KEY")
+	if k == "" {
+		k = "default-dev-totp-encryption-key-do-not-use-in-prod"
+	}
+	hash := sha256.Sum256([]byte(k))
+	return hash[:]
+}
+
+func encryptTOTP(plaintext string) (string, error) {
+	key := getEncryptionKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return "enc:" + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func decryptTOTP(ciphertextStr string) (string, error) {
+	if !strings.HasPrefix(ciphertextStr, "enc:") {
+		return ciphertextStr, nil
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ciphertextStr, "enc:"))
+	if err != nil {
+		return "", err
+	}
+	key := getEncryptionKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
 }
 
 // ClearTOTP removes TOTP and backup codes and marks two_factor = false.

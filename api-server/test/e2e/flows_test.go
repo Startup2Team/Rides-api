@@ -16,7 +16,7 @@ import (
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
-func newTestRedis(t *testing.T) (*miniredis.Miniredis, *goredis.Client) {
+func newTestRedis(t *testing.T) (*miniredis.Miniredis, goredis.UniversalClient) {
 	t.Helper()
 	mr, err := miniredis.Run()
 	require.NoError(t, err)

@@ -56,11 +56,15 @@ func (r *Repository) resolveProfile(ctx context.Context, userID, vehicleTypeCode
 // grant inserts a grant ledger entry and bumps the entitlement cache atomically.
 // entryType is PURCHASE_GRANT | BONUS_GRANT | ADMIN_GRANT.
 func (r *Repository) grant(ctx context.Context, profileID string, vehicleID *string, vehicleTypeID, entryType string, rides, bonus int, sourcePurchaseID *string, expiresAt *time.Time, adminID *string, reason string, idemKey *string) error {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return err
+	tx, hasTx := r.getTx(ctx)
+	var err error
+	if !hasTx {
+		tx, err = r.db.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	var curRides, curBonus int
 	err = tx.QueryRow(ctx, `
@@ -90,7 +94,10 @@ func (r *Repository) grant(ctx context.Context, profileID string, vehicleID *str
 	`, profileID, vehicleID, vehicleTypeID, newRides, newBonus); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if !hasTx {
+		return tx.Commit(ctx)
+	}
+	return nil
 }
 
 // deductOne removes a single ride (bonus first) and is idempotent on rideID:

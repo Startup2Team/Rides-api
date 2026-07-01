@@ -36,7 +36,7 @@ type TimeoutManager interface {
 type Service struct {
 	repo       *Repository
 	rideRepo   *ride.Repository
-	redis      *goredis.Client
+	redis      goredis.UniversalClient
 	hub        *tracking.Hub
 	telephony  *telephony.Service
 	analytics  *analytics.Service
@@ -50,7 +50,7 @@ type FareConfigRepository interface {
 	GetConfigByVehicleType(ctx context.Context, vehicleTypeCode string) (*fare.Config, error)
 }
 
-func NewService(repo *Repository, rideRepo *ride.Repository, rdb *goredis.Client, hub *tracking.Hub, tel *telephony.Service, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
+func NewService(repo *Repository, rideRepo *ride.Repository, rdb goredis.UniversalClient, hub *tracking.Hub, tel *telephony.Service, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{
 		repo: repo, rideRepo: rideRepo, redis: rdb, hub: hub,
 		telephony: tel, analytics: ana, cfg: cfg, log: log,

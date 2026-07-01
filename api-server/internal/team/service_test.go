@@ -3,6 +3,7 @@ package team
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,7 +178,7 @@ func (m *mockRepo) ListAuditLog(ctx context.Context, actor, action, targetType, 
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
-func newTestRedis(t *testing.T) *goredis.Client {
+func newTestRedis(t *testing.T) goredis.UniversalClient {
 	t.Helper()
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
@@ -200,11 +201,11 @@ func testCfg() *config.Config {
 	}
 }
 
-func newTestService(repo TeamRepo, rdb *goredis.Client) *Service {
+func newTestService(repo TeamRepo, rdb goredis.UniversalClient) *Service {
 	return &Service{repo: repo, cfg: testCfg(), rdb: rdb}
 }
 
-func newTestServiceProduction(repo TeamRepo, rdb *goredis.Client) *Service {
+func newTestServiceProduction(repo TeamRepo, rdb goredis.UniversalClient) *Service {
 	cfg := testCfg()
 	cfg.Env = "production"
 	return &Service{repo: repo, cfg: cfg, rdb: rdb}
@@ -646,4 +647,20 @@ func TestResetTOTP_NoExistingSecret(t *testing.T) {
 	svc := newTestService(repo, newTestRedis(t))
 	_, _, _, err := svc.ResetTOTP(context.Background(), "a1", "123456")
 	require.Error(t, err)
+}
+
+func TestTOTPEncryption_RoundTripAndFallback(t *testing.T) {
+	originalSecret := "JBSWY3DPEHPK3PXP"
+	encrypted, err := encryptTOTP(originalSecret)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(encrypted, "enc:"))
+
+	decrypted, err := decryptTOTP(encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, originalSecret, decrypted)
+
+	plainSecret := "MYPLAINSECRET"
+	fallbackDecrypted, err := decryptTOTP(plainSecret)
+	require.NoError(t, err)
+	assert.Equal(t, plainSecret, fallbackDecrypted)
 }

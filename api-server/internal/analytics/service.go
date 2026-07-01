@@ -17,11 +17,11 @@ import (
 // and can forward to external data pipelines.
 type Service struct {
 	db    *pgxpool.Pool
-	redis *goredis.Client
+	redis goredis.UniversalClient
 	log   zerolog.Logger
 }
 
-func NewService(db *pgxpool.Pool, rdb *goredis.Client, log zerolog.Logger) *Service {
+func NewService(db *pgxpool.Pool, rdb goredis.UniversalClient, log zerolog.Logger) *Service {
 	return &Service{db: db, redis: rdb, log: log}
 }
 

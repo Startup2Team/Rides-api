@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/config"
+	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
 // Provider identifies the payment channel.
@@ -264,9 +265,10 @@ func (s *Service) queryMTNMoMo(ctx context.Context, referenceID string) (string,
 	}
 }
 
-// requestAirtel is a stub — Airtel Money is not wired yet. It returns a mock
-// PENDING so the purchase flow degrades gracefully instead of erroring.
 func (s *Service) requestAirtel(ctx context.Context, phone string, amount float64, externalRef string) (*PaymentResult, error) {
+	if s.cfg.Env == "production" && s.cfg.Payments.Enabled {
+		return nil, apperrors.New(http.StatusNotImplemented, "AIRTEL_NOT_READY", "Airtel Money is not production-ready")
+	}
 	s.log.Info().Str("ref", externalRef).Float64("amount", amount).Msg("Airtel Money payment initiated (stub)")
 	return &PaymentResult{TransactionID: externalRef, Status: StatusPending, Message: "Airtel payment request sent (stub)"}, nil
 }

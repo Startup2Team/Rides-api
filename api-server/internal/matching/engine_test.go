@@ -15,7 +15,7 @@ import (
 )
 
 // newTestRedis spins up an in-process Redis and returns a connected client.
-func newTestRedis(t *testing.T) (*miniredis.Miniredis, *goredis.Client) {
+func newTestRedis(t *testing.T) (*miniredis.Miniredis, goredis.UniversalClient) {
 	t.Helper()
 	mr, err := miniredis.Run()
 	require.NoError(t, err)

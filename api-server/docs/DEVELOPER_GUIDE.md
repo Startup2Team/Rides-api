@@ -706,3 +706,12 @@ go test ./internal/ride/...      # single module
 go test -run TestStateMachine    # single test by name
 go test -v ./test/e2e/...        # e2e tests verbose
 ```
+
+### 14. Proxy Upload Authentication
+
+In production, proxy PUT uploads (`PUT /api/v1/uploads/objects/*`) require a short-lived signature token.
+This token is automatically appended to the `upload_url` returned by `POST /api/v1/uploads/presigned-url`.
+
+Clients must either:
+- Use the full `upload_url` containing the `?token=` query parameter.
+- Send the token in the `X-Upload-Token` header.

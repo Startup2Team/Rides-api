@@ -41,7 +41,7 @@ type Service struct {
 	db       DBTX
 	log      zerolog.Logger
 	packages PackagesService
-	rdb      *goredis.Client
+	rdb      goredis.UniversalClient
 	bonus    BonusService
 }
 
@@ -54,7 +54,7 @@ func (s *Service) SetBonusService(svc BonusService)       { s.bonus = svc }
 
 // SetRedis wires the Redis client used by account-assist operations
 // (clearing OTP lockouts, GPS anomaly counters).
-func (s *Service) SetRedis(rdb *goredis.Client) {
+func (s *Service) SetRedis(rdb goredis.UniversalClient) {
 	s.rdb = rdb
 }
 
@@ -118,6 +118,7 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 			}
 		}
 	}
+	s.revokeUserSessions(ctx, driverUserID)
 	return nil
 }
 
@@ -495,7 +496,21 @@ func (s *Service) SuspendUser(ctx context.Context, userID string, durationHours 
 		UPDATE users SET is_suspended = TRUE, suspension_until = $1, updated_at = NOW()
 		WHERE id = $2
 	`, suspendedUntil, userID)
-	return err
+	if err != nil {
+		return err
+	}
+	s.revokeUserSessions(ctx, userID)
+	return nil
+}
+
+func (s *Service) revokeUserSessions(ctx context.Context, userID string) {
+	if s.rdb == nil {
+		return
+	}
+	iter := s.rdb.Scan(ctx, 0, "session:"+userID+":*", 100).Iterator()
+	for iter.Next(ctx) {
+		s.rdb.Del(ctx, iter.Val())
+	}
 }
 
 func (s *Service) ReinstateUser(ctx context.Context, userID string) error {
@@ -1233,11 +1248,30 @@ func (s *Service) UpdateDriver(ctx context.Context, profileID string, fields map
 	if len(fields) == 0 {
 		return nil
 	}
+	allowedFields := map[string]bool{
+		"vehicle_plate":       true,
+		"license_number":      true,
+		"license_expiry_date": true,
+		"approval_status":     true,
+		"momo_pay_code":       true,
+		"merchant_pay_code":   true,
+		"transport_type":      true,
+		"momo_provider":       true,
+		"date_of_birth":       true,
+		"passenger_seats":     true,
+		"load_capacity_kg":    true,
+	}
+	for k := range fields {
+		if !allowedFields[k] {
+			return apperrors.New(http.StatusBadRequest, "INVALID_FIELD", "unknown or invalid field: "+k)
+		}
+	}
+
 	var setClauses []string
 	var args []interface{}
 	n := 1
 	for k, v := range fields {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", k, n))
+		setClauses = append(setClauses, fmt.Sprintf(`"%s" = $%d`, k, n))
 		args = append(args, v)
 		n++
 	}

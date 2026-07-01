@@ -464,8 +464,8 @@ graph TD
 
 | Constraint | Impact | Mitigation |
 |---|---|---|
-| WebSocket hub is process-local | Cross-instance WS delivery fails in multi-instance deploy | Use sticky sessions or add Redis pub/sub fanout |
+| WebSocket hub horizontal scaling | Resolved | **RESOLVED** via Redis Pub/Sub message fanout backplane. |
 | Payment integrations are stubs | No real money movement in prod | Full MoMo + Airtel API integration required |
 | Google Maps API key unused | Route metrics use Haversine × 1.25 road factor | Wire Google Maps Directions API when ready |
-| No database-level read replicas | All reads hit primary | Add read replica and route analytics queries |
+| Database-level read replicas | Resolved | **RESOLVED** via `DATABASE_READ_URL` routing analytics and dashboard service queries. |
 | Admin 2FA backup codes hashed | Cannot recover backup codes after setup | User must re-setup 2FA if codes lost |

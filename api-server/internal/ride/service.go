@@ -48,7 +48,7 @@ type PackagesService interface {
 // Service handles ride lifecycle business logic.
 type Service struct {
 	repo      *Repository
-	redis     *goredis.Client
+	redis     goredis.UniversalClient
 	notify    *notification.Service
 	analytics *analytics.Service
 	hub       *tracking.Hub
@@ -69,7 +69,7 @@ type FareConfigRepository interface {
 	GetConfigByID(ctx context.Context, id string) (*fare.Config, error)
 }
 
-func NewService(repo *Repository, rdb *goredis.Client, notify *notification.Service, ana *analytics.Service, hub *tracking.Hub, cfg *config.Config, log zerolog.Logger) *Service {
+func NewService(repo *Repository, rdb goredis.UniversalClient, notify *notification.Service, ana *analytics.Service, hub *tracking.Hub, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{repo: repo, redis: rdb, notify: notify, analytics: ana, hub: hub, cfg: cfg, log: log}
 }
 

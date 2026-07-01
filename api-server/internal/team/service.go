@@ -41,10 +41,10 @@ type LoginResult struct {
 type Service struct {
 	repo TeamRepo
 	cfg  *config.Config
-	rdb  *goredis.Client
+	rdb  goredis.UniversalClient
 }
 
-func NewService(repo TeamRepo, cfg *config.Config, rdb *goredis.Client) *Service {
+func NewService(repo TeamRepo, cfg *config.Config, rdb goredis.UniversalClient) *Service {
 	return &Service{repo: repo, cfg: cfg, rdb: rdb}
 }
 
@@ -415,7 +415,7 @@ func (s *Service) issueAccessToken(ctx context.Context, adminID, roleName string
 		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString([]byte(s.cfg.JWT.AccessSecret))
+	signed, err := token.SignedString([]byte(s.cfg.JWT.AdminAccessSecret))
 	if err != nil {
 		return "", err
 	}
@@ -435,7 +435,7 @@ func (s *Service) issuePreAuthToken(adminID string) (string, error) {
 		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.cfg.JWT.AccessSecret))
+	return token.SignedString([]byte(s.cfg.JWT.AdminAccessSecret))
 }
 
 func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
@@ -443,7 +443,7 @@ func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, apperrors.ErrTokenInvalid
 		}
-		return []byte(s.cfg.JWT.AccessSecret), nil
+		return []byte(s.cfg.JWT.AdminAccessSecret), nil
 	})
 	if err != nil || !token.Valid {
 		return "", apperrors.New(http.StatusUnauthorized, "INVALID_PRE_AUTH_TOKEN", "pre-auth token is invalid or expired")

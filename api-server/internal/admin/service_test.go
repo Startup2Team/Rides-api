@@ -3,11 +3,14 @@ package admin
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -364,6 +367,38 @@ func TestSuspendUser_DBError(t *testing.T) {
 	assert.ErrorIs(t, svc.SuspendUser(context.Background(), "user-uuid", 24), dbErr)
 }
 
+func TestSuspendUser_RevokesSessions(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := goredis.NewClient(&goredis.Options{
+		Addr: mr.Addr(),
+	})
+	defer rdb.Close()
+
+	svc := newTestService(&mockDB{
+		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.CommandTag{}, nil
+		},
+	})
+	svc.SetRedis(rdb)
+
+	ctx := context.Background()
+	_ = rdb.Set(ctx, "session:user-uuid:jti1", "valid", 0).Err()
+	_ = rdb.Set(ctx, "session:user-uuid:jti2", "valid", 0).Err()
+	_ = rdb.Set(ctx, "session:other-user:jti3", "valid", 0).Err()
+
+	err = svc.SuspendUser(ctx, "user-uuid", 24)
+	assert.NoError(t, err)
+
+	assert.False(t, mr.Exists("session:user-uuid:jti1"))
+	assert.False(t, mr.Exists("session:user-uuid:jti2"))
+	assert.True(t, mr.Exists("session:other-user:jti3"))
+}
+
 func TestReinstateUser_Success(t *testing.T) {
 	svc := newTestService(&mockDB{
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
@@ -412,6 +447,26 @@ func TestUpdateDriver_Success(t *testing.T) {
 		},
 	})
 	assert.NoError(t, svc.UpdateDriver(context.Background(), "profile-uuid", map[string]interface{}{"vehicle_plate": "RAD 001 A"}))
+}
+
+func TestUpdateDriver_RejectedField(t *testing.T) {
+	svc := newTestService(&mockDB{})
+	err := svc.UpdateDriver(context.Background(), "profile-uuid", map[string]interface{}{"invalid_col": "some value"})
+	assert.Error(t, err)
+	var appErr *apperrors.AppError
+	assert.True(t, errors.As(err, &appErr))
+	assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
+	assert.Equal(t, "INVALID_FIELD", appErr.Code)
+}
+
+func TestUpdateDriver_SQLInjectionAttempt(t *testing.T) {
+	svc := newTestService(&mockDB{})
+	err := svc.UpdateDriver(context.Background(), "profile-uuid", map[string]interface{}{"approval_status = APPROVED; DROP TABLE users;--": 1})
+	assert.Error(t, err)
+	var appErr *apperrors.AppError
+	assert.True(t, errors.As(err, &appErr))
+	assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
+	assert.Equal(t, "INVALID_FIELD", appErr.Code)
 }
 
 func TestUpdateDriver_EmptyFields(t *testing.T) {
