@@ -735,3 +735,19 @@ func (r *Repository) lockPurchaseForConfirm(ctx context.Context, paymentRef stri
 	}
 	return
 }
+
+func (s *PurchaseService) PendingMoMoQueueDepth(ctx context.Context) (int, error) {
+	return s.repo.PendingMoMoQueueDepth(ctx)
+}
+
+func (r *Repository) PendingMoMoQueueDepth(ctx context.Context) (int, error) {
+	var count int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM package_purchases
+		WHERE status = 'PENDING'
+		  AND payment_provider IN ('mtn', 'airtel')
+		  AND payment_ref <> ''
+	`).Scan(&count)
+	return count, err
+}
