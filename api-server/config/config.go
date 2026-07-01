@@ -14,22 +14,25 @@ type Config struct {
 	Env         string
 	AdminOrigin string // CORS allowed origin for admin frontend (production URL)
 
-	Database DatabaseConfig
-	Redis    RedisConfig
-	JWT      JWTConfig
-	AT       ATConfig
-	Firebase FirebaseConfig
-	GMaps    GoogleMapsConfig
-	MoMo     MoMoConfig
-	Storage  StorageConfig
-	Matching MatchingConfig
-	Ride     RideConfig
-	GPS      GPSConfig
-	Driver   DriverConfig
-	Customer CustomerConfig
-	Penalty  PenaltyConfig
-	Payments PaymentsConfig
-	Security SecurityConfig
+	Database  DatabaseConfig
+	Redis     RedisConfig
+	JWT       JWTConfig
+	AT        ATConfig
+	Firebase  FirebaseConfig
+	GMaps     GoogleMapsConfig
+	MoMo      MoMoConfig
+	Storage   StorageConfig
+	Matching  MatchingConfig
+	Ride      RideConfig
+	GPS       GPSConfig
+	Driver    DriverConfig
+	Customer  CustomerConfig
+	Penalty   PenaltyConfig
+	Payments  PaymentsConfig
+	Security  SecurityConfig
+	Analytics struct {
+		BatchSize int
+	}
 }
 
 // SecurityConfig holds API-protection tunables.
@@ -38,6 +41,14 @@ type SecurityConfig struct {
 	// routes (DDoS / abuse backstop). Higher than the old hard-coded 100 so that
 	// many users behind one carrier-grade-NAT IP don't share a tiny bucket.
 	GlobalRateLimitPerMin int
+	// AuthRefreshRateLimit caps auth token refresh attempts.
+	AuthRefreshRateLimit int
+	// MomoWebhookRateLimit caps MTN MoMo webhook callback requests.
+	MomoWebhookRateLimit int
+	// AdminLoginRateLimit caps administrative login/2FA attempts.
+	AdminLoginRateLimit int
+	// DriverLocationRateLimit caps driver location updates per user.
+	DriverLocationRateLimit int
 	// MaxRequestBodyBytes caps non-upload request bodies (memory-exhaustion guard).
 	MaxRequestBodyBytes int64
 	// SwaggerEnabled exposes /swagger. Off by default in production.
@@ -65,16 +76,19 @@ type PaymentsConfig struct {
 
 type DatabaseConfig struct {
 	URL      string
+	ReadURL  string
 	MaxConns int
 	MinConns int
 }
 
 type RedisConfig struct {
-	URL string
+	URL         string
+	ClusterMode bool
 }
 
 type JWTConfig struct {
 	AccessSecret        string
+	AdminAccessSecret   string
 	RefreshSecret       string
 	AccessExpiryMinutes int
 	RefreshExpiryDays   int
@@ -196,11 +210,20 @@ func Load() (*Config, error) {
 	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
+	cfg.Database.ReadURL = getEnv("DATABASE_READ_URL", "")
+	if cfg.Database.ReadURL == "" {
+		cfg.Database.ReadURL = cfg.Database.URL
+	}
 	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 25)
 	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 5)
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")
+	cfg.Redis.ClusterMode = getEnvBool("REDIS_CLUSTER_MODE", false)
 
 	cfg.JWT.AccessSecret = requireEnv("JWT_ACCESS_SECRET")
+	cfg.JWT.AdminAccessSecret = getEnv("JWT_ADMIN_ACCESS_SECRET", "")
+	if cfg.JWT.AdminAccessSecret == "" {
+		cfg.JWT.AdminAccessSecret = cfg.JWT.AccessSecret
+	}
 	cfg.JWT.RefreshSecret = requireEnv("JWT_REFRESH_SECRET")
 	cfg.JWT.AccessExpiryMinutes = getEnvInt("JWT_ACCESS_EXPIRY_MINUTES", 15)
 	cfg.JWT.RefreshExpiryDays = getEnvInt("JWT_REFRESH_EXPIRY_DAYS", 30)
@@ -276,9 +299,15 @@ func Load() (*Config, error) {
 	cfg.Payments.ManualInstructions = getEnv("MANUAL_PAY_INSTRUCTIONS", "")
 
 	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 300)
+	cfg.Security.AuthRefreshRateLimit = getEnvInt("RATE_LIMIT_AUTH_REFRESH", 20)
+	cfg.Security.MomoWebhookRateLimit = getEnvInt("RATE_LIMIT_MOMO_WEBHOOK", 120)
+	cfg.Security.AdminLoginRateLimit = getEnvInt("RATE_LIMIT_ADMIN_LOGIN", 5)
+	cfg.Security.DriverLocationRateLimit = getEnvInt("RATE_LIMIT_DRIVER_LOCATION", 20)
 	cfg.Security.MaxRequestBodyBytes = int64(getEnvInt("MAX_REQUEST_BODY_BYTES", 1<<20)) // 1 MiB
 	cfg.Security.SwaggerEnabled = getEnvBool("SWAGGER_ENABLED", cfg.Env != "production")
 	cfg.Security.SwaggerBasicAuth = getEnv("SWAGGER_BASIC_AUTH", "")
+
+	cfg.Analytics.BatchSize = getEnvInt("ANALYTICS_BATCH_SIZE", 100)
 
 	return cfg, nil
 }

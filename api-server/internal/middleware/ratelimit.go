@@ -8,12 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/workspace/ride-platform/config"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
@@ -31,7 +31,7 @@ end
 return current
 `)
 
-func atomicIncr(ctx context.Context, rdb *redis.Client, key string, window time.Duration) (int64, error) {
+func atomicIncr(ctx context.Context, rdb redis.UniversalClient, key string, window time.Duration) (int64, error) {
 	ttlSeconds := int64(window.Seconds())
 	val, err := incrWithTTLScript.Run(ctx, rdb, []string{key}, ttlSeconds).Int64()
 	return val, err
@@ -48,7 +48,7 @@ func atomicIncr(ctx context.Context, rdb *redis.Client, key string, window time.
 // `prefix` separates buckets (e.g. "otp_send" vs "otp_verify"). Fails CLOSED:
 // because these are SMS-cost / brute-force surfaces, a Redis error denies the
 // request rather than allowing uncapped abuse.
-func OTPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+func OTPRateLimit(rdb redis.UniversalClient, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			phone := ""
@@ -92,7 +92,7 @@ func OTPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time
 // IPRateLimit is a general per-IP rate limiter backed by Redis.
 // Uses TrustedIP() which only reads proxy headers when the connection
 // comes from a known private/loopback address, preventing header spoofing.
-func IPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+func IPRateLimit(cfg *config.Config, rdb redis.UniversalClient, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := TrustedIP(r)
@@ -100,7 +100,7 @@ func IPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.
 
 			count, err := atomicIncr(r.Context(), rdb, key, window)
 			if err != nil {
-				if os.Getenv("ENV") == "production" {
+				if cfg.Env == "production" {
 					respond.ErrorMsg(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "rate limiting database unavailable")
 					return
 				}
@@ -125,7 +125,7 @@ func IPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.
 // Designed for high-frequency driver endpoints like POST /driver/location:
 //
 //	mw.UserRateLimit(rdb, "location", 20, time.Minute)  → max 20 req/min per driver
-func UserRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+func UserRateLimit(rdb redis.UniversalClient, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims := GetClaims(r)
