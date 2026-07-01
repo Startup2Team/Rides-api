@@ -51,26 +51,8 @@ func (s *Service) GetTransactions(ctx context.Context, userID string, limit, off
 func (s *Service) TopUp(ctx context.Context, userID string, amountRWF int64, phoneNumber string) (*Transaction, error) {
 	// SECURITY: crediting balance here without capturing a real payment would let
 	// any user mint funds (top-up → spend / withdraw). Until a MoMo collect is
-	// wired, top-up is disabled. When enabled, this must create a PENDING tx and
-	// only credit the balance from an idempotent gateway webhook (keyed on the
-	// provider's transaction ref) — never optimistically as it does today.
-	if !s.paymentsEnabled {
-		return nil, errPaymentsDisabled
-	}
-	if err := validateAmount(amountRWF, maxTopUpRWF); err != nil {
-		return nil, err
-	}
-	desc := fmt.Sprintf("Top-up from %s", phoneNumber)
-	t, err := s.repo.TopUp(ctx, userID, amountRWF, phoneNumber, "", desc)
-	if err != nil {
-		return nil, err
-	}
-	s.log.Info().
-		Str("user_id", userID).
-		Int64("amount_rwf", amountRWF).
-		Str("phone", phoneNumber).
-		Msg("wallet: top-up completed")
-	return t, nil
+	// fully wired with confirmed settlement webhooks, direct top-up is disabled.
+	return nil, errPaymentsDisabled
 }
 
 // Withdraw deducts money from the wallet to a phone number.

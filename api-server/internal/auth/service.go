@@ -222,9 +222,13 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 		return nil, apperrors.ErrTokenInvalid
 	}
 
+	if claims.ID == "" {
+		return nil, apperrors.ErrTokenInvalid
+	}
+
 	key := rkeys.K.Session(claims.UserID, claims.ID)
 	val, err := s.redis.Get(ctx, key).Result()
-	if err != nil || val == "revoked" {
+	if err != nil || val != "valid" {
 		return nil, apperrors.ErrTokenRevoked
 	}
 
@@ -241,6 +245,11 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 		// Revoke the session so further refresh attempts also fail immediately.
 		_ = s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err()
 		return nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
+	}
+
+	// Revoke the old refresh token session BEFORE issuing the new token pair (refresh token rotation)
+	if err := s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err(); err != nil {
+		return nil, fmt.Errorf("failed to revoke old refresh token: %w", err)
 	}
 
 	return s.issueTokenPair(ctx, user)

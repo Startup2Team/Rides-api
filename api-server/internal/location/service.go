@@ -375,7 +375,18 @@ func (s *Service) SwitchMode(ctx context.Context, userID, mode string) error {
 	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE users SET role_state = $1, updated_at = NOW() WHERE id = $2`, roleState, userID)
-	return err
+	if err != nil {
+		return err
+	}
+	s.revokeUserSessions(ctx, userID)
+	return nil
+}
+
+func (s *Service) revokeUserSessions(ctx context.Context, userID string) {
+	iter := s.redis.Scan(ctx, 0, "session:"+userID+":*", 100).Iterator()
+	for iter.Next(ctx) {
+		s.redis.Del(ctx, iter.Val())
+	}
 }
 
 // ── Startup warm ──────────────────────────────────────────────────────────

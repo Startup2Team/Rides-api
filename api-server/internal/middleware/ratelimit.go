@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -99,6 +100,10 @@ func IPRateLimit(rdb *redis.Client, prefix string, maxRequests int, window time.
 
 			count, err := atomicIncr(r.Context(), rdb, key, window)
 			if err != nil {
+				if os.Getenv("ENV") == "production" {
+					respond.ErrorMsg(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "rate limiting database unavailable")
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

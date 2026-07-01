@@ -519,6 +519,7 @@ func (h *Handler) AdminListPurchases(w http.ResponseWriter, r *http.Request) {
 	}
 	respond.OK(w, purchases)
 }
+
 // POST /api/v1/admin/packages/purchases — admin records a purchase on a driver's
 // behalf (cash / bank / their own MoMo). Body: { driver_id, package_id, mark_paid }.
 // With mark_paid=true (default) credits are granted immediately.

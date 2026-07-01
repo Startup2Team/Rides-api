@@ -83,8 +83,24 @@ func main() {
 		if cfg.JWT.AccessSecret == "local_dev_access_secret_change_before_any_shared_environment_0123456789" {
 			log.Fatal().Msg("FATAL: Default development JWT_ACCESS_SECRET detected in production — refusing to start")
 		}
+		if cfg.JWT.RefreshSecret == "local_dev_refresh_secret_change_before_any_shared_environment_0123456789" {
+			log.Fatal().Msg("FATAL: Default development JWT_REFRESH_SECRET detected in production — refusing to start")
+		}
+		if len(cfg.JWT.AccessSecret) < 32 {
+			log.Fatal().Msg("FATAL: JWT_ACCESS_SECRET is too short (< 32 chars) in production — refusing to start")
+		}
+		if len(cfg.JWT.RefreshSecret) < 32 {
+			log.Fatal().Msg("FATAL: JWT_REFRESH_SECRET is too short (< 32 chars) in production — refusing to start")
+		}
+		if cfg.JWT.AccessExpiryMinutes > 60 {
+			log.Fatal().Msg("FATAL: JWT_ACCESS_EXPIRY_MINUTES is > 60 minutes in production — refusing to start")
+		}
 		if cfg.Payments.Enabled && cfg.MoMo.APIKey == "" {
 			log.Fatal().Msg("FATAL: Payments are enabled in production but MOMO_API_KEY is not set — refusing to start")
+		}
+		hasMomoCreds := cfg.MoMo.APIKey != "" || cfg.MoMo.SubscriptionKey != "" || cfg.MoMo.APIUser != ""
+		if (cfg.Payments.Enabled || hasMomoCreds) && cfg.Payments.WebhookSecret == "" {
+			log.Fatal().Msg("FATAL: Payments are enabled or MoMo credentials are configured in production but PAYMENTS_WEBHOOK_SECRET is not set — refusing to start")
 		}
 	} else {
 		if cfg.Ride.DevSkipGeofence {
@@ -380,7 +396,7 @@ func main() {
 		r.With(mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour)).Post("/register", authH.Register)
 		// verify-otp is brute-forceable (6-digit code) — cap attempts per phone too.
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
-		r.Post("/refresh", authH.Refresh)
+		r.With(mw.IPRateLimit(rdb, "auth_refresh", 20, 15*time.Minute)).Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
 		r.With(mw.Authenticate(cfg, rdb), mw.OTPRateLimit(rdb, "delete_account", 3, 24*time.Hour)).Delete("/account", authH.DeleteAccount)
 	})
@@ -388,12 +404,10 @@ func main() {
 	// MoMo payment callback — public (called by the provider, not the app), so it
 	// is gated by a shared secret instead of a user session. Without this any
 	// caller could POST a fake "SUCCESS" and have credits granted for free.
-	if cfg.Env == "production" && cfg.Payments.WebhookSecret == "" {
-		log.Warn().Msg("MOMO_WEBHOOK_SECRET is unset in production — the MoMo callback is UNAUTHENTICATED; set it before enabling payments")
-	}
+	webhookSecretRequired := cfg.Payments.Enabled || cfg.MoMo.APIKey != "" || cfg.MoMo.SubscriptionKey != "" || cfg.MoMo.APIUser != ""
 	r.With(
 		mw.IPRateLimit(rdb, "momo_webhook", 120, time.Minute),
-		momoWebhookAuth(cfg.Payments.WebhookSecret),
+		momoWebhookAuth(cfg.Payments.WebhookSecret, webhookSecretRequired),
 	).Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
 
 	// ── Customer ──────────────────────────────────────────────────────────────
@@ -890,12 +904,16 @@ func (g momoGateway) QueryStatus(ctx context.Context, provider, externalRef stri
 }
 
 // momoWebhookAuth gates the public MoMo callback with a shared secret. When the
-// secret is empty (dev), it is a pass-through. When set, callers must present a
-// matching X-Webhook-Secret header (constant-time compared) or get 401. This is
-// an interim guard until the provider's signature verification is wired.
-func momoWebhookAuth(secret string) func(http.Handler) http.Handler {
+// secret is empty (dev), it is a pass-through (unless required). When set, callers
+// must present a matching X-Webhook-Secret header (constant-time compared) or get 401.
+// MTN reconcile polling is the primary authoritative settlement path; this webhook is secondary.
+func momoWebhookAuth(secret string, required bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if required && secret == "" {
+				respond.ErrorMsg(w, http.StatusServiceUnavailable, "WEBHOOK_MISCONFIGURED", "momo webhook secret is required but not configured")
+				return
+			}
 			if secret != "" {
 				got := r.Header.Get("X-Webhook-Secret")
 				if subtle.ConstantTimeCompare([]byte(got), []byte(secret)) != 1 {

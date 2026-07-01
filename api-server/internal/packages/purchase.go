@@ -143,9 +143,8 @@ func (r *Repository) createPurchaseRow(ctx context.Context, driverProfileID stri
 	return id, err
 }
 
-// markCreditsGranted flips the crash-recovery flag once the ledger grant lands.
 func (r *Repository) markCreditsGranted(ctx context.Context, id string) error {
-	_, err := r.db.Exec(ctx, `UPDATE package_purchases SET credits_granted=TRUE, updated_at=now() WHERE id=$1`, id)
+	_, err := r.getDB(ctx).Exec(ctx, `UPDATE package_purchases SET credits_granted=TRUE, updated_at=now() WHERE id=$1`, id)
 	return err
 }
 
@@ -261,25 +260,49 @@ func (s *PurchaseService) Confirm(ctx context.Context, paymentRef, providerTxnID
 }
 
 func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID string, success bool) error {
-	p, profileID, vehicleID, vehicleTypeID, rides, bonus, validityDays, status, err := s.repo.lockPurchaseForConfirm(ctx, paymentRef)
+	tx, err := s.repo.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	txCtx := context.WithValue(ctx, txKey{}, tx)
+
+	p, profileID, vehicleID, vehicleTypeID, rides, bonus, validityDays, status, err := s.repo.lockPurchaseForConfirm(txCtx, paymentRef)
 	if err != nil {
 		return err
 	}
 	if status != "PENDING" {
 		return nil // already settled — idempotent
 	}
-	if !success {
-		return s.repo.markFailed(ctx, p)
+	if providerTxnID != "" && success {
+		var exists bool
+		err := s.repo.getDB(txCtx).QueryRow(txCtx, `
+			SELECT EXISTS(
+				SELECT 1 FROM package_purchases
+				WHERE provider_txn_id = $1 AND status = 'PAID' AND payment_ref <> $2
+			)`, providerTxnID, paymentRef).Scan(&exists)
+		if err == nil && exists {
+			return apperrors.New(http.StatusConflict, "DUPLICATE_TRANSACTION", "transaction ID already processed")
+		}
 	}
-	if err := s.repo.markPaid(ctx, p, providerTxnID); err != nil {
+	if !success {
+		if err := s.repo.markFailed(txCtx, p); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if err := s.repo.markPaid(txCtx, p, providerTxnID); err != nil {
 		return err
 	}
 	expiresAt := time.Now().Add(time.Duration(validityDays) * 24 * time.Hour)
-	if err := s.ledger.GrantPurchase(ctx, profileID, vehicleID, vehicleTypeID, p, rides, bonus, expiresAt); err != nil {
+	if err := s.ledger.GrantPurchase(txCtx, profileID, vehicleID, vehicleTypeID, p, rides, bonus, expiresAt); err != nil {
 		return fmt.Errorf("grant after payment: %w", err)
 	}
-	_ = s.repo.markCreditsGranted(ctx, p)
-	return nil
+	if err := s.repo.markCreditsGranted(txCtx, p); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // GetStatus returns a purchase for polling (must belong to the user).
@@ -458,6 +481,7 @@ func providerCode(stored string) string {
 	}
 	return "MTN_MOMO"
 }
+
 type AdminPurchase struct {
 	ID                string     `json:"id"`
 	DriverID          string     `json:"driver_id"`
@@ -620,6 +644,7 @@ func (r *Repository) savePaymentProof(ctx context.Context, userID, purchaseID st
 	}
 	return tag.RowsAffected() > 0, nil
 }
+
 // driverProfileAndActiveVehicle maps an auth user_id to driver_profiles.id.
 // The active vehicle is resolved separately from driver_vehicles by the caller
 // (the live schema has no active_vehicle_id column), so the second return is nil.
@@ -636,7 +661,7 @@ func (r *Repository) driverProfileAndActiveVehicle(ctx context.Context, userID s
 }
 
 func (r *Repository) markPaid(ctx context.Context, id, providerTxnID string) error {
-	_, err := r.db.Exec(ctx, `
+	_, err := r.getDB(ctx).Exec(ctx, `
 		UPDATE package_purchases
 		SET status='PAID', provider_txn_id=COALESCE(NULLIF($2,''), provider_txn_id), paid_at=now(), updated_at=now()
 		WHERE id = $1`, id, providerTxnID)
@@ -644,7 +669,7 @@ func (r *Repository) markPaid(ctx context.Context, id, providerTxnID string) err
 }
 
 func (r *Repository) markFailed(ctx context.Context, id string) error {
-	_, err := r.db.Exec(ctx, `UPDATE package_purchases SET status='FAILED', updated_at=now() WHERE id=$1`, id)
+	_, err := r.getDB(ctx).Exec(ctx, `UPDATE package_purchases SET status='FAILED', updated_at=now() WHERE id=$1`, id)
 	return err
 }
 
@@ -697,12 +722,13 @@ func (r *Repository) listPendingMoMoPurchases(ctx context.Context, limit int) ([
 // successful payment. Returns the purchase id, driver profile, vehicle, vehicle
 // type, granted rides/bonus, version validity, and current status.
 func (r *Repository) lockPurchaseForConfirm(ctx context.Context, paymentRef string) (id, profileID string, vehicleID *string, vehicleTypeID string, rides, bonus, validityDays int, status string, err error) {
-	err = r.db.QueryRow(ctx, `
+	err = r.getDB(ctx).QueryRow(ctx, `
 		SELECT pp.id, pp.driver_id, pp.vehicle_id, pp.vehicle_type_id,
 		       pp.rides_granted, pp.bonus_rides_granted, COALESCE(v.validity_days, 30), pp.status
 		FROM package_purchases pp
 		LEFT JOIN ride_package_versions v ON v.id = pp.package_version_id
-		WHERE pp.payment_ref = $1`, paymentRef).Scan(
+		WHERE pp.payment_ref = $1
+		FOR UPDATE OF pp`, paymentRef).Scan(
 		&id, &profileID, &vehicleID, &vehicleTypeID, &rides, &bonus, &validityDays, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = apperrors.ErrNotFound

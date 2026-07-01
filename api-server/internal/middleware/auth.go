@@ -66,6 +66,8 @@ func Authenticate(cfg *config.Config, rdb *goredis.Client) func(http.Handler) ht
 			if header := r.Header.Get("Authorization"); header != "" && strings.HasPrefix(header, "Bearer ") {
 				tokenStr = strings.TrimPrefix(header, "Bearer ")
 			} else if q := r.URL.Query().Get("token"); q != "" {
+				// SECURITY TODO: Implement a short-lived, single-use ticket exchange mechanism for WS
+				// authentication instead of exposing the long-lived JWT in URL query parameters.
 				// Mobile WebSocket clients cannot set Authorization headers; they pass JWT via query.
 				tokenStr = q
 			}
@@ -98,13 +100,15 @@ func Authenticate(cfg *config.Config, rdb *goredis.Client) func(http.Handler) ht
 
 			// Check Redis session liveness — catches revoked/logged-out tokens.
 			jti := claims.ID
-			if jti != "" {
-				key := rkeys.K.Session(claims.UserID, jti)
-				val, redisErr := rdb.Get(r.Context(), key).Result()
-				if redisErr != nil || val == "revoked" {
-					respond.Error(w, apperrors.ErrTokenRevoked)
-					return
-				}
+			if jti == "" {
+				respond.Error(w, apperrors.ErrTokenInvalid)
+				return
+			}
+			key := rkeys.K.Session(claims.UserID, jti)
+			val, redisErr := rdb.Get(r.Context(), key).Result()
+			if redisErr != nil || val != "valid" {
+				respond.Error(w, apperrors.ErrTokenRevoked)
+				return
 			}
 
 			ctx := context.WithValue(r.Context(), ContextKeyClaims, claims)
