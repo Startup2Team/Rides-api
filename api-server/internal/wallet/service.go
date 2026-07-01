@@ -60,23 +60,7 @@ func (s *Service) Withdraw(ctx context.Context, userID string, amountRWF int64, 
 	// SECURITY: a withdrawal must trigger a real MoMo disburse to the user's
 	// number. Until that is wired, withdraw is disabled so balance can't be moved
 	// out (and so the top-up→withdraw cash-out path can't exist).
-	if !s.paymentsEnabled {
-		return nil, errPaymentsDisabled
-	}
-	if err := validateAmount(amountRWF, maxWithdrawRWF); err != nil {
-		return nil, err
-	}
-	desc := fmt.Sprintf("Withdrawal to %s", phoneNumber)
-	t, err := s.repo.Withdraw(ctx, userID, amountRWF, phoneNumber, "", desc)
-	if err != nil {
-		return nil, err
-	}
-	s.log.Info().
-		Str("user_id", userID).
-		Int64("amount_rwf", amountRWF).
-		Str("phone", phoneNumber).
-		Msg("wallet: withdrawal completed")
-	return t, nil
+	return nil, errPaymentsDisabled
 }
 
 // DeductForPackage deducts a package price from the wallet.
