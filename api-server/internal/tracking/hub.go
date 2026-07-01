@@ -1,8 +1,12 @@
 package tracking
 
 import (
+	"context"
+	"encoding/json"
+	"strings"
 	"sync"
 
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 )
 
@@ -34,23 +38,82 @@ func (c *Client) Done() {
 	safeClose(c.done, &c.closeOnce)
 }
 
-// Hub manages all active WebSocket connections.
-// Thread-safe — all access goes through channels or locks.
+// Hub manages all active WebSocket connections and propagates broadcasts across
+// horizontal API instances using Redis Pub/Sub.
 type Hub struct {
-	// drivers: userID → *Client
-	drivers map[string]*Client
-	// customers: rideID → *Client (one customer per active ride)
+	drivers   map[string]*Client
 	customers map[string]*Client
-
-	mu  sync.RWMutex
-	log zerolog.Logger
+	rdb       goredis.UniversalClient
+	mu        sync.RWMutex
+	log       zerolog.Logger
+	pubsub    *goredis.PubSub
 }
 
-func NewHub(log zerolog.Logger) *Hub {
-	return &Hub{
+func NewHub(rdb goredis.UniversalClient, log zerolog.Logger) *Hub {
+	h := &Hub{
 		drivers:   make(map[string]*Client),
 		customers: make(map[string]*Client),
+		rdb:       rdb,
 		log:       log,
+	}
+	h.startPubSub()
+	return h
+}
+
+func (h *Hub) startPubSub() {
+	if h.rdb == nil {
+		h.log.Warn().Msg("ws pubsub: Redis client is nil, running in local-only mode")
+		return
+	}
+
+	go func() {
+		ctx := context.Background()
+		h.pubsub = h.rdb.PSubscribe(ctx, "ws:driver:*", "ws:ride:*")
+		ch := h.pubsub.Channel()
+		for msg := range ch {
+			h.handlePubSubMessage(msg.Channel, msg.Payload)
+		}
+	}()
+}
+
+func (h *Hub) Close() error {
+	if h.pubsub != nil {
+		return h.pubsub.Close()
+	}
+	return nil
+}
+
+func (h *Hub) handlePubSubMessage(channel, payload string) {
+	var msg Message
+	if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+		h.log.Error().Err(err).Msg("ws pubsub: failed to unmarshal payload")
+		return
+	}
+
+	if strings.HasPrefix(channel, "ws:driver:") {
+		driverUserID := strings.TrimPrefix(channel, "ws:driver:")
+		h.mu.RLock()
+		client, ok := h.drivers[driverUserID]
+		h.mu.RUnlock()
+		if ok {
+			select {
+			case client.Send <- msg:
+			default:
+				h.log.Warn().Str("driver_id", driverUserID).Msg("ws: driver send buffer full (pubsub)")
+			}
+		}
+	} else if strings.HasPrefix(channel, "ws:ride:") {
+		rideID := strings.TrimPrefix(channel, "ws:ride:")
+		h.mu.RLock()
+		client, ok := h.customers[rideID]
+		h.mu.RUnlock()
+		if ok {
+			select {
+			case client.Send <- msg:
+			default:
+				h.log.Warn().Str("ride_id", rideID).Msg("ws: customer send buffer full (pubsub)")
+			}
+		}
 	}
 }
 
@@ -91,40 +154,67 @@ func (h *Hub) UnregisterCustomer(rideID string) {
 	delete(h.customers, rideID)
 }
 
-// SendToDriver pushes a message to a specific driver's WebSocket.
+// SendToDriver pushes a message to the driver (either locally or globally via Redis).
 func (h *Hub) SendToDriver(driverUserID string, msg Message) {
-	h.mu.RLock()
-	client, ok := h.drivers[driverUserID]
-	h.mu.RUnlock()
-	if !ok {
+	if h.rdb == nil {
+		h.mu.RLock()
+		client, ok := h.drivers[driverUserID]
+		h.mu.RUnlock()
+		if ok {
+			select {
+			case client.Send <- msg:
+			default:
+				h.log.Warn().Str("driver_id", driverUserID).Msg("ws: driver send buffer full")
+			}
+		}
 		return
 	}
-	select {
-	case client.Send <- msg:
-	default:
-		h.log.Warn().Str("driver_id", driverUserID).Msg("ws: driver send buffer full")
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		h.log.Error().Err(err).Msg("ws pubsub: failed to marshal driver message")
+		return
 	}
+	ctx := context.Background()
+	h.rdb.Publish(ctx, "ws:driver:"+driverUserID, string(payload))
 }
 
-// SendToCustomer pushes a message to the customer tracking a specific ride.
+// SendToCustomer pushes a message to the customer (either locally or globally via Redis).
 func (h *Hub) SendToCustomer(rideID string, msg Message) {
-	h.mu.RLock()
-	client, ok := h.customers[rideID]
-	h.mu.RUnlock()
-	if !ok {
+	if h.rdb == nil {
+		h.mu.RLock()
+		client, ok := h.customers[rideID]
+		h.mu.RUnlock()
+		if ok {
+			select {
+			case client.Send <- msg:
+			default:
+				h.log.Warn().Str("ride_id", rideID).Msg("ws: customer send buffer full")
+			}
+		}
 		return
 	}
-	select {
-	case client.Send <- msg:
-	default:
-		h.log.Warn().Str("ride_id", rideID).Msg("ws: customer send buffer full")
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		h.log.Error().Err(err).Msg("ws pubsub: failed to marshal customer message")
+		return
 	}
+	ctx := context.Background()
+	h.rdb.Publish(ctx, "ws:ride:"+rideID, string(payload))
 }
 
-// IsDriverConnected returns true if the driver has an active WebSocket.
+// IsDriverConnected returns true if the driver has an active WebSocket locally.
 func (h *Hub) IsDriverConnected(driverUserID string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	_, ok := h.drivers[driverUserID]
 	return ok
+}
+
+// ActiveConnectionsCount returns the current count of local WebSocket connections.
+func (h *Hub) ActiveConnectionsCount() (drivers, customers int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.drivers), len(h.customers)
 }

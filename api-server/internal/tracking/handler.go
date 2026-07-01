@@ -36,13 +36,13 @@ const (
 type Handler struct {
 	hub       *Hub
 	driverSvc *driver.Service
-	redis     *goredis.Client
+	redis     goredis.UniversalClient
 	cfg       *config.Config
 	log       zerolog.Logger
 	upgrader  websocket.Upgrader
 }
 
-func NewHandler(hub *Hub, driverSvc *driver.Service, rdb *goredis.Client, cfg *config.Config, log zerolog.Logger) *Handler {
+func NewHandler(hub *Hub, driverSvc *driver.Service, rdb goredis.UniversalClient, cfg *config.Config, log zerolog.Logger) *Handler {
 	upg := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 4096,
