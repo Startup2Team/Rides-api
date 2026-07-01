@@ -178,7 +178,7 @@ func (m *mockRepo) ListAuditLog(ctx context.Context, actor, action, targetType, 
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
-func newTestRedis(t *testing.T) *goredis.Client {
+func newTestRedis(t *testing.T) goredis.UniversalClient {
 	t.Helper()
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
@@ -201,11 +201,11 @@ func testCfg() *config.Config {
 	}
 }
 
-func newTestService(repo TeamRepo, rdb *goredis.Client) *Service {
+func newTestService(repo TeamRepo, rdb goredis.UniversalClient) *Service {
 	return &Service{repo: repo, cfg: testCfg(), rdb: rdb}
 }
 
-func newTestServiceProduction(repo TeamRepo, rdb *goredis.Client) *Service {
+func newTestServiceProduction(repo TeamRepo, rdb goredis.UniversalClient) *Service {
 	cfg := testCfg()
 	cfg.Env = "production"
 	return &Service{repo: repo, cfg: cfg, rdb: rdb}
