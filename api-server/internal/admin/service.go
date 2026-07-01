@@ -307,24 +307,21 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 func (s *Service) DriverOverview(ctx context.Context, vehicleType string) (map[string]interface{}, error) {
 	var total, online, onTrip, pending, suspended int
 
-	vt := ""
+	// Parameterized optional filter: NULL means "all vehicle types". This keeps
+	// the admin-supplied vehicleType out of the SQL string entirely.
+	var vtFilter *string
 	if vehicleType != "" {
-		vt = " AND transport_type = '" + vehicleType + "'"
+		vtFilter = &vehicleType
 	}
 
-	vtAlias := ""
-	if vehicleType != "" {
-		vtAlias = " AND dp.transport_type = '" + vehicleType + "'"
-	}
-
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE 1=1`+vt).Scan(&total)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE is_online=TRUE AND approval_status IN ('APPROVED','ACTIVE')`+vt).Scan(&online)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='PENDING_REVIEW'`+vt).Scan(&pending)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='SUSPENDED'`+vt).Scan(&suspended)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE ($1::text IS NULL OR transport_type = $1)`, vtFilter).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE is_online=TRUE AND approval_status IN ('APPROVED','ACTIVE') AND ($1::text IS NULL OR transport_type = $1)`, vtFilter).Scan(&online)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='PENDING_REVIEW' AND ($1::text IS NULL OR transport_type = $1)`, vtFilter).Scan(&pending)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM driver_profiles WHERE approval_status='SUSPENDED' AND ($1::text IS NULL OR transport_type = $1)`, vtFilter).Scan(&suspended)
 	_ = s.db.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT dp.id) FROM driver_profiles dp
 		JOIN rides r ON r.driver_id = dp.id
-		WHERE r.status = 'IN_PROGRESS'`+vtAlias).Scan(&onTrip)
+		WHERE r.status = 'IN_PROGRESS' AND ($1::text IS NULL OR dp.transport_type = $1)`, vtFilter).Scan(&onTrip)
 
 	return map[string]interface{}{
 		"total": total, "online": online,
