@@ -362,7 +362,14 @@ func main() {
 	// API docs — gated: 404 when disabled (default in prod), optional Basic auth
 	// so the API surface isn't world-readable. Set SWAGGER_ENABLED / SWAGGER_BASIC_AUTH.
 	swaggerGate := mw.SwaggerGate(cfg.Security.SwaggerEnabled, cfg.Security.SwaggerBasicAuth)
+	// Swagger UI needs to load its CSS/JS (from unpkg) and run scripts, which the
+	// API-wide strict CSP (default-src 'none'; sandbox) forbids. Override the CSP
+	// for just this page so the docs render, while every other route stays locked.
+	swaggerCSP := "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; " +
+		"style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https:; " +
+		"font-src 'self' data: https://unpkg.com; connect-src 'self'"
 	r.With(swaggerGate).Get("/swagger", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", swaggerCSP)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(swaggerHTML))
 	})
