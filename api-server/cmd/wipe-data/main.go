@@ -85,7 +85,7 @@ func main() {
 		return
 	}
 
-	rdb, err := redis.New(ctx, redisURL)
+	rdb, err := redis.New(ctx, redisURL, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "redis connect: %v\n", err)
 		os.Exit(1)
@@ -108,7 +108,7 @@ func main() {
 	fmt.Println("Redis: driver/ride cache keys cleared")
 }
 
-func deleteByPattern(ctx context.Context, rdb *goredis.Client, pattern string) error {
+func deleteByPattern(ctx context.Context, rdb goredis.UniversalClient, pattern string) error {
 	var cursor uint64
 	for {
 		keys, next, err := rdb.Scan(ctx, cursor, pattern, 200).Result()

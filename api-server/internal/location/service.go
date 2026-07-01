@@ -59,12 +59,12 @@ type SavedLocation struct {
 // Service handles route cache, landmarks, saved locations, suggestions, mode switching.
 type Service struct {
 	db    *pgxpool.Pool
-	redis *goredis.Client
+	redis goredis.UniversalClient
 	cfg   *config.Config
 	log   zerolog.Logger
 }
 
-func NewService(db *pgxpool.Pool, rdb *goredis.Client, cfg *config.Config, log zerolog.Logger) *Service {
+func NewService(db *pgxpool.Pool, rdb goredis.UniversalClient, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{db: db, redis: rdb, cfg: cfg, log: log}
 }
 

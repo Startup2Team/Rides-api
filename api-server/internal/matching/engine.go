@@ -48,7 +48,7 @@ type candidate struct {
 type Engine struct {
 	rideRepo   *ride.Repository
 	driverRepo *driver.Repository
-	redis      *goredis.Client
+	redis      goredis.UniversalClient
 	notify     *notification.Service
 	analytics  *analytics.Service
 	hub        *tracking.Hub
@@ -63,7 +63,7 @@ type Engine struct {
 func NewEngine(
 	rideRepo *ride.Repository,
 	driverRepo *driver.Repository,
-	rdb *goredis.Client,
+	rdb goredis.UniversalClient,
 	notify *notification.Service,
 	ana *analytics.Service,
 	hub *tracking.Hub,

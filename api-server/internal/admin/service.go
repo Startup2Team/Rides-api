@@ -41,7 +41,7 @@ type Service struct {
 	db       DBTX
 	log      zerolog.Logger
 	packages PackagesService
-	rdb      *goredis.Client
+	rdb      goredis.UniversalClient
 	bonus    BonusService
 }
 
@@ -54,7 +54,7 @@ func (s *Service) SetBonusService(svc BonusService)       { s.bonus = svc }
 
 // SetRedis wires the Redis client used by account-assist operations
 // (clearing OTP lockouts, GPS anomaly counters).
-func (s *Service) SetRedis(rdb *goredis.Client) {
+func (s *Service) SetRedis(rdb goredis.UniversalClient) {
 	s.rdb = rdb
 }
 
