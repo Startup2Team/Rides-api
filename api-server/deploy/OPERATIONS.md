@@ -198,10 +198,31 @@ Rebuild/restart the app. Live tracking (WebSockets) also flows through `api.ride
 
 ---
 
-## 13. Quick health checks
+## 13. Prometheus Metrics & Telemetry
+
+The server exposes a Prometheus-compatible plain-text metrics endpoint at `GET /metrics`. It does not require authentication and is bypassed by global rate limiters to allow reliable scraping.
+
+To verify metrics:
+```bash
+curl https://api.rides.rw/metrics
+```
+
+Exposed metrics:
+- `http_requests_total`: Cumulative count of all HTTP requests.
+- `http_request_duration_ms_total{route="..."}`: Total request latency per route in milliseconds.
+- `http_request_count_total{route="..."}`: Hit count per route.
+- `ws_active_connections{role="..."}`: Live WebSocket connection count for drivers and customers.
+- `db_pool_*` / `db_replica_pool_*`: Max, active, idle, and total connection telemetry for PostgreSQL primary and read-replica pools.
+- `redis_pool_*`: Hits, misses, timeouts, and connection counts (only printed when cluster mode is disabled).
+- `mtn_reconcile_queue_depth`: Number of pending Mobile Money package purchases waiting for reconciliation.
+
+---
+
+## 14. Quick health checks
 
 ```bash
 curl https://api.rides.rw/health                 # {"data":{"status":"ok"}}
+curl https://api.rides.rw/metrics                # Prometheus metrics output
 curl -I https://admin.rides.rw/admin/login       # 200
 docker compose -f docker-compose.prod.yml ps     # all "Up"/"healthy"
 df -h / ; free -h                                # disk + memory
