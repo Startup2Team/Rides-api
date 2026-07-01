@@ -34,6 +34,15 @@ type LocationUpdate struct {
 	Heading  *float64
 }
 
+// BatchLocationUpdate is a coordinate update within a batch send.
+type BatchLocationUpdate struct {
+	Lat       float64  `json:"lat"       validate:"required,min=-90,max=90"`
+	Lng       float64  `json:"lng"       validate:"required,min=-180,max=180"`
+	SpeedKMH  *float64 `json:"speed_kmh"`
+	Heading   *float64 `json:"heading"`
+	Timestamp int64    `json:"timestamp"`
+}
+
 // ApplyInput holds all fields for a driver application.
 type ApplyInput struct {
 	UserID                  string
@@ -63,14 +72,14 @@ type CreditChecker interface {
 // Service handles driver business logic.
 type Service struct {
 	repo          *Repository
-	redis         *goredis.Client
+	redis         goredis.UniversalClient
 	analytics     *analytics.Service
 	cfg           *config.Config
 	log           zerolog.Logger
 	creditChecker CreditChecker
 }
 
-func NewService(repo *Repository, rdb *goredis.Client, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
+func NewService(repo *Repository, rdb goredis.UniversalClient, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{repo: repo, redis: rdb, analytics: ana, cfg: cfg, log: log}
 }
 
@@ -301,7 +310,7 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 	return s.repo.UpdateOnlineStatus(ctx, userID, isOnline)
 }
 
-// UpdateLocation processes a GPS update: plausibility check, Redis write, DB write.
+// UpdateLocation processes a GPS update: plausibility check, Redis write, DB write (async).
 func (s *Service) UpdateLocation(ctx context.Context, userID string, update LocationUpdate) error {
 	newPoint := geo.Point{Lat: update.Lat, Lng: update.Lng}
 	if err := newPoint.Validate(); err != nil {
@@ -317,26 +326,6 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		return apperrors.ErrDriverNotActive
 	}
 
-	if anomaly, speed := s.checkGPSPlausibility(ctx, profile.ID, newPoint); anomaly {
-		_ = s.repo.LogGPSAnomaly(ctx, profile.ID, speed, nil, &newPoint)
-
-		anomalyKey := rkeys.K.GPSAnomalyCount(profile.ID)
-		count, _ := s.redis.Incr(ctx, anomalyKey).Result()
-		s.redis.Expire(ctx, anomalyKey, 8*time.Hour)
-
-		s.analytics.Publish(ctx, "gps.anomaly_detected", "DRIVER", userID, nil, map[string]interface{}{
-			"driver_id":          profile.ID,
-			"computed_speed_kmh": speed,
-		})
-
-		if count >= 3 {
-			_ = s.repo.SetApprovalStatus(ctx, profile.ID, "SUSPENDED", "", nil)
-			s.log.Warn().Str("driver_id", profile.ID).Msg("driver auto-suspended: 3 GPS anomalies")
-		}
-
-		return apperrors.ErrGPSPlausibility
-	}
-
 	locJSON, _ := json.Marshal(map[string]interface{}{
 		"lat":        update.Lat,
 		"lng":        update.Lng,
@@ -344,30 +333,118 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		"heading":    update.Heading,
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
-	// 120s TTL: clients now throttle pings (idle drivers send a heartbeat only
-	// every ~60s), so a 30s TTL would let the location key expire between
-	// heartbeats. 120s leaves headroom for a missed beat before the geofence
-	// has to fall back to the PostGIS location.
 	s.redis.Set(ctx, rkeys.K.DriverLocation(profile.ID), locJSON, 120*time.Second)
 	s.redis.LPush(ctx, rkeys.K.DriverLocationHistory(profile.ID), locJSON)
 	s.redis.LTrim(ctx, rkeys.K.DriverLocationHistory(profile.ID), 0, 9)
 
-	// Re-assert the driver's presence in the Redis GEO index on EVERY ping.
-	//
-	// We used to skip this when movement was < 15m (a write-saving "noise
-	// filter"), but that left a parked-yet-online driver invisible: if their
-	// geo entry was ever dropped (trip handoff, Redis restart/eviction, manual
-	// flush) while stationary, no subsequent ping would re-add them and they
-	// became unmatchable despite being online. GeoAdd is O(log N) and
-	// idempotent for an unchanged position, so always re-adding is the correct
-	// trade-off — an online driver who is pinging is always discoverable.
 	s.redis.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
 		Name:      profile.ID,
 		Longitude: update.Lng,
 		Latitude:  update.Lat,
 	})
 
-	_ = s.repo.UpsertLocation(ctx, profile.ID, newPoint, update.SpeedKMH, update.Heading)
+	// Async telemetry writes
+	go func() {
+		bgCtx := context.Background()
+		if anomaly, speed := s.checkGPSPlausibility(bgCtx, profile.ID, newPoint); anomaly {
+			_ = s.repo.LogGPSAnomaly(bgCtx, profile.ID, speed, nil, &newPoint)
+
+			anomalyKey := rkeys.K.GPSAnomalyCount(profile.ID)
+			count, _ := s.redis.Incr(bgCtx, anomalyKey).Result()
+			s.redis.Expire(bgCtx, anomalyKey, 8*time.Hour)
+
+			s.analytics.Publish(bgCtx, "gps.anomaly_detected", "DRIVER", userID, nil, map[string]interface{}{
+				"driver_id":          profile.ID,
+				"computed_speed_kmh": speed,
+			})
+
+			if count >= 3 {
+				_ = s.repo.SetApprovalStatus(bgCtx, profile.ID, "SUSPENDED", "", nil)
+				s.log.Warn().Str("driver_id", profile.ID).Msg("driver auto-suspended: 3 GPS anomalies")
+			}
+			return
+		}
+
+		_ = s.repo.UpsertLocation(bgCtx, profile.ID, newPoint, update.SpeedKMH, update.Heading)
+	}()
+
+	return nil
+}
+
+// UpdateLocationBatch processes a batch of GPS coordinates from the driver asynchronously.
+func (s *Service) UpdateLocationBatch(ctx context.Context, userID string, batch []BatchLocationUpdate) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	profile, err := s.repo.FindProfileByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if !profile.IsOnline || profile.ApprovalStatus != "APPROVED" {
+		return apperrors.ErrDriverNotActive
+	}
+
+	// Use the last coordinate in the batch as the most recent live location
+	latest := batch[len(batch)-1]
+	newPoint := geo.Point{Lat: latest.Lat, Lng: latest.Lng}
+	if err := newPoint.Validate(); err != nil {
+		return err
+	}
+
+	locJSON, _ := json.Marshal(map[string]interface{}{
+		"lat":        latest.Lat,
+		"lng":        latest.Lng,
+		"speed_kmh":  latest.SpeedKMH,
+		"heading":    latest.Heading,
+		"updated_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	s.redis.Set(ctx, rkeys.K.DriverLocation(profile.ID), locJSON, 120*time.Second)
+	s.redis.LPush(ctx, rkeys.K.DriverLocationHistory(profile.ID), locJSON)
+	s.redis.LTrim(ctx, rkeys.K.DriverLocationHistory(profile.ID), 0, 9)
+
+	s.redis.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
+		Name:      profile.ID,
+		Longitude: latest.Lng,
+		Latitude:  latest.Lat,
+	})
+
+	// Async telemetry batch writes
+	go func() {
+		bgCtx := context.Background()
+		for _, update := range batch {
+			pt := geo.Point{Lat: update.Lat, Lng: update.Lng}
+			if err := pt.Validate(); err != nil {
+				continue
+			}
+
+			// Run GPS plausibility check on the latest update in the batch only
+			if update.Lat == latest.Lat && update.Lng == latest.Lng {
+				if anomaly, speed := s.checkGPSPlausibility(bgCtx, profile.ID, pt); anomaly {
+					_ = s.repo.LogGPSAnomaly(bgCtx, profile.ID, speed, nil, &pt)
+
+					anomalyKey := rkeys.K.GPSAnomalyCount(profile.ID)
+					count, _ := s.redis.Incr(bgCtx, anomalyKey).Result()
+					s.redis.Expire(bgCtx, anomalyKey, 8*time.Hour)
+
+					s.analytics.Publish(bgCtx, "gps.anomaly_detected", "DRIVER", userID, nil, map[string]interface{}{
+						"driver_id":          profile.ID,
+						"computed_speed_kmh": speed,
+					})
+
+					if count >= 3 {
+						_ = s.repo.SetApprovalStatus(bgCtx, profile.ID, "SUSPENDED", "", nil)
+						s.log.Warn().Str("driver_id", profile.ID).Msg("driver auto-suspended: 3 GPS anomalies")
+					}
+					continue
+				}
+			}
+
+			_ = s.repo.UpsertLocation(bgCtx, profile.ID, pt, update.SpeedKMH, update.Heading)
+		}
+	}()
+
 	return nil
 }
 

@@ -231,6 +231,31 @@ func (h *Handler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+// POST /api/v1/driver/locations
+func (h *Handler) UpdateLocationsBatch(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+
+	var body []BatchLocationUpdate
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+
+	for _, update := range body {
+		if err := validate.Struct(update); err != nil {
+			respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
+	}
+
+	if err := h.svc.UpdateLocationBatch(r.Context(), claims.UserID, body); err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	respond.NoContent(w)
+}
+
 // POST /api/v1/driver/documents
 // Accepts a document_type from the onboarding KYC set and a stored file_url
 // (produced by the /uploads flow). Repeated uploads of the same type replace
