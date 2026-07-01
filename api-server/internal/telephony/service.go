@@ -32,10 +32,94 @@ func New(cfg *config.Config, log zerolog.Logger) *Service {
 }
 
 const (
-	atSMSEndpoint      = "https://api.africastalking.com/version1/messaging"
-	atWhatsAppEndpoint = "https://content.africastalking.com/version1/messaging/whatsapp"
-	pindoSMSEndpoint   = "https://api.pindo.io/v1/sms/"
+	atSMSEndpoint         = "https://api.africastalking.com/version1/messaging"
+	atWhatsAppEndpoint    = "https://content.africastalking.com/version1/messaging/whatsapp"
+	pindoSMSEndpoint      = "https://api.pindo.io/v1/sms/"
+	pindoVerifyEndpoint   = "https://api.pindo.io/v1/sms/verify"
+	pindoVerifyCheckPoint = "https://api.pindo.io/v1/sms/verify/check"
 )
+
+// StartVerify asks Pindo to generate a PIN, deliver it to the phone (MTN or
+// Airtel — Pindo routes by number), and returns the request_id used to check it
+// later. Pindo owns the PIN lifecycle. Billed only on a successful check.
+func (s *Service) StartVerify(ctx context.Context, phone string) (requestID string, err error) {
+	if s.cfg.Pindo.APIToken == "" {
+		return "", fmt.Errorf("telephony: pindo token not configured")
+	}
+	brand := s.cfg.Pindo.Brand
+	if brand == "" {
+		brand = "Rides"
+	}
+	raw, _ := json.Marshal(map[string]string{"brand": brand, "number": phone})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pindoVerifyEndpoint, bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Pindo.APIToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("telephony: pindo verify start: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("telephony: pindo verify start %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var out struct {
+		RequestID string `json:"request_id"`
+		Message   string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("telephony: pindo verify decode: %w", err)
+	}
+	if out.RequestID == "" {
+		return "", fmt.Errorf("telephony: pindo verify: no request_id (%s)", strings.TrimSpace(string(body)))
+	}
+	return out.RequestID, nil
+}
+
+// CheckVerify validates the code the user entered against a prior StartVerify.
+// Returns ok=false for a wrong/expired code (not an error), err only on transport
+// or server failures.
+func (s *Service) CheckVerify(ctx context.Context, requestID, code string) (ok bool, err error) {
+	if s.cfg.Pindo.APIToken == "" {
+		return false, fmt.Errorf("telephony: pindo token not configured")
+	}
+	raw, _ := json.Marshal(map[string]string{"code": code, "request_id": strings.TrimSpace(requestID)})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pindoVerifyCheckPoint, bytes.NewReader(raw))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Pindo.APIToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("telephony: pindo verify check: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	// 5xx = server problem (surface as error). 4xx = wrong/expired code (ok=false).
+	if resp.StatusCode >= 500 {
+		return false, fmt.Errorf("telephony: pindo verify check %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if resp.StatusCode >= 400 {
+		return false, nil
+	}
+	var out struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(body, &out)
+	return strings.EqualFold(strings.TrimSpace(out.Message), "success"), nil
+}
 
 // SendOTP sends a 6-digit OTP to the given E.164 phone number, via whichever SMS
 // provider is configured (SMS_PROVIDER: "pindo" or "africastalking").
