@@ -15,19 +15,19 @@ const (
 	consumerGroup = "analytics-consumer"
 	consumerName  = "analytics-worker-1"
 	blockTimeout  = 5 * time.Second
-	batchSize     = 100
 )
 
 // Consumer reads from the Redis Stream and can forward events to external
 // data pipelines (BigQuery, Kafka, etc.). For v1 it just logs them —
 // the analytics_events table is already written synchronously.
 type Consumer struct {
-	redis *goredis.Client
-	log   zerolog.Logger
+	redis     goredis.UniversalClient
+	log       zerolog.Logger
+	batchSize int
 }
 
-func NewConsumer(rdb *goredis.Client, log zerolog.Logger) *Consumer {
-	return &Consumer{redis: rdb, log: log}
+func NewConsumer(rdb goredis.UniversalClient, batchSize int, log zerolog.Logger) *Consumer {
+	return &Consumer{redis: rdb, batchSize: batchSize, log: log}
 }
 
 // Run starts the blocking Redis Stream consumer loop.
@@ -56,7 +56,7 @@ func (c *Consumer) Run(ctx context.Context) {
 			Group:    consumerGroup,
 			Consumer: consumerName,
 			Streams:  []string{stream, ">"},
-			Count:    batchSize,
+			Count:    int64(c.batchSize),
 			Block:    blockTimeout,
 		}).Result()
 
