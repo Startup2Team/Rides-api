@@ -21,18 +21,22 @@ type Config struct {
 	Pindo    PindoConfig
 	// SMSProvider selects the SMS gateway: "africastalking" (default) or "pindo".
 	SMSProvider string
-	Firebase    FirebaseConfig
-	GMaps       GoogleMapsConfig
-	MoMo        MoMoConfig
-	Storage     StorageConfig
-	Matching    MatchingConfig
-	Ride        RideConfig
-	GPS         GPSConfig
-	Driver      DriverConfig
-	Customer    CustomerConfig
-	Penalty     PenaltyConfig
-	Payments    PaymentsConfig
-	Security    SecurityConfig
+	// OTPMode selects how phone OTP is done: "self_sms" (we generate+verify the
+	// code, delivered via SMSProvider) or "pindo_verify" (Pindo's Verify API owns
+	// the PIN lifecycle — cheaper, ~$0.002 per successful verification).
+	OTPMode  string
+	Firebase FirebaseConfig
+	GMaps    GoogleMapsConfig
+	MoMo     MoMoConfig
+	Storage  StorageConfig
+	Matching MatchingConfig
+	Ride     RideConfig
+	GPS      GPSConfig
+	Driver   DriverConfig
+	Customer CustomerConfig
+	Penalty  PenaltyConfig
+	Payments PaymentsConfig
+	Security SecurityConfig
 }
 
 // SecurityConfig holds API-protection tunables.
@@ -101,6 +105,7 @@ type ATConfig struct {
 type PindoConfig struct {
 	APIToken string // Bearer token from the Pindo dashboard
 	Sender   string // approved Sender ID (e.g. "Rides")
+	Brand    string // brand name shown in Verify (2FA) messages — PINDO_VERIFY_BRAND
 }
 
 type FirebaseConfig struct {
@@ -228,6 +233,8 @@ func Load() (*Config, error) {
 	cfg.SMSProvider = getEnv("SMS_PROVIDER", "africastalking")
 	cfg.Pindo.APIToken = getEnv("PINDO_API_TOKEN", "")
 	cfg.Pindo.Sender = getEnv("PINDO_SENDER", "")
+	cfg.Pindo.Brand = getEnv("PINDO_VERIFY_BRAND", "Rides")
+	cfg.OTPMode = getEnv("OTP_MODE", "self_sms")
 
 	cfg.Firebase.ServiceAccountPath = getEnv("FIREBASE_SERVICE_ACCOUNT_PATH", "./firebase-service-account.json")
 
