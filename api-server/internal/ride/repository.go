@@ -49,6 +49,7 @@ type Ride struct {
 	CancellationFeeRWF    float64
 	FinalFareRWF          *float64
 	PickupExpired         bool
+	RideVersion           int
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 }
@@ -87,6 +88,7 @@ type RideResponse struct {
 	StartedAt             *time.Time `json:"started_at"`
 	CompletedAt           *time.Time `json:"completed_at"`
 	PickupExpired         bool       `json:"pickup_expired"`
+	RideVersion           int        `json:"ride_version"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
@@ -146,6 +148,7 @@ func (r *Ride) ToResponse() *RideResponse {
 		StartedAt:             r.StartedAt,
 		CompletedAt:           r.CompletedAt,
 		PickupExpired:         r.PickupExpired,
+		RideVersion:           r.RideVersion,
 		CreatedAt:             r.CreatedAt,
 		UpdatedAt:             r.UpdatedAt,
 	}
@@ -192,6 +195,7 @@ const rideSelectCols = `
 	COALESCE(waiting_seconds, 0), COALESCE(waiting_charge_rwf, 0.0),
 	COALESCE(cancellation_fee_rwf, 0.0), final_fare_rwf,
 	COALESCE(pickup_expired, FALSE),
+	COALESCE(ride_version, 1),
 	created_at, updated_at
 `
 
@@ -214,6 +218,7 @@ const rideSelectColsWithCustomer = `
 	COALESCE(r.waiting_seconds, 0), COALESCE(r.waiting_charge_rwf, 0.0),
 	COALESCE(r.cancellation_fee_rwf, 0.0), r.final_fare_rwf,
 	COALESCE(r.pickup_expired, FALSE),
+	COALESCE(r.ride_version, 1),
 	r.created_at, r.updated_at,
 	COALESCE(u.full_name, 'Customer')  AS customer_name,
 	COALESCE(u.phone_number, '')       AS customer_phone
@@ -238,6 +243,7 @@ const rideSelectColsWithDriver = `
 	COALESCE(r.waiting_seconds, 0), COALESCE(r.waiting_charge_rwf, 0.0),
 	COALESCE(r.cancellation_fee_rwf, 0.0), r.final_fare_rwf,
 	COALESCE(r.pickup_expired, FALSE),
+	COALESCE(r.ride_version, 1),
 	r.created_at, r.updated_at,
 	COALESCE(du.full_name, '')         AS driver_name,
 	COALESCE(du.phone_number, '')      AS driver_phone,
@@ -258,7 +264,7 @@ func scanRideWithDriver(row pgx.Row) (*Ride, error) {
 		&r.DriverArrivedAt, &r.StartedAt, &r.CompletedAt,
 		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
 		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
-		&r.PickupExpired, &r.CreatedAt, &r.UpdatedAt,
+		&r.PickupExpired, &r.RideVersion, &r.CreatedAt, &r.UpdatedAt,
 		&r.DriverName, &r.DriverPhone, &r.DriverRating, &r.DriverPlate,
 	)
 	if err != nil {
@@ -297,7 +303,7 @@ func scanRideWithCustomer(row pgx.Row) (*Ride, error) {
 		&r.DriverArrivedAt, &r.StartedAt, &r.CompletedAt,
 		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
 		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
-		&r.PickupExpired, &r.CreatedAt, &r.UpdatedAt,
+		&r.PickupExpired, &r.RideVersion, &r.CreatedAt, &r.UpdatedAt,
 		&r.CustomerName, &r.CustomerPhone,
 	)
 	if err != nil {
@@ -324,7 +330,7 @@ func scanRide(row pgx.Row) (*Ride, error) {
 		&r.DriverArrivedAt, &r.StartedAt, &r.CompletedAt,
 		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
 		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
-		&r.PickupExpired, &r.CreatedAt, &r.UpdatedAt,
+		&r.PickupExpired, &r.RideVersion, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -440,7 +446,7 @@ func (repo *Repository) CreateRide(ctx context.Context, customerID, transportTyp
 // Transition atomically moves a ride to a new status only if current status matches from.
 func (repo *Repository) Transition(ctx context.Context, rideID string, from, to Status) error {
 	tag, err := repo.db.Exec(ctx, `
-		UPDATE rides SET status = $1, updated_at = NOW() WHERE id = $2 AND status = $3
+		UPDATE rides SET status = $1, updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $2 AND status = $3
 	`, string(to), rideID, string(from))
 	if err != nil {
 		return err
@@ -453,7 +459,7 @@ func (repo *Repository) Transition(ctx context.Context, rideID string, from, to 
 
 func (repo *Repository) AssignDriver(ctx context.Context, rideID, driverProfileID string) error {
 	_, err := repo.db.Exec(ctx,
-		`UPDATE rides SET driver_id = $1, updated_at = NOW() WHERE id = $2`,
+		`UPDATE rides SET driver_id = $1, updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $2`,
 		driverProfileID, rideID,
 	)
 	return err
@@ -461,7 +467,7 @@ func (repo *Repository) AssignDriver(ctx context.Context, rideID, driverProfileI
 
 func (repo *Repository) LockFare(ctx context.Context, rideID string, amount float64) error {
 	tag, err := repo.db.Exec(ctx, `
-		UPDATE rides SET agreed_fare = $1, fare_locked_at = NOW(), updated_at = NOW()
+		UPDATE rides SET agreed_fare = $1, fare_locked_at = NOW(), updated_at = NOW(), ride_version = ride_version + 1
 		WHERE id = $2 AND fare_locked_at IS NULL
 	`, amount, rideID)
 	if err != nil {
@@ -475,21 +481,21 @@ func (repo *Repository) LockFare(ctx context.Context, rideID string, amount floa
 
 func (repo *Repository) SetStarted(ctx context.Context, rideID string) error {
 	_, err := repo.db.Exec(ctx,
-		`UPDATE rides SET started_at = NOW(), updated_at = NOW() WHERE id = $1`, rideID,
+		`UPDATE rides SET started_at = NOW(), updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $1`, rideID,
 	)
 	return err
 }
 
 func (repo *Repository) SetDriverArrived(ctx context.Context, rideID string) error {
 	_, err := repo.db.Exec(ctx,
-		`UPDATE rides SET driver_arrived_at = NOW(), updated_at = NOW() WHERE id = $1`, rideID,
+		`UPDATE rides SET driver_arrived_at = NOW(), updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $1`, rideID,
 	)
 	return err
 }
 
 func (repo *Repository) SetCompleted(ctx context.Context, rideID string) error {
 	_, err := repo.db.Exec(ctx,
-		`UPDATE rides SET completed_at = NOW(), updated_at = NOW() WHERE id = $1`, rideID,
+		`UPDATE rides SET completed_at = NOW(), updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $1`, rideID,
 	)
 	return err
 }
@@ -499,7 +505,8 @@ func (repo *Repository) SetCompletionDestination(ctx context.Context, rideID str
 		UPDATE rides
 		SET destination_point = ST_GeographyFromText($1),
 		    destination_address = COALESCE($2, destination_address),
-		    updated_at = NOW()
+		    updated_at = NOW(),
+		    ride_version = ride_version + 1
 		WHERE id = $3
 	`, dest.WKT(), address, rideID)
 	return err
@@ -510,7 +517,7 @@ func (repo *Repository) SetCompletionDestination(ctx context.Context, rideID str
 // side effects (credit refunds, analytics) exactly-once under concurrent cancels.
 func (repo *Repository) Cancel(ctx context.Context, rideID, reason, cancelledByRole string) (bool, error) {
 	tag, err := repo.db.Exec(ctx, `
-		UPDATE rides SET status = 'CANCELLED', cancel_reason = $1, cancelled_by_role = $2, updated_at = NOW()
+		UPDATE rides SET status = 'CANCELLED', cancel_reason = $1, cancelled_by_role = $2, updated_at = NOW(), ride_version = ride_version + 1
 		WHERE id = $3 AND status NOT IN ('COMPLETED','CANCELLED')
 	`, reason, cancelledByRole, rideID)
 	if err != nil {
@@ -527,7 +534,8 @@ func (repo *Repository) CancelWithFee(ctx context.Context, rideID, reason, cance
 		    cancel_reason = $1,
 		    cancelled_by_role = $2,
 		    cancellation_fee_rwf = $3,
-		    updated_at = NOW()
+		    updated_at = NOW(),
+		    ride_version = ride_version + 1
 		WHERE id = $4 AND status NOT IN ('COMPLETED','CANCELLED')
 	`, reason, cancelledByRole, cancellationFee, rideID)
 	if err != nil {
@@ -554,7 +562,8 @@ func (repo *Repository) SetFinalFare(ctx context.Context, rideID string, finalFa
 		    waiting_charge_rwf = $3,
 		    night_surcharge_applied = $4,
 		    night_surcharge_pct = $5,
-		    updated_at = NOW()
+		    updated_at = NOW(),
+		    ride_version = ride_version + 1
 		WHERE id = $6
 	`, finalFare, waitingSeconds, waitingCharge, nightApplied, nightPct, rideID)
 	return err
@@ -682,7 +691,7 @@ func (repo *Repository) FindStaleInProgress(ctx context.Context, olderThanMinute
 // SetPickupExpired marks a ride's pickup window as expired.
 func (repo *Repository) SetPickupExpired(ctx context.Context, rideID string) error {
 	_, err := repo.db.Exec(ctx,
-		`UPDATE rides SET pickup_expired = TRUE, updated_at = NOW() WHERE id = $1`, rideID,
+		`UPDATE rides SET pickup_expired = TRUE, updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $1`, rideID,
 	)
 	return err
 }

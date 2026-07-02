@@ -90,7 +90,14 @@ func (s *Service) SetFareRepository(repo FareConfigRepository) {
 }
 
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
-func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64) (*Ride, error) {
+func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64, idempotencyKey string) (*Ride, error) {
+	if idempotencyKey != "" {
+		if existing, err := s.repo.FindRideByIdempotency(ctx, customerID, idempotencyKey); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return existing, nil
+		}
+	}
 	// ── Concurrent-creation guard ─────────────────────────────────────────────
 	// Use SET NX with a 10-second TTL to prevent two simultaneous requests from
 	// the same customer (e.g. double-tap, retry storm) creating duplicate rides.
@@ -157,6 +164,9 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 
 	if s.engine != nil {
 		s.engine.StartSearch(r.ID, pickup, transportType)
+	}
+	if err := s.repo.SaveRideIdempotency(ctx, customerID, idempotencyKey, r.ID); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", r.ID).Msg("ride: failed to save idempotency key")
 	}
 	return r, nil
 }

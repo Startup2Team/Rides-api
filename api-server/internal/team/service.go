@@ -84,6 +84,19 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
 }
 
+// ResendInvite refreshes the invited_at timestamp for a team member invite.
+func (s *Service) ResendInvite(ctx context.Context, id string) error {
+	return s.repo.TouchInvitedAt(ctx, id)
+}
+
+// ResetMember2FA clears TOTP credentials for another admin account.
+func (s *Service) ResetMember2FA(ctx context.Context, actorID, memberID string) error {
+	if actorID == memberID {
+		return apperrors.New(http.StatusForbidden, "SELF_ACTION", "use account settings to reset your own 2FA")
+	}
+	return s.repo.ClearTOTP(ctx, memberID)
+}
+
 func (s *Service) ListRoles(ctx context.Context) ([]*Role, error) {
 	return s.repo.ListRoles(ctx)
 }

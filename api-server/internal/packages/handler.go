@@ -577,3 +577,120 @@ func (h *Handler) AdminConfirmPurchase(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"purchase_id": id, "success": success, "status": p.Status})
 	respond.OK(w, p)
 }
+
+// GET /api/v1/admin/entitlements — list all driver entitlement balances for admin console.
+func (h *Handler) AdminListEntitlements(w http.ResponseWriter, r *http.Request) {
+	if h.ledger == nil {
+		respond.ErrorMsg(w, http.StatusServiceUnavailable, "LEDGER_UNAVAILABLE", "entitlement ledger not configured")
+		return
+	}
+	includeTxns := r.URL.Query().Get("include_transactions") == "true"
+	rows, err := h.svc.AdminListEntitlements(r.Context(), includeTxns)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	if rows == nil {
+		rows = []*AdminEntitlementRow{}
+	}
+	respond.OK(w, rows)
+}
+
+// POST /api/v1/admin/entitlements/grant — grant rides/bonus to a driver entitlement.
+func (h *Handler) AdminGrantEntitlement(w http.ResponseWriter, r *http.Request) {
+	if h.ledger == nil {
+		respond.ErrorMsg(w, http.StatusServiceUnavailable, "LEDGER_UNAVAILABLE", "entitlement ledger not configured")
+		return
+	}
+	adminID, role := adminCtx(r)
+	var body struct {
+		EntitlementID   string `json:"entitlement_id"`
+		RidesDelta      int    `json:"rides_delta"`
+		BonusRidesDelta int    `json:"bonus_rides_delta"`
+		Reason          string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if body.EntitlementID == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "entitlement_id is required")
+		return
+	}
+	if strings.TrimSpace(body.Reason) == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "REASON_REQUIRED", "reason is required")
+		return
+	}
+	if body.RidesDelta <= 0 && body.BonusRidesDelta <= 0 {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "rides_delta or bonus_rides_delta must be positive")
+		return
+	}
+
+	profileID, vehicleTypeID, vehicleTypeCode, err := h.svc.GetEntitlementKeys(r.Context(), body.EntitlementID)
+	if err != nil {
+		respond.Error(w, apperrors.ErrNotFound)
+		return
+	}
+	if err := h.ledger.AdminGrant(r.Context(), profileID, vehicleTypeID, adminID, body.RidesDelta, body.BonusRidesDelta, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	h.audit.Record(r.Context(), adminID, role, "entitlement.grant", "entitlements", body.EntitlementID,
+		fmt.Sprintf("Granted %d rides + %d bonus to driver %s (%s)", body.RidesDelta, body.BonusRidesDelta, profileID, vehicleTypeCode),
+		map[string]any{"entitlement_id": body.EntitlementID, "rides_delta": body.RidesDelta, "bonus_delta": body.BonusRidesDelta, "reason": body.Reason})
+	respond.OK(w, map[string]string{"status": "granted"})
+}
+
+// POST /api/v1/admin/entitlements/revoke — revoke rides/bonus from a driver entitlement.
+func (h *Handler) AdminRevokeEntitlement(w http.ResponseWriter, r *http.Request) {
+	if h.ledger == nil {
+		respond.ErrorMsg(w, http.StatusServiceUnavailable, "LEDGER_UNAVAILABLE", "entitlement ledger not configured")
+		return
+	}
+	adminID, role := adminCtx(r)
+	var body struct {
+		EntitlementID   string `json:"entitlement_id"`
+		RidesDelta      int    `json:"rides_delta"`
+		BonusRidesDelta int    `json:"bonus_rides_delta"`
+		Reason          string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.EntitlementID == "" {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Reason) == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "REASON_REQUIRED", "reason is required")
+		return
+	}
+	profileID, vehicleTypeID, vehicleTypeCode, err := h.svc.GetEntitlementKeys(r.Context(), body.EntitlementID)
+	if err != nil {
+		respond.Error(w, apperrors.ErrNotFound)
+		return
+	}
+	if err := h.ledger.AdminRevoke(r.Context(), profileID, vehicleTypeID, adminID, body.RidesDelta, body.BonusRidesDelta, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	h.audit.Record(r.Context(), adminID, role, "entitlement.revoke", "entitlements", body.EntitlementID,
+		fmt.Sprintf("Revoked %d rides + %d bonus from driver %s (%s)", body.RidesDelta, body.BonusRidesDelta, profileID, vehicleTypeCode),
+		map[string]any{"entitlement_id": body.EntitlementID, "rides_delta": body.RidesDelta, "bonus_delta": body.BonusRidesDelta, "reason": body.Reason})
+	respond.OK(w, map[string]string{"status": "revoked"})
+}
+
+// GET /api/v1/admin/packages/{id}/subscribers — drivers with paid purchases for a package.
+func (h *Handler) AdminListPackageSubscribers(w http.ResponseWriter, r *http.Request) {
+	packageID := chi.URLParam(r, "id")
+	if packageID == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "package id is required")
+		return
+	}
+	subs, err := h.svc.AdminListPackageSubscribers(r.Context(), packageID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	if subs == nil {
+		subs = []*PackageSubscriber{}
+	}
+	respond.OK(w, subs)
+}

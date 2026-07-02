@@ -562,6 +562,11 @@ func main() {
 			r.Get("/profile", driverH.GetProfile)
 			r.Put("/profile", driverH.UpdateProfile)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
+			r.Get("/vehicles", driverH.ListVehicles)
+			r.Post("/vehicles", driverH.CreateVehicle)
+			r.Patch("/vehicles/{id}", driverH.UpdateVehicle)
+			r.Delete("/vehicles/{id}", driverH.DeleteVehicle)
+			r.Post("/vehicles/{id}/activate", driverH.ActivateVehicle)
 		})
 
 		r.Group(func(r chi.Router) {
@@ -744,6 +749,7 @@ func main() {
 			// r.Delete("/drivers/{id}", adminH.DeleteDriver) REMOVED - suspend/reinstate only
 			r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 			r.Post("/drivers/{id}/reject", adminH.RejectDriver)
+			r.Post("/drivers/{id}/request-more-info", adminH.RequestDriverMoreInfo)
 			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
 			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
@@ -907,8 +913,12 @@ func main() {
 			r.Post("/team/members/{id}/role", teamH.UpdateRole)
 			r.Post("/team/members/{id}/suspend", teamH.Suspend)
 			r.Post("/team/members/{id}/reinstate", teamH.Reinstate)
-			// r.Post("/team/members/{id}/remove", teamH.Remove) REMOVED - suspend/reinstate only
+			r.Post("/team/members/{id}/remove", teamH.Remove)
+			r.Post("/team/members/{id}/resend-invite", teamH.ResendInvite)
+			r.Post("/team/members/{id}/reset-2fa", teamH.ResetMember2FA)
+			r.Get("/team/members/{id}/activity", teamH.GetMemberActivity)
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+			r.Post("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
 
 			// Audit Log
 			r.Get("/audit", teamH.ListAuditLog)
@@ -916,6 +926,7 @@ func main() {
 			// Packages admin CRUD
 			r.Get("/packages", pkgH.AdminListPackages)
 			r.Get("/packages-purchases", pkgH.AdminListPurchases)
+			r.Get("/packages/{id}/subscribers", pkgH.AdminListPackageSubscribers)
 			r.Post("/packages", pkgH.AdminCreatePackage)
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
@@ -939,6 +950,18 @@ func main() {
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
+
+			// Entitlements admin (ledger-backed)
+			r.Get("/entitlements", pkgH.AdminListEntitlements)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_entitlement_grant", 30, time.Minute),
+			).Post("/entitlements/grant", pkgH.AdminGrantEntitlement)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_entitlement_revoke", 30, time.Minute),
+			).Post("/entitlements/revoke", pkgH.AdminRevokeEntitlement)
+
 			// Bonuses — admin CRUD for bonus tiers
 			r.Get("/bonuses/tiers", bonusH.AdminListTiers)
 			r.Post("/bonuses/tiers", bonusH.AdminCreateTier)

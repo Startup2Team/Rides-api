@@ -142,6 +142,9 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 		}
 		return nil, err
 	}
+	if vErr := s.repo.CreateVehicleFromApply(ctx, profile.ID, in); vErr != nil && !isUniqueViolation(vErr) {
+		return nil, vErr
+	}
 
 	if s.cfg.Driver.DevAutoApprove {
 		// Skip admin queue — approve immediately for dev/testing.
@@ -582,7 +585,7 @@ func (s *Service) GetStats(ctx context.Context, driverUserID string) (map[string
 }
 
 // allVehicleTypes lists every vehicle type the platform supports.
-var allVehicleTypes = []string{"MOTO_BIKE", "CAB_TAXI", "HEAVY_FUSO", "LIGHT_HILUX"}
+var allVehicleTypes = []string{"MOTO_BIKE", "CAB_TAXI", "HEAVY_FUSO", "LIGHT_HILUX", "TUK_TUK"}
 
 const (
 	driverStateAvailable = "AVAILABLE"

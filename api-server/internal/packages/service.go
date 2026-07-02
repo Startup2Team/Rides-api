@@ -35,6 +35,10 @@ type Repo interface {
 	UpdateCampaign(ctx context.Context, id string, input *UpdateCampaignInput) (*AdminCampaign, error)
 	SetCampaignStatus(ctx context.Context, id string, status string) error
 	DeleteCampaign(ctx context.Context, id string) error
+
+	AdminListEntitlements(ctx context.Context, includeTxns bool) ([]*AdminEntitlementRow, error)
+	GetEntitlementKeys(ctx context.Context, entitlementID string) (profileID, vehicleTypeID, vehicleTypeCode string, err error)
+	AdminListPackageSubscribers(ctx context.Context, packageID string) ([]*PackageSubscriber, error)
 }
 
 // WalletDeductor is the wallet.Service method subset needed by this package.
@@ -179,6 +183,18 @@ func (s *Service) AdminSetCampaignStatus(ctx context.Context, id string, status 
 
 func (s *Service) AdminDeleteCampaign(ctx context.Context, id string) error {
 	return s.repo.DeleteCampaign(ctx, id)
+}
+
+func (s *Service) AdminListEntitlements(ctx context.Context, includeTxns bool) ([]*AdminEntitlementRow, error) {
+	return s.repo.AdminListEntitlements(ctx, includeTxns)
+}
+
+func (s *Service) GetEntitlementKeys(ctx context.Context, entitlementID string) (string, string, string, error) {
+	return s.repo.GetEntitlementKeys(ctx, entitlementID)
+}
+
+func (s *Service) AdminListPackageSubscribers(ctx context.Context, packageID string) ([]*PackageSubscriber, error) {
+	return s.repo.AdminListPackageSubscribers(ctx, packageID)
 }
 
 func (s *Service) GetCampaignByID(ctx context.Context, id string) (*AdminCampaign, error) {
