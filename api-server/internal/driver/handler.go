@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
 
 	"github.com/workspace/ride-platform/internal/middleware"
@@ -395,4 +396,75 @@ func parseFlexibleDate(dateStr string) (time.Time, error) {
 		lastErr = err
 	}
 	return time.Time{}, lastErr
+}
+
+// GET /api/v1/driver/vehicles
+func (h *Handler) ListVehicles(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	list, err := h.svc.ListVehicles(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, list)
+}
+
+// POST /api/v1/driver/vehicles
+func (h *Handler) CreateVehicle(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	var body CreateVehicleInput
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+	v, err := h.svc.CreateVehicle(r.Context(), claims.UserID, body)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.Created(w, v)
+}
+
+// PATCH /api/v1/driver/vehicles/{id}
+func (h *Handler) UpdateVehicle(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	id := chi.URLParam(r, "id")
+	var body UpdateVehicleInput
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	v, err := h.svc.UpdateVehicle(r.Context(), claims.UserID, id, body)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, v)
+}
+
+// DELETE /api/v1/driver/vehicles/{id}
+func (h *Handler) DeleteVehicle(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	id := chi.URLParam(r, "id")
+	if err := h.svc.DeleteVehicle(r.Context(), claims.UserID, id); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"status": "deleted"})
+}
+
+// POST /api/v1/driver/vehicles/{id}/activate
+func (h *Handler) ActivateVehicle(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	id := chi.URLParam(r, "id")
+	v, err := h.svc.ActivateVehicle(r.Context(), claims.UserID, id)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, v)
 }

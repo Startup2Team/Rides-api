@@ -115,6 +115,21 @@ func (r *Repository) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// TouchInvitedAt bumps invited_at for a pending admin invite (resend flow).
+func (r *Repository) TouchInvitedAt(ctx context.Context, id string) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE admin_accounts SET invited_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND status IN ('INVITED', 'ACTIVE')
+	`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("admin not found or not eligible for invite resend")
+	}
+	return nil
+}
+
 func (r *Repository) UpdateName(ctx context.Context, id, name string) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE admin_accounts SET name=$1, updated_at=NOW() WHERE id=$2`, name, id)

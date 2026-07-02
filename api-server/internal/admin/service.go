@@ -141,6 +141,29 @@ func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reas
 	return nil
 }
 
+// RequestDriverMoreInfo asks the driver to resubmit documents or clarify onboarding details.
+func (s *Service) RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		return apperrors.New(http.StatusBadRequest, "REASON_REQUIRED", "reason is required")
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE driver_profiles
+		SET approval_status = 'NEEDS_MORE_INFO',
+		    approved_by = $1,
+		    rejection_reason = $2,
+		    updated_at = NOW()
+		WHERE id = $3 AND approval_status IN ('PENDING_REVIEW', 'NEEDS_MORE_INFO')
+	`, adminUserID, reason, profileID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.Newf(http.StatusConflict, "INVALID_STATE",
+			"driver is not in review or does not exist")
+	}
+	return nil
+}
+
 func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error {
 	suspendedUntil := time.Now().Add(time.Duration(durationHours) * time.Hour)
 

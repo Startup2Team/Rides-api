@@ -91,6 +91,7 @@ func (m *mockRepo) Delete(ctx context.Context, id string) error {
 	}
 	return nil
 }
+func (m *mockRepo) TouchInvitedAt(ctx context.Context, id string) error { return nil }
 func (m *mockRepo) UpdateName(ctx context.Context, id, name string) error {
 	if m.updateNameFn != nil {
 		return m.updateNameFn(ctx, id, name)

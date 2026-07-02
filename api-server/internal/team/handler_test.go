@@ -121,6 +121,11 @@ func (m *mockSvc) Reinstate(ctx context.Context, id string) error {
 func (m *mockSvc) Remove(ctx context.Context, id string) error {
 	return m.removeFn(ctx, id)
 }
+func (m *mockSvc) ResendInvite(ctx context.Context, id string) error                  { return nil }
+func (m *mockSvc) ResetMember2FA(ctx context.Context, actorID, memberID string) error { return nil }
+func (m *mockSvc) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]team.AuditEntry, error) {
+	return nil, nil
+}
 func (m *mockSvc) UpdateName(ctx context.Context, id, name string) error {
 	return m.updateNameFn(ctx, id, name)
 }
