@@ -429,28 +429,24 @@ func TestLogin_No2FA_ReturnsAccessToken(t *testing.T) {
 	assert.False(t, result.TwoFactorRequired)
 }
 
-func TestLogin_With2FA_ReturnsPreAuthToken(t *testing.T) {
+func TestLogin_With2FA_IgnoredReturnsAccessToken(t *testing.T) {
 	hash, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
 	hashStr := string(hash)
-	totpSecret := "JBSWY3DPEHPK3PXP"
 	repo := &mockRepo{
 		findByEmailFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
 			return &AdminAccount{ID: "a1", Status: "ACTIVE", TwoFactor: true}, &hashStr, nil
 		},
-		getTOTPSecretFn: func(_ context.Context, _ string) (*string, error) {
-			return &totpSecret, nil
-		},
 	}
 
-	// 2FA is only enforced in production (dev skips it for testing ergonomics),
-	// so exercise the pre-auth path with a production config.
+	// 2FA has been removed from the admin console: even with two_factor set and a
+	// production config, Login issues a full session — never a pre-auth challenge.
 	svc := newTestServiceProduction(repo, newTestRedis(t))
 
 	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
 	require.NoError(t, err)
-	assert.True(t, result.TwoFactorRequired)
-	assert.NotEmpty(t, result.PreAuthToken)
-	assert.Empty(t, result.AccessToken)
+	assert.False(t, result.TwoFactorRequired)
+	assert.Empty(t, result.PreAuthToken)
+	assert.NotEmpty(t, result.AccessToken)
 }
 
 // ── Logout ────────────────────────────────────────────────────────────────
@@ -464,17 +460,13 @@ func TestLogout_RevokesSession(t *testing.T) {
 
 // ── Generate2FASetup ──────────────────────────────────────────────────────
 
-func TestGenerate2FASetup_ReturnsSecretAndURL(t *testing.T) {
-	repo := &mockRepo{
-		findByIDFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
-			return &AdminAccount{ID: "a1", Email: "admin@test.com"}, nil, nil
-		},
-	}
-	svc := newTestService(repo, newTestRedis(t))
+func TestGenerate2FASetup_Disabled(t *testing.T) {
+	// 2FA is disabled for the admin console — setup must be refused.
+	svc := newTestService(&mockRepo{}, newTestRedis(t))
 	secret, url, err := svc.Generate2FASetup(context.Background(), "a1")
-	require.NoError(t, err)
-	assert.NotEmpty(t, secret)
-	assert.Contains(t, url, "otpauth://totp/")
+	require.Error(t, err)
+	assert.Empty(t, secret)
+	assert.Empty(t, url)
 }
 
 // ── Enable2FA ─────────────────────────────────────────────────────────────
