@@ -124,11 +124,10 @@ func (s *Service) CheckVerify(ctx context.Context, requestID, code string) (ok b
 // SendOTP sends a 6-digit OTP to the given E.164 phone number, via whichever SMS
 // provider is configured (SMS_PROVIDER: "pindo" or "africastalking").
 func (s *Service) SendOTP(ctx context.Context, phone, otp string) error {
-	// Bilingual (English + Kinyarwanda), code shown once. GSM-7-safe, ~155 chars
-	// → a single SMS segment (~$0.01/OTP).
+	// Bilingual (Kinyarwanda + English). GSM-7-safe; ~153 chars = 1 SMS segment.
 	message := fmt.Sprintf(
-		"Your Rides verification code is %s valid for 10 minutes. Do not share or expose to anyone.\nIyi code imara iminota 10 ntuyisangize abandi ni iyawe gusa.",
-		otp,
+		"Kode ya Rides y'ibanga ni %s. Ntugomba kuyisangiza cyangwa ngo uyereke undi muntu. Your Rides OTP is %s. Do not share or expose it with anyone.",
+		otp, otp,
 	)
 	return s.sendSMS(ctx, phone, message)
 }
