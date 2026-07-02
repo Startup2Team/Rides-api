@@ -273,25 +273,6 @@ func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret,
 	return "", "", apperrors.New(http.StatusForbidden, "2FA_DISABLED", "Two-factor authentication is disabled for the admin console.")
 }
 
-func (s *Service) generate2FASetupDisabled(ctx context.Context, adminID string) (secret, otpauthURL string, err error) {
-	admin, _, err := s.repo.FindByID(ctx, adminID)
-	if err != nil {
-		return "", "", apperrors.ErrNotFound
-	}
-	if admin.TwoFactor {
-		return "", "", apperrors.New(http.StatusConflict, "2FA_ALREADY_ENABLED", "2FA is already enabled; disable it first")
-	}
-
-	key, err := totp.Generate(totp.GenerateOpts{
-		Issuer:      totpIssuer,
-		AccountName: admin.Email,
-	})
-	if err != nil {
-		return "", "", apperrors.ErrInternal
-	}
-	return key.Secret(), key.URL(), nil
-}
-
 func (s *Service) Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error) {
 	if s.cfg.Env == "production" {
 		if !validateTOTP(code, secret) {
