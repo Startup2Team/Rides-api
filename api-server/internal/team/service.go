@@ -503,6 +503,32 @@ func (s *Service) GetMemberActivity(ctx context.Context, adminID string, limit i
 	return s.repo.GetMemberActivity(ctx, adminID, limit)
 }
 
+// UpdateRolePermissions replaces the permissions of a non-system role.
+func (s *Service) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return s.repo.UpdateRolePermissions(ctx, roleID, permissions)
+}
+
+// ResendInvite re-issues an invite for a still-pending admin account.
+func (s *Service) ResendInvite(ctx context.Context, id string) error {
+	n, err := s.repo.ReissueInvite(ctx, id)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return apperrors.New(http.StatusConflict, "ALREADY_ACTIVE", "account is already active or does not exist")
+	}
+	return nil
+}
+
+// AdminResetMember2FA clears another admin's 2FA so they must re-enroll at next
+// login. Unlike ResetTOTP this is an administrative action and needs no code.
+func (s *Service) AdminResetMember2FA(ctx context.Context, id string) error {
+	if _, _, err := s.repo.FindByID(ctx, id); err != nil {
+		return apperrors.ErrNotFound
+	}
+	return s.repo.ClearTOTP(ctx, id)
+}
+
 // ListAuditLog returns the platform-wide admin audit trail, newest first.
 // Restricted to Super Admin at the route level.
 func (s *Service) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error) {

@@ -150,6 +150,12 @@ func (m *mockRepo) UpdateRoleByID(ctx context.Context, roleID, name, description
 	}
 	return nil, nil
 }
+func (m *mockRepo) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return nil
+}
+func (m *mockRepo) ReissueInvite(ctx context.Context, id string) (int64, error) {
+	return 1, nil
+}
 func (m *mockRepo) DeleteRoleByID(ctx context.Context, roleID string) error {
 	if m.deleteRoleByIDFn != nil {
 		return m.deleteRoleByIDFn(ctx, roleID)
