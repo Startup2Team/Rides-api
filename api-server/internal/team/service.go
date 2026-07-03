@@ -150,9 +150,19 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
 	}
 
-	// 2FA is disabled for the admin console: always issue a full session so
-	// login goes straight to the dashboard, regardless of any account's stored
-	// two_factor flag.
+	// In dev we skip 2FA entirely so testing isn't gated behind authenticator
+	// codes / clock-skew. Production always enforces it.
+	if admin.TwoFactor && s.cfg.Env == "production" {
+		preAuth, err := s.issuePreAuthToken(admin.ID)
+		if err != nil {
+			return nil, apperrors.ErrInternal
+		}
+		return &LoginResult{
+			PreAuthToken:      preAuth,
+			TwoFactorRequired: true,
+		}, nil
+	}
+
 	token, err := s.issueAccessToken(ctx, admin.ID, admin.RoleName)
 	if err != nil {
 		return nil, apperrors.ErrInternal
@@ -269,8 +279,22 @@ func (s *Service) Reissue2FAChallenge(ctx context.Context, adminID string) (stri
 }
 
 func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret, otpauthURL string, err error) {
-	// 2FA is disabled for the admin console — refuse to hand out a setup secret.
-	return "", "", apperrors.New(http.StatusForbidden, "2FA_DISABLED", "Two-factor authentication is disabled for the admin console.")
+	admin, _, err := s.repo.FindByID(ctx, adminID)
+	if err != nil {
+		return "", "", apperrors.ErrNotFound
+	}
+	if admin.TwoFactor {
+		return "", "", apperrors.New(http.StatusConflict, "2FA_ALREADY_ENABLED", "2FA is already enabled; disable it first")
+	}
+
+	key, err := totp.Generate(totp.GenerateOpts{
+		Issuer:      totpIssuer,
+		AccountName: admin.Email,
+	})
+	if err != nil {
+		return "", "", apperrors.ErrInternal
+	}
+	return key.Secret(), key.URL(), nil
 }
 
 func (s *Service) Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error) {
