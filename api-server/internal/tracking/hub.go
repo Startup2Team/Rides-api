@@ -1,10 +1,28 @@
 package tracking
 
 import (
+	"context"
+	"encoding/json"
 	"sync"
 
+	"github.com/google/uuid"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 )
+
+// wsFanoutChannel is the Redis pub/sub channel every API instance subscribes to.
+// A message published here reaches whichever instance actually holds the target
+// socket — this is what makes WebSocket delivery work across multiple instances.
+const wsFanoutChannel = "ws:fanout"
+
+// fanoutEnvelope wraps a Message with routing info for cross-instance delivery.
+// Origin lets an instance skip its own echo (it already delivered locally).
+type fanoutEnvelope struct {
+	Origin string  `json:"origin"`
+	Kind   string  `json:"kind"`   // "driver" | "customer"
+	Target string  `json:"target"` // driver userID or ride ID
+	Msg    Message `json:"msg"`
+}
 
 // safeClose closes ch exactly once. Safe to call from multiple goroutines.
 func safeClose(ch chan struct{}, once *sync.Once) {
@@ -44,13 +62,22 @@ type Hub struct {
 
 	mu  sync.RWMutex
 	log zerolog.Logger
+
+	// redis + instanceID power cross-instance fan-out. redis may be nil in tests
+	// or single-box setups without a client — delivery then stays purely local.
+	redis      *goredis.Client
+	instanceID string
 }
 
-func NewHub(log zerolog.Logger) *Hub {
+// NewHub builds a hub. Pass the shared Redis client to enable cross-instance
+// WebSocket delivery; pass nil for a purely local (single-process) hub.
+func NewHub(log zerolog.Logger, rdb *goredis.Client) *Hub {
 	return &Hub{
-		drivers:   make(map[string]*Client),
-		customers: make(map[string]*Client),
-		log:       log,
+		drivers:    make(map[string]*Client),
+		customers:  make(map[string]*Client),
+		log:        log,
+		redis:      rdb,
+		instanceID: uuid.NewString(),
 	}
 }
 
@@ -91,8 +118,24 @@ func (h *Hub) UnregisterCustomer(rideID string) {
 	delete(h.customers, rideID)
 }
 
-// SendToDriver pushes a message to a specific driver's WebSocket.
+// SendToDriver pushes a message to a specific driver's WebSocket — on whichever
+// instance holds it. Delivers locally if the socket is here, and fans the
+// message out over Redis so a sibling instance can deliver it if it isn't.
 func (h *Hub) SendToDriver(driverUserID string, msg Message) {
+	h.deliverLocalDriver(driverUserID, msg)
+	h.publish("driver", driverUserID, msg)
+}
+
+// SendToCustomer pushes a message to the customer tracking a specific ride, on
+// whichever instance holds the socket (local delivery + Redis fan-out).
+func (h *Hub) SendToCustomer(rideID string, msg Message) {
+	h.deliverLocalCustomer(rideID, msg)
+	h.publish("customer", rideID, msg)
+}
+
+// deliverLocalDriver delivers to a driver socket held by THIS instance (no-op if
+// the driver is connected elsewhere).
+func (h *Hub) deliverLocalDriver(driverUserID string, msg Message) {
 	h.mu.RLock()
 	client, ok := h.drivers[driverUserID]
 	h.mu.RUnlock()
@@ -106,8 +149,8 @@ func (h *Hub) SendToDriver(driverUserID string, msg Message) {
 	}
 }
 
-// SendToCustomer pushes a message to the customer tracking a specific ride.
-func (h *Hub) SendToCustomer(rideID string, msg Message) {
+// deliverLocalCustomer delivers to a customer socket held by THIS instance.
+func (h *Hub) deliverLocalCustomer(rideID string, msg Message) {
 	h.mu.RLock()
 	client, ok := h.customers[rideID]
 	h.mu.RUnlock()
@@ -118,6 +161,57 @@ func (h *Hub) SendToCustomer(rideID string, msg Message) {
 	case client.Send <- msg:
 	default:
 		h.log.Warn().Str("ride_id", rideID).Msg("ws: customer send buffer full")
+	}
+}
+
+// publish fans a message out to the other instances via Redis. Fire-and-forget:
+// a fan-out failure must never block or fail the caller (local delivery already
+// happened). No-op when redis is nil (single-process / tests).
+func (h *Hub) publish(kind, target string, msg Message) {
+	if h.redis == nil {
+		return
+	}
+	payload, err := json.Marshal(fanoutEnvelope{Origin: h.instanceID, Kind: kind, Target: target, Msg: msg})
+	if err != nil {
+		return
+	}
+	if err := h.redis.Publish(context.Background(), wsFanoutChannel, payload).Err(); err != nil {
+		h.log.Warn().Err(err).Str("kind", kind).Msg("ws: fanout publish failed")
+	}
+}
+
+// Run subscribes to the cross-instance fan-out channel and delivers each message
+// to any socket THIS instance holds. Blocks until ctx is cancelled — start it in
+// a goroutine once at boot. No-op when redis is nil.
+func (h *Hub) Run(ctx context.Context) {
+	if h.redis == nil {
+		return
+	}
+	sub := h.redis.Subscribe(ctx, wsFanoutChannel)
+	defer sub.Close()
+	ch := sub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m, ok := <-ch:
+			if !ok {
+				return
+			}
+			var env fanoutEnvelope
+			if err := json.Unmarshal([]byte(m.Payload), &env); err != nil {
+				continue
+			}
+			if env.Origin == h.instanceID {
+				continue // this instance already delivered it locally
+			}
+			switch env.Kind {
+			case "driver":
+				h.deliverLocalDriver(env.Target, env.Msg)
+			case "customer":
+				h.deliverLocalCustomer(env.Target, env.Msg)
+			}
+		}
 	}
 }
 
