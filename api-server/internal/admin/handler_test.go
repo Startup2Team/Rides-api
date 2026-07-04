@@ -103,6 +103,9 @@ func (m *mockSvc) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 func (m *mockSvc) RejectDriver(ctx context.Context, profileID, adminUserID, reason string) error {
 	return m.rejectDriverFn(ctx, profileID, adminUserID, reason)
 }
+func (m *mockSvc) RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string) error {
+	return nil
+}
 func (m *mockSvc) SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error {
 	return m.suspendDriverFn(ctx, profileID, adminUserID, reason, durationHours)
 }

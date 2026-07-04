@@ -68,6 +68,48 @@ func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, map[string]interface{}{"entitlements": ents})
 }
 
+// GET /api/v1/admin/entitlements — admin-wide list of every driver's balances.
+func (h *Handler) AdminListEntitlements(w http.ResponseWriter, r *http.Request) {
+	ents, err := h.ledger.AdminListEntitlements(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"entitlements": ents})
+}
+
+// POST /api/v1/admin/entitlements/grant — admin grants credits to a driver's
+// vehicle-type balance. Body: { driver_id (profile id), vehicle_type_code,
+// rides, bonus_rides, reason }.
+func (h *Handler) AdminGrantEntitlement(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DriverID        string `json:"driver_id"`
+		VehicleTypeCode string `json:"vehicle_type_code"`
+		Rides           int    `json:"rides"`
+		BonusRides      int    `json:"bonus_rides"`
+		Reason          string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if body.DriverID == "" || body.VehicleTypeCode == "" || (body.Rides == 0 && body.BonusRides == 0) {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "driver_id, vehicle_type_code and a non-zero rides/bonus_rides are required")
+		return
+	}
+	if len(body.Reason) < 5 {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "a reason of at least 5 characters is required")
+		return
+	}
+	adminID, role := adminCtx(r)
+	if err := h.ledger.AdminGrantByCode(r.Context(), body.DriverID, body.VehicleTypeCode, adminID, body.Rides, body.BonusRides, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	h.audit.Record(r.Context(), adminID, role, "entitlement.grant", "driver", body.DriverID, "Granted ride credits", map[string]any{"vehicle_type_code": body.VehicleTypeCode, "rides": body.Rides, "bonus_rides": body.BonusRides, "reason": body.Reason})
+	respond.NoContent(w)
+}
+
 // ── Driver endpoints ──────────────────────────────────────────────────────────
 
 // GET /api/v1/driver/packages[?vehicle_type=MOTO_BIKE]
