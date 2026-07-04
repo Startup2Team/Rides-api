@@ -92,6 +92,24 @@ func (h *Handler) RejectDriver(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+// POST /api/v1/admin/drivers/:id/request-more-info
+func (h *Handler) RequestDriverMoreInfo(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	profileID := chi.URLParam(r, "id")
+	var body struct {
+		Reason    string           `json:"reason"`
+		Documents []map[string]any `json:"documents"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := h.svc.RequestDriverMoreInfo(r.Context(), profileID, claims.UserID, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "driver.request_more_info", "driver", profileID, "Requested more information from driver", map[string]any{"reason": body.Reason, "documents": body.Documents})
+	respond.NoContent(w)
+}
+
 // POST /api/v1/admin/drivers/:id/suspend
 func (h *Handler) SuspendDriver(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)

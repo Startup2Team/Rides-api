@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -495,6 +496,83 @@ func (h *Handler) DeleteRoleByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, map[string]string{"message": "deleted"})
+}
+
+// GET /api/v1/admin/team/members/:id/activity
+// Recent audit entries for one admin, shaped for the team console.
+func (h *Handler) MemberActivity(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	entries, err := h.svc.GetMemberActivity(r.Context(), id, 50)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	type activityItem struct {
+		ID        string    `json:"id"`
+		Action    string    `json:"action"`
+		Detail    string    `json:"detail"`
+		IP        string    `json:"ip"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	items := make([]activityItem, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, activityItem{
+			ID:        strconv.FormatInt(e.ID, 10),
+			Action:    e.Action,
+			Detail:    e.Detail,
+			IP:        e.IP,
+			CreatedAt: e.OccurredAt,
+		})
+	}
+	respond.OK(w, map[string]interface{}{"activity": items})
+}
+
+// POST /api/v1/admin/team/members/:id/resend-invite
+func (h *Handler) ResendInvite(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.ResendInvite(r.Context(), id); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "admin.resend_invite", "admin", id, "Re-sent admin invite", nil)
+	respond.NoContent(w)
+}
+
+// POST /api/v1/admin/team/members/:id/reset-2fa
+// Administratively clears a member's 2FA so they must re-enroll at next login.
+func (h *Handler) ResetMember2FA(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.AdminResetMember2FA(r.Context(), id); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "admin.reset_2fa", "admin", id, "Reset admin 2FA", nil)
+	respond.NoContent(w)
+}
+
+// PATCH /api/v1/admin/team/roles/:roleId/permissions
+func (h *Handler) UpdateRolePermissions(w http.ResponseWriter, r *http.Request) {
+	roleID := chi.URLParam(r, "roleId")
+	var body struct {
+		Permissions interface{} `json:"permissions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
+		return
+	}
+	if err := h.svc.UpdateRolePermissions(r.Context(), roleID, body.Permissions); err != nil {
+		if err.Error() == "cannot_modify_system_role" {
+			respond.ErrorMsg(w, http.StatusBadRequest, "CANNOT_MODIFY_SYSTEM_ROLE", "system roles cannot be modified")
+			return
+		}
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "role.update_permissions", "role", roleID, "Updated role permissions", map[string]any{"permissions": body.Permissions})
+	respond.NoContent(w)
 }
 
 // GET /api/v1/admin/audit
