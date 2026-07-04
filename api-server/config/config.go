@@ -300,7 +300,10 @@ func Load() (*Config, error) {
 	cfg.Payments.ManualMomoName = getEnv("MANUAL_PAY_MOMO_NAME", "")
 	cfg.Payments.ManualInstructions = getEnv("MANUAL_PAY_INSTRUCTIONS", "")
 
-	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 300)
+	// 1200/min (20/s) per IP: a loose DDoS/abuse backstop only. Real per-actor
+	// throttling is done per-user (JWT) on the authed groups, so a whole carrier
+	// NAT of legitimate users sharing one IP won't be throttled by this.
+	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 1200)
 	cfg.Security.MaxRequestBodyBytes = int64(getEnvInt("MAX_REQUEST_BODY_BYTES", 1<<20)) // 1 MiB
 	cfg.Security.SwaggerEnabled = getEnvBool("SWAGGER_ENABLED", cfg.Env != "production")
 	cfg.Security.SwaggerBasicAuth = getEnv("SWAGGER_BASIC_AUTH", "")
