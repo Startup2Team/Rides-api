@@ -406,6 +406,9 @@ func main() {
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		// Per-user backstop (keyed on JWT user_id, NOT IP): immune to carrier NAT.
+		// Generous — hot endpoints keep their own tighter per-user limits below this.
+		r.Use(mw.UserRateLimit429(rdb, "customer_group", 600, time.Minute))
 		r.Use(mw.RequireNotSuspended())
 		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
 
@@ -435,6 +438,9 @@ func main() {
 	// ── Driver ────────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/driver", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		// Per-user backstop (keyed on JWT user_id, NOT IP): immune to carrier NAT.
+		// Generous — hot endpoints (e.g. location) keep their own tighter limits.
+		r.Use(mw.UserRateLimit429(rdb, "driver_group", 600, time.Minute))
 		r.Use(mw.RequireNotSuspended())
 
 		r.Post("/apply", driverH.Apply)
