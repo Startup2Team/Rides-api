@@ -212,8 +212,11 @@ func Load() (*Config, error) {
 	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
-	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 25)
-	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 5)
+	// Default pool sized for a single strong instance. When running MULTIPLE api
+	// instances (horizontal scale), put PgBouncer in front and lower per-instance
+	// MaxConns so N_instances × MaxConns stays under Postgres max_connections.
+	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 60)
+	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 10)
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")
 
 	cfg.JWT.AccessSecret = requireEnv("JWT_ACCESS_SECRET")
