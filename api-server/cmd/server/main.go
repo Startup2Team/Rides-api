@@ -147,7 +147,9 @@ func main() {
 	teamRepo := team.NewRepository(db)
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
-	hub := tracking.NewHub(log)
+	// Redis-backed so WebSocket delivery works across multiple API instances.
+	hub := tracking.NewHub(log, rdb)
+	go hub.Run(context.Background()) // subscribe to cross-instance fan-out for the process lifetime
 
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
