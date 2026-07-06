@@ -13,7 +13,7 @@ import (
 
 func TestTopUp_DisabledToPreventMinting(t *testing.T) {
 	// GIVEN a service with paymentsEnabled = true/false (nil repository)
-	s := NewService(nil, zerolog.Nop(), false)
+	s := NewService(nil, zerolog.Nop(), true)
 
 	// WHEN TopUp is called
 	tx, err := s.TopUp(context.Background(), "user-123", 5000, "0788888888")
@@ -29,7 +29,7 @@ func TestTopUp_DisabledToPreventMinting(t *testing.T) {
 
 func TestWithdraw_DisabledToPreventCashOut(t *testing.T) {
 	// GIVEN a service (nil repository)
-	s := NewService(nil, zerolog.Nop(), false)
+	s := NewService(nil, zerolog.Nop(), true)
 
 	// WHEN Withdraw is called
 	tx, err := s.Withdraw(context.Background(), "user-123", 5000, "0788888888")

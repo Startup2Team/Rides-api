@@ -185,8 +185,7 @@ func main() {
 	teamRepo := team.NewRepository(db)
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
-	hub := tracking.NewHub(log, rdb)
-	go hub.Run(context.Background())
+	hub := tracking.NewHub(rdb, log)
 
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
@@ -918,7 +917,7 @@ func main() {
 			r.Post("/team/members/{id}/remove", teamH.Remove)
 			r.Post("/team/members/{id}/resend-invite", teamH.ResendInvite)
 			r.Post("/team/members/{id}/reset-2fa", teamH.ResetMember2FA)
-			r.Get("/team/members/{id}/activity", teamH.MemberActivity)
+			r.Get("/team/members/{id}/activity", teamH.GetMemberActivity)
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
 			r.Post("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
 

@@ -84,21 +84,17 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
 }
 
-// ResendInvite re-issues an invite for a still-pending admin account.
+// ResendInvite refreshes the invited_at timestamp for a team member invite.
 func (s *Service) ResendInvite(ctx context.Context, id string) error {
-	n, err := s.repo.ReissueInvite(ctx, id)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return apperrors.ErrNotFound
-	}
-	return nil
+	return s.repo.TouchInvitedAt(ctx, id)
 }
 
-// AdminResetMember2FA clears another admin's 2FA so they must re-enroll at next login.
-func (s *Service) AdminResetMember2FA(ctx context.Context, id string) error {
-	return s.repo.ClearTOTP(ctx, id)
+// ResetMember2FA clears TOTP credentials for another admin account.
+func (s *Service) ResetMember2FA(ctx context.Context, actorID, memberID string) error {
+	if actorID == memberID {
+		return apperrors.New(http.StatusForbidden, "SELF_ACTION", "use account settings to reset your own 2FA")
+	}
+	return s.repo.ClearTOTP(ctx, memberID)
 }
 
 func (s *Service) ListRoles(ctx context.Context) ([]*Role, error) {

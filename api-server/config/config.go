@@ -136,7 +136,6 @@ type MoMoConfig struct {
 	Environment     string
 	WebhookSecret   string
 	IPWhitelist     string
-
 	// Live MTN MoMo Collections credentials. When APIUser + APIKey +
 	// SubscriptionKey are all set, the payment service makes real RequestToPay
 	// calls; otherwise it stays inert (returns a mock PENDING) so the rest of

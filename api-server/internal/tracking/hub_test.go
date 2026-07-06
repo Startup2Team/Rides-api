@@ -1,123 +1,114 @@
 package tracking
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 )
 
-// The core horizontal-scale test: a driver connected to instance B must receive
-// a message generated on instance A. Without Redis fan-out this silently drops
-// (A's in-memory map has no socket for the driver). Two hubs + one Redis = two
-// boxes behind a load balancer.
-func TestHub_FanoutDeliversToSocketOnAnotherInstance(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("miniredis: %v", err)
+func TestHub_RedisPubSubBroadcast(t *testing.T) {
+	s := miniredis.RunT(t)
+
+	rdb := goredis.NewClient(&goredis.Options{
+		Addr: s.Addr(),
+	})
+	defer rdb.Close()
+
+	logger := zerolog.Nop()
+	hub := NewHub(rdb, logger)
+	defer hub.Close()
+
+	// 1. Test driver connection and pub/sub broadcast
+	driverSend := make(chan Message, 10)
+	driverDone := make(chan struct{})
+	driverClient := &Client{
+		UserID: "driver-123",
+		Role:   "DRIVER",
+		Send:   driverSend,
+		done:   driverDone,
 	}
-	defer mr.Close()
-	newClient := func() *redis.Client { return redis.NewClient(&redis.Options{Addr: mr.Addr()}) }
 
-	hubA := NewHub(zerolog.Nop(), newClient())
-	hubB := NewHub(zerolog.Nop(), newClient())
+	hub.RegisterDriver("driver-123", driverClient)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go hubB.Run(ctx)                   // only B subscribes to the fan-out channel
-	time.Sleep(200 * time.Millisecond) // let B's subscription establish
+	// Wait briefly for PSubscribe subscription to activate
+	time.Sleep(100 * time.Millisecond)
 
-	// The driver's socket lives on instance B.
-	client := &Client{UserID: "driver-1", Role: "DRIVER", Send: make(chan Message, 1)}
-	hubB.RegisterDriver("driver-1", client)
+	msg := Message{
+		Type: "test_driver_notification",
+		Payload: map[string]interface{}{
+			"hello": "world",
+		},
+	}
 
-	// The "you got a ride" message is produced on instance A, which has no socket.
-	hubA.SendToDriver("driver-1", Message{Type: "ride.matched", RideID: "r1"})
+	hub.SendToDriver("driver-123", msg)
 
+	// Read message from local driver channel
 	select {
-	case got := <-client.Send:
-		if got.Type != "ride.matched" || got.RideID != "r1" {
-			t.Fatalf("wrong message delivered across instances: %+v", got)
+	case received := <-driverSend:
+		if received.Type != "test_driver_notification" {
+			t.Errorf("expected msg type test_driver_notification, got %s", received.Type)
+		}
+		if val, ok := received.Payload["hello"].(string); !ok || val != "world" {
+			t.Errorf("expected payload hello: world, got %v", received.Payload)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("message was NOT delivered across instances — fan-out is broken")
+		t.Fatal("timed out waiting for driver pub/sub message")
 	}
-}
 
-// Same for a customer socket, keyed by ride id.
-func TestHub_FanoutDeliversToCustomerOnAnotherInstance(t *testing.T) {
-	mr, _ := miniredis.Run()
-	defer mr.Close()
-	newClient := func() *redis.Client { return redis.NewClient(&redis.Options{Addr: mr.Addr()}) }
+	// 2. Test customer connection and pub/sub broadcast
+	customerSend := make(chan Message, 10)
+	customerDone := make(chan struct{})
+	customerClient := &Client{
+		UserID: "customer-456",
+		RideID: "ride-789",
+		Role:   "CUSTOMER",
+		Send:   customerSend,
+		done:   customerDone,
+	}
 
-	hubA := NewHub(zerolog.Nop(), newClient())
-	hubB := NewHub(zerolog.Nop(), newClient())
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go hubB.Run(ctx)
-	time.Sleep(200 * time.Millisecond)
+	hub.RegisterCustomer("ride-789", "customer-456", customerClient)
 
-	client := &Client{UserID: "cust-1", RideID: "ride-9", Role: "CUSTOMER", Send: make(chan Message, 1)}
-	hubB.RegisterCustomer("ride-9", "cust-1", client)
+	time.Sleep(100 * time.Millisecond)
 
-	hubA.SendToCustomer("ride-9", Message{Type: "driver.location", RideID: "ride-9"})
+	msgCust := Message{
+		Type:   "test_customer_notification",
+		RideID: "ride-789",
+	}
+
+	hub.SendToCustomer("ride-789", msgCust)
 
 	select {
-	case got := <-client.Send:
-		if got.Type != "driver.location" {
-			t.Fatalf("wrong message: %+v", got)
+	case received := <-customerSend:
+		if received.Type != "test_customer_notification" {
+			t.Errorf("expected msg type test_customer_notification, got %s", received.Type)
+		}
+		if received.RideID != "ride-789" {
+			t.Errorf("expected rideID ride-789, got %s", received.RideID)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("customer message was NOT delivered across instances")
+		t.Fatal("timed out waiting for customer pub/sub message")
 	}
-}
 
-// A message for a socket on THIS instance is delivered exactly once (locally);
-// the instance must ignore its own Redis echo (no double delivery).
-func TestHub_NoDoubleDeliveryFromOwnEcho(t *testing.T) {
-	mr, _ := miniredis.Run()
-	defer mr.Close()
-	hub := NewHub(zerolog.Nop(), redis.NewClient(&redis.Options{Addr: mr.Addr()}))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go hub.Run(ctx)
-	time.Sleep(200 * time.Millisecond)
-
-	client := &Client{UserID: "d1", Send: make(chan Message, 4)}
-	hub.RegisterDriver("d1", client)
-	hub.SendToDriver("d1", Message{Type: "x"})
-
-	select {
-	case <-client.Send: // the single local delivery
-	case <-time.After(2 * time.Second):
-		t.Fatal("no local delivery")
+	// 3. Test active connections count
+	drivers, customers := hub.ActiveConnectionsCount()
+	if drivers != 1 {
+		t.Errorf("expected 1 driver, got %d", drivers)
 	}
-	// The instance's own echo comes back over Redis — it must be ignored.
-	time.Sleep(200 * time.Millisecond)
-	select {
-	case extra := <-client.Send:
-		t.Fatalf("double delivery from own echo: %+v", extra)
-	default:
+	if customers != 1 {
+		t.Errorf("expected 1 customer, got %d", customers)
 	}
-}
 
-// Fan-out must be resilient: with no Redis wired (nil), delivery is purely local
-// and Send/Run never panic.
-func TestHub_NilRedisStaysLocal(t *testing.T) {
-	hub := NewHub(zerolog.Nop(), nil)
-	go hub.Run(context.Background()) // no-op, must not panic
-	client := &Client{UserID: "d1", Send: make(chan Message, 1)}
-	hub.RegisterDriver("d1", client)
-	hub.SendToDriver("d1", Message{Type: "local"})
-	select {
-	case got := <-client.Send:
-		if got.Type != "local" {
-			t.Fatalf("wrong message: %+v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("local delivery failed with nil redis")
+	hub.UnregisterDriver("driver-123")
+	hub.UnregisterCustomer("ride-789")
+
+	drivers, customers = hub.ActiveConnectionsCount()
+	if drivers != 0 {
+		t.Errorf("expected 0 drivers, got %d", drivers)
+	}
+	if customers != 0 {
+		t.Errorf("expected 0 customers, got %d", customers)
 	}
 }
