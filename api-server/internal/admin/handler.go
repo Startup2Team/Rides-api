@@ -792,6 +792,16 @@ func (h *Handler) VerifyDriverOTP(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, map[string]string{"status": "verified"})
 }
 
+// GET /api/v1/admin/launch-readiness
+func (h *Handler) LaunchReadiness(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.LaunchReadiness(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
+}
+
 func paginate(r *http.Request) (int, int) {
 	limit := 20
 	offset := 0
