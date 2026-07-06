@@ -14,11 +14,11 @@ type Config struct {
 	Env         string
 	AdminOrigin string // CORS allowed origin for admin frontend (production URL)
 
-	Database  DatabaseConfig
-	Redis     RedisConfig
-	JWT       JWTConfig
-	AT        ATConfig
-	Pindo     PindoConfig
+	Database DatabaseConfig
+	Redis    RedisConfig
+	JWT      JWTConfig
+	AT       ATConfig
+	Pindo    PindoConfig
 	// SMSProvider selects the SMS gateway: "africastalking" (default) or "pindo".
 	SMSProvider string
 	// OTPMode selects how phone OTP is done: "self_sms" (we generate+verify the
