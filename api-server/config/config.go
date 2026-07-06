@@ -18,6 +18,13 @@ type Config struct {
 	Redis     RedisConfig
 	JWT       JWTConfig
 	AT        ATConfig
+	Pindo     PindoConfig
+	// SMSProvider selects the SMS gateway: "africastalking" (default) or "pindo".
+	SMSProvider string
+	// OTPMode selects how phone OTP is done: "self_sms" (we generate+verify the
+	// code, delivered via SMSProvider) or "pindo_verify" (Pindo's Verify API owns
+	// the PIN lifecycle — cheaper, ~$0.002 per successful verification).
+	OTPMode   string
 	Firebase  FirebaseConfig
 	GMaps     GoogleMapsConfig
 	MoMo      MoMoConfig
@@ -107,6 +114,14 @@ type ATConfig struct {
 	WhatsAppSender  string
 }
 
+// PindoConfig holds Pindo (pindo.io) SMS credentials — the cheaper Rwanda-local
+// alternative to Africa's Talking. Used when SMSProvider == "pindo".
+type PindoConfig struct {
+	APIToken string // Bearer token from the Pindo dashboard
+	Sender   string // approved Sender ID (e.g. "Rides")
+	Brand    string // brand name shown in Verify (2FA) messages — PINDO_VERIFY_BRAND
+}
+
 type FirebaseConfig struct {
 	ServiceAccountPath string
 }
@@ -121,6 +136,7 @@ type MoMoConfig struct {
 	Environment     string
 	WebhookSecret   string
 	IPWhitelist     string
+
 	// Live MTN MoMo Collections credentials. When APIUser + APIKey +
 	// SubscriptionKey are all set, the payment service makes real RequestToPay
 	// calls; otherwise it stays inert (returns a mock PENDING) so the rest of
@@ -214,8 +230,11 @@ func Load() (*Config, error) {
 	if cfg.Database.ReadURL == "" {
 		cfg.Database.ReadURL = cfg.Database.URL
 	}
-	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 25)
-	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 5)
+	// Default pool sized for a single strong instance. When running MULTIPLE api
+	// instances (horizontal scale), put PgBouncer in front and lower per-instance
+	// MaxConns so N_instances × MaxConns stays under Postgres max_connections.
+	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 60)
+	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 10)
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")
 	cfg.Redis.ClusterMode = getEnvBool("REDIS_CLUSTER_MODE", false)
 
@@ -236,6 +255,12 @@ func Load() (*Config, error) {
 	cfg.AT.MaskingNumber = getEnv("AT_MASKING_NUMBER", "")
 	cfg.AT.WhatsAppEnabled = getEnvBool("AT_WHATSAPP_ENABLED", false)
 	cfg.AT.WhatsAppSender = getEnv("AT_WHATSAPP_SENDER", "")
+
+	cfg.SMSProvider = getEnv("SMS_PROVIDER", "africastalking")
+	cfg.Pindo.APIToken = getEnv("PINDO_API_TOKEN", "")
+	cfg.Pindo.Sender = getEnv("PINDO_SENDER", "")
+	cfg.Pindo.Brand = getEnv("PINDO_VERIFY_BRAND", "Rides")
+	cfg.OTPMode = getEnv("OTP_MODE", "self_sms")
 
 	cfg.Firebase.ServiceAccountPath = getEnv("FIREBASE_SERVICE_ACCOUNT_PATH", "./firebase-service-account.json")
 
@@ -298,7 +323,10 @@ func Load() (*Config, error) {
 	cfg.Payments.ManualMomoName = getEnv("MANUAL_PAY_MOMO_NAME", "")
 	cfg.Payments.ManualInstructions = getEnv("MANUAL_PAY_INSTRUCTIONS", "")
 
-	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 300)
+	// 1200/min (20/s) per IP: a loose DDoS/abuse backstop only. Real per-actor
+	// throttling is done per-user (JWT) on the authed groups, so a whole carrier
+	// NAT of legitimate users sharing one IP won't be throttled by this.
+	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 1200)
 	cfg.Security.AuthRefreshRateLimit = getEnvInt("RATE_LIMIT_AUTH_REFRESH", 20)
 	cfg.Security.MomoWebhookRateLimit = getEnvInt("RATE_LIMIT_MOMO_WEBHOOK", 120)
 	cfg.Security.AdminLoginRateLimit = getEnvInt("RATE_LIMIT_ADMIN_LOGIN", 5)

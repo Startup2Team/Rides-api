@@ -58,7 +58,10 @@ Everything below is run **on the box** after you SSH in.
 │       ├── migrations/                # 100 .sql files = your DB schema
 │       └── nginx/
 │           ├── nginx.conf             # reverse-proxy routing
-│           └── certs/                 # rides.rw.pem + rides.rw.key (TLS)
+│           ├── certs/                 # rides.rw.pem + rides.rw.key (TLS)
+│       └── nginx/
+│           ├── nginx.conf             # reverse-proxy routing
+│           ├── certs/                 # rides.rw.pem + rides.rw.key (TLS)
 └── Rides-web/                 # admin + landing repo (Next.js)
     └── Dockerfile
 ```

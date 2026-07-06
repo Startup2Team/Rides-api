@@ -398,7 +398,6 @@ func TestSuspendUser_RevokesSessions(t *testing.T) {
 	assert.False(t, mr.Exists("session:user-uuid:jti2"))
 	assert.True(t, mr.Exists("session:other-user:jti3"))
 }
-
 func TestReinstateUser_Success(t *testing.T) {
 	svc := newTestService(&mockDB{
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
@@ -468,7 +467,6 @@ func TestUpdateDriver_SQLInjectionAttempt(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
 	assert.Equal(t, "INVALID_FIELD", appErr.Code)
 }
-
 func TestUpdateDriver_EmptyFields(t *testing.T) {
 	svc := newTestService(&mockDB{})
 	// empty fields still executes (service doesn't validate, handler does)

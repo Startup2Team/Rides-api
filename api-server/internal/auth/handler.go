@@ -167,7 +167,6 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
-
 	respond.NoContent(w)
 }
 

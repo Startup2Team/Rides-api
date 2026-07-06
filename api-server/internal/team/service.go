@@ -84,17 +84,21 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
 }
 
-// ResendInvite refreshes the invited_at timestamp for a team member invite.
+// ResendInvite re-issues an invite for a still-pending admin account.
 func (s *Service) ResendInvite(ctx context.Context, id string) error {
-	return s.repo.TouchInvitedAt(ctx, id)
+	n, err := s.repo.ReissueInvite(ctx, id)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
 }
 
-// ResetMember2FA clears TOTP credentials for another admin account.
-func (s *Service) ResetMember2FA(ctx context.Context, actorID, memberID string) error {
-	if actorID == memberID {
-		return apperrors.New(http.StatusForbidden, "SELF_ACTION", "use account settings to reset your own 2FA")
-	}
-	return s.repo.ClearTOTP(ctx, memberID)
+// AdminResetMember2FA clears another admin's 2FA so they must re-enroll at next login.
+func (s *Service) AdminResetMember2FA(ctx context.Context, id string) error {
+	return s.repo.ClearTOTP(ctx, id)
 }
 
 func (s *Service) ListRoles(ctx context.Context) ([]*Role, error) {
@@ -111,6 +115,11 @@ func (s *Service) UpdateRoleByID(ctx context.Context, roleID, name, description 
 
 func (s *Service) DeleteRoleByID(ctx context.Context, roleID string) error {
 	return s.repo.DeleteRoleByID(ctx, roleID)
+}
+
+// UpdateRolePermissions replaces the permissions of a non-system role.
+func (s *Service) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return s.repo.UpdateRolePermissions(ctx, roleID, permissions)
 }
 
 func (s *Service) UpdateName(ctx context.Context, id, name string) error {

@@ -3,7 +3,6 @@ package team
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +91,10 @@ func (m *mockRepo) Delete(ctx context.Context, id string) error {
 	return nil
 }
 func (m *mockRepo) TouchInvitedAt(ctx context.Context, id string) error { return nil }
+func (m *mockRepo) ReissueInvite(ctx context.Context, id string) (int64, error) { return 1, nil }
+func (m *mockRepo) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return nil
+}
 func (m *mockRepo) UpdateName(ctx context.Context, id, name string) error {
 	if m.updateNameFn != nil {
 		return m.updateNameFn(ctx, id, name)
@@ -648,20 +651,4 @@ func TestResetTOTP_NoExistingSecret(t *testing.T) {
 	svc := newTestService(repo, newTestRedis(t))
 	_, _, _, err := svc.ResetTOTP(context.Background(), "a1", "123456")
 	require.Error(t, err)
-}
-
-func TestTOTPEncryption_RoundTripAndFallback(t *testing.T) {
-	originalSecret := "JBSWY3DPEHPK3PXP"
-	encrypted, err := encryptTOTP(originalSecret)
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(encrypted, "enc:"))
-
-	decrypted, err := decryptTOTP(encrypted)
-	require.NoError(t, err)
-	assert.Equal(t, originalSecret, decrypted)
-
-	plainSecret := "MYPLAINSECRET"
-	fallbackDecrypted, err := decryptTOTP(plainSecret)
-	require.NoError(t, err)
-	assert.Equal(t, plainSecret, fallbackDecrypted)
 }

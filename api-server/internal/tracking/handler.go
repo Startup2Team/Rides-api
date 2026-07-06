@@ -19,7 +19,15 @@ import (
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
-// upgrader is now initialized dynamically inside NewHandler.
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 4096,
+	CheckOrigin: func(r *http.Request) bool {
+		// Allow all origins — mobile app clients connect from various origins.
+		// In production, restrict to your app's domain.
+		return true
+	},
+}
 
 const (
 	writeWait  = 10 * time.Second
@@ -39,35 +47,10 @@ type Handler struct {
 	redis     goredis.UniversalClient
 	cfg       *config.Config
 	log       zerolog.Logger
-	upgrader  websocket.Upgrader
 }
 
 func NewHandler(hub *Hub, driverSvc *driver.Service, rdb goredis.UniversalClient, cfg *config.Config, log zerolog.Logger) *Handler {
-	upg := websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 4096,
-		CheckOrigin: func(r *http.Request) bool {
-			if cfg.Env == "production" {
-				origin := r.Header.Get("Origin")
-				if origin == "" {
-					return true // allow native apps
-				}
-				if cfg.AdminOrigin != "" && origin == cfg.AdminOrigin {
-					return true
-				}
-				return false
-			}
-			return true // dev allows all
-		},
-	}
-	return &Handler{
-		hub:       hub,
-		driverSvc: driverSvc,
-		redis:     rdb,
-		cfg:       cfg,
-		log:       log,
-		upgrader:  upg,
-	}
+	return &Handler{hub: hub, driverSvc: driverSvc, redis: rdb, cfg: cfg, log: log}
 }
 
 // WS /ws/driver
@@ -96,7 +79,7 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := h.upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error().Err(err).Msg("ws: driver upgrade failed")
 		return
@@ -323,7 +306,7 @@ func (h *Handler) CustomerWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := h.upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error().Err(err).Msg("ws: customer upgrade failed")
 		return

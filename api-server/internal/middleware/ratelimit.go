@@ -154,6 +154,35 @@ func UserRateLimit(rdb redis.UniversalClient, prefix string, maxRequests int, wi
 	}
 }
 
+// UserRateLimit429 is like UserRateLimit but returns 429 (not a silent 204) when
+// the limit is exceeded. Use it as a per-user BACKSTOP on whole route groups,
+// where the caller must know the request was rejected — unlike a droppable GPS
+// ping. Keyed on JWT user_id, so it is immune to shared carrier-NAT IPs.
+func UserRateLimit429(rdb redis.UniversalClient, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims := GetClaims(r)
+			if claims == nil {
+				// No JWT (shouldn't reach here behind Authenticate) — pass through.
+				next.ServeHTTP(w, r)
+				return
+			}
+			key := fmt.Sprintf("ratelimit:user:%s:%s", prefix, claims.UserID)
+			count, err := atomicIncr(r.Context(), rdb, key, window)
+			if err != nil {
+				// Redis unavailable — fail open rather than block real users.
+				next.ServeHTTP(w, r)
+				return
+			}
+			if count > int64(maxRequests) {
+				respond.Error(w, apperrors.ErrRateLimited)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // TrustedIP returns the real client IP.
 //
 // Security: X-Forwarded-For and X-Real-IP can be spoofed by any client.
