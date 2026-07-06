@@ -212,8 +212,11 @@ func Load() (*Config, error) {
 	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
-	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 25)
-	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 5)
+	// Default pool sized for a single strong instance. When running MULTIPLE api
+	// instances (horizontal scale), put PgBouncer in front and lower per-instance
+	// MaxConns so N_instances × MaxConns stays under Postgres max_connections.
+	cfg.Database.MaxConns = getEnvInt("DATABASE_MAX_CONNS", 60)
+	cfg.Database.MinConns = getEnvInt("DATABASE_MIN_CONNS", 10)
 	cfg.Redis.URL = getEnv("REDIS_URL", "redis://localhost:6379")
 
 	cfg.JWT.AccessSecret = requireEnv("JWT_ACCESS_SECRET")
@@ -297,7 +300,10 @@ func Load() (*Config, error) {
 	cfg.Payments.ManualMomoName = getEnv("MANUAL_PAY_MOMO_NAME", "")
 	cfg.Payments.ManualInstructions = getEnv("MANUAL_PAY_INSTRUCTIONS", "")
 
-	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 300)
+	// 1200/min (20/s) per IP: a loose DDoS/abuse backstop only. Real per-actor
+	// throttling is done per-user (JWT) on the authed groups, so a whole carrier
+	// NAT of legitimate users sharing one IP won't be throttled by this.
+	cfg.Security.GlobalRateLimitPerMin = getEnvInt("GLOBAL_RATE_LIMIT_PER_MIN", 1200)
 	cfg.Security.MaxRequestBodyBytes = int64(getEnvInt("MAX_REQUEST_BODY_BYTES", 1<<20)) // 1 MiB
 	cfg.Security.SwaggerEnabled = getEnvBool("SWAGGER_ENABLED", cfg.Env != "production")
 	cfg.Security.SwaggerBasicAuth = getEnv("SWAGGER_BASIC_AUTH", "")

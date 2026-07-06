@@ -298,6 +298,39 @@ func (r *Repository) UpdateRoleByID(ctx context.Context, roleID, name, descripti
 	return role, nil
 }
 
+// UpdateRolePermissions replaces only the permissions of a non-system role.
+// Returns cannot_modify_system_role if the role is a system role or missing.
+func (r *Repository) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	raw, err := json.Marshal(permissions)
+	if err != nil {
+		return err
+	}
+	tag, err := r.db.Exec(ctx, `
+		UPDATE admin_roles SET permissions=$1
+		WHERE id=$2 AND is_system=FALSE
+	`, raw, roleID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("cannot_modify_system_role")
+	}
+	return nil
+}
+
+// ReissueInvite re-stamps invited_at for a still-pending (not yet ACTIVE) admin.
+// Returns the number of rows updated (0 = already active or not found).
+func (r *Repository) ReissueInvite(ctx context.Context, id string) (int64, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE admin_accounts SET invited_at=NOW(), updated_at=NOW()
+		WHERE id=$1 AND status <> 'ACTIVE'
+	`, id)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (r *Repository) DeleteRoleByID(ctx context.Context, roleID string) error {
 	var isSystem bool
 	if err := r.db.QueryRow(ctx,

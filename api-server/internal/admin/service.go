@@ -140,6 +140,28 @@ func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reas
 	return nil
 }
 
+// RequestDriverMoreInfo puts a pending driver into NEEDS_MORE_INFO with a note
+// explaining what's missing, so they re-submit. Treated as not-approved by the
+// driver side, so they stay blocked from going online until re-reviewed.
+func (s *Service) RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE driver_profiles
+		SET approval_status = 'NEEDS_MORE_INFO',
+		    approved_by = $1,
+		    rejection_reason = $2,
+		    updated_at = NOW()
+		WHERE id = $3 AND approval_status = 'PENDING_REVIEW'
+	`, adminUserID, reason, profileID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.Newf(http.StatusConflict, "INVALID_STATE",
+			"driver is not pending review or does not exist")
+	}
+	return nil
+}
+
 func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error {
 	suspendedUntil := time.Now().Add(time.Duration(durationHours) * time.Hour)
 

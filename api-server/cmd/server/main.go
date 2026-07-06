@@ -147,7 +147,9 @@ func main() {
 	teamRepo := team.NewRepository(db)
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
-	hub := tracking.NewHub(log)
+	// Redis-backed so WebSocket delivery works across multiple API instances.
+	hub := tracking.NewHub(log, rdb)
+	go hub.Run(context.Background()) // subscribe to cross-instance fan-out for the process lifetime
 
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
@@ -406,6 +408,9 @@ func main() {
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		// Per-user backstop (keyed on JWT user_id, NOT IP): immune to carrier NAT.
+		// Generous — hot endpoints keep their own tighter per-user limits below this.
+		r.Use(mw.UserRateLimit429(rdb, "customer_group", 600, time.Minute))
 		r.Use(mw.RequireNotSuspended())
 		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
 
@@ -435,6 +440,9 @@ func main() {
 	// ── Driver ────────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/driver", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		// Per-user backstop (keyed on JWT user_id, NOT IP): immune to carrier NAT.
+		// Generous — hot endpoints (e.g. location) keep their own tighter limits.
+		r.Use(mw.UserRateLimit429(rdb, "driver_group", 600, time.Minute))
 		r.Use(mw.RequireNotSuspended())
 
 		r.Post("/apply", driverH.Apply)
@@ -624,6 +632,7 @@ func main() {
 			// r.Delete("/drivers/{id}", adminH.DeleteDriver) REMOVED - suspend/reinstate only
 			r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 			r.Post("/drivers/{id}/reject", adminH.RejectDriver)
+			r.Post("/drivers/{id}/request-more-info", adminH.RequestDriverMoreInfo)
 			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
 			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
@@ -783,12 +792,16 @@ func main() {
 			r.Get("/team/roles", teamH.ListRoles)
 			r.Post("/team/roles", teamH.CreateRole)
 			r.Patch("/team/roles/{roleId}", teamH.UpdateRoleByID)
+			r.Patch("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
 			r.Delete("/team/roles/{roleId}", teamH.DeleteRoleByID)
 			r.Post("/team/members/{id}/role", teamH.UpdateRole)
 			r.Post("/team/members/{id}/suspend", teamH.Suspend)
 			r.Post("/team/members/{id}/reinstate", teamH.Reinstate)
 			// r.Post("/team/members/{id}/remove", teamH.Remove) REMOVED - suspend/reinstate only
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+			r.Get("/team/members/{id}/activity", teamH.MemberActivity)
+			r.Post("/team/members/{id}/resend-invite", teamH.ResendInvite)
+			r.Post("/team/members/{id}/reset-2fa", teamH.ResetMember2FA)
 
 			// Audit Log
 			r.Get("/audit", teamH.ListAuditLog)
@@ -796,6 +809,9 @@ func main() {
 			// Packages admin CRUD
 			r.Get("/packages", pkgH.AdminListPackages)
 			r.Get("/packages-purchases", pkgH.AdminListPurchases)
+			// Entitlements — admin-wide balances + manual grant
+			r.Get("/entitlements", pkgH.AdminListEntitlements)
+			r.Post("/entitlements/grant", pkgH.AdminGrantEntitlement)
 			r.Post("/packages", pkgH.AdminCreatePackage)
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
