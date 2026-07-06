@@ -33,3 +33,9 @@ api-server/.env
 
 # Claude Code local settings
 .claude/
+
+# Local tracking files (kept locally, not committed)
+LAUNCH_TRACKER.md
+api-server/LAUNCH_TRACKER.md
+api-server/launch_tracker.json
+api-server/generate_tracker.py
