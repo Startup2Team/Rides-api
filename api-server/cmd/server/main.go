@@ -750,6 +750,7 @@ func main() {
 			r.Post("/drivers", adminH.CreateDriver)
 			r.Get("/drivers/overview", adminH.DriverOverview)
 			r.Get("/drivers/{id}", adminH.GetDriver)
+			r.Get("/drivers/{id}/referrals", adminH.GetDriverReferrals)
 			r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
 			r.Patch("/drivers/{id}", adminH.UpdateDriver)
 			// r.Delete("/drivers/{id}", adminH.DeleteDriver) REMOVED - suspend/reinstate only
