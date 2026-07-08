@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -24,6 +25,7 @@ import (
 const (
 	PurposeRegistration = "REGISTRATION"
 	PurposeLogin        = "LOGIN"
+	PurposePhoneChange  = "PHONE_CHANGE"
 	otpLength           = 6
 	otpExpiryMinutes    = 10
 	// maxOTPAttempts locks a code after this many wrong guesses within its window,
@@ -257,6 +259,78 @@ func (s *Service) VerifyOTPCode(ctx context.Context, phone, code string) error {
 		return apperrors.ErrInvalidOTP
 	}
 	return s.repo.MarkOTPUsed(ctx, record.ID)
+}
+
+// RequestPhoneChange sends an OTP to a NEW phone number for an already
+// authenticated user. The number must be free (not owned by anyone else) and
+// different from the caller's current one. Returns the dev OTP in non-prod.
+func (s *Service) RequestPhoneChange(ctx context.Context, userID, newPhone string) (devOTP string, err error) {
+	user, err := s.repo.FindUserByID(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if user.PhoneNumber == newPhone {
+		return "", apperrors.New(400, "SAME_PHONE", "That is already your phone number.")
+	}
+	if existing, ferr := s.repo.FindUserByPhone(ctx, newPhone); ferr == nil && existing.ID != userID {
+		return "", apperrors.New(409, "PHONE_TAKEN", "That phone number is already in use.")
+	}
+	// deviceID/platform/name are only used by the registration path — pass empty.
+	return s.InitiateOTP(ctx, newPhone, PurposePhoneChange, "", "", "", nil)
+}
+
+// VerifyPhoneChange validates the OTP sent to newPhone and, on success, swaps
+// the authenticated user's phone number. Existing JWTs stay valid (they key on
+// user_id, not phone), so no re-login is required.
+func (s *Service) VerifyPhoneChange(ctx context.Context, userID, newPhone, code string) error {
+	// Re-check availability to close the request→verify race window.
+	if existing, ferr := s.repo.FindUserByPhone(ctx, newPhone); ferr == nil && existing.ID != userID {
+		return apperrors.New(409, "PHONE_TAKEN", "That phone number is already in use.")
+	}
+
+	if s.cfg.OTPMode == "pindo_verify" {
+		if err := s.verifyWithPindo(ctx, newPhone, code); err != nil {
+			return err
+		}
+	} else {
+		attemptsKey := "otp:attempts:" + newPhone + ":" + PurposePhoneChange
+		if n, _ := s.redis.Get(ctx, attemptsKey).Int(); n >= maxOTPAttempts {
+			return apperrors.New(429, "OTP_LOCKED", "Too many incorrect attempts. Request a new code.")
+		}
+		record, err := s.repo.FindLatestOTP(ctx, newPhone, PurposePhoneChange)
+		if err != nil {
+			return apperrors.ErrInvalidOTP
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(record.OTPHash), []byte(code)); err != nil {
+			if c, e := s.redis.Incr(ctx, attemptsKey).Result(); e == nil && c == 1 {
+				s.redis.Expire(ctx, attemptsKey, otpExpiryMinutes*time.Minute)
+			}
+			return apperrors.ErrInvalidOTP
+		}
+		s.redis.Del(ctx, attemptsKey)
+		if err := s.repo.MarkOTPUsed(ctx, record.ID); err != nil {
+			return fmt.Errorf("mark otp used: %w", err)
+		}
+	}
+
+	if err := s.repo.UpdateUserPhone(ctx, userID, newPhone); err != nil {
+		if isUniqueViolation(err) {
+			return apperrors.New(409, "PHONE_TAKEN", "That phone number is already in use.")
+		}
+		return fmt.Errorf("update phone: %w", err)
+	}
+	s.log.Info().Str("user_id", userID).Msg("phone number changed")
+	return nil
+}
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint (23505)
+// failure — used to turn a phone-number collision into a friendly 409.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "23505") || strings.Contains(msg, "unique")
 }
 
 // RefreshTokens validates a refresh token and issues a new access token.

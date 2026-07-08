@@ -416,6 +416,11 @@ func main() {
 
 		r.Get("/profile", custH.GetProfile)
 		r.Put("/profile", custH.UpdateProfile)
+		// Phone-number change (OTP-verified). Tight per-user limit on the request
+		// leg so it can't be abused to spam SMS to arbitrary numbers.
+		r.With(mw.UserRateLimit(rdb, "phone_change_req", 5, 10*time.Minute)).
+			Post("/phone/change/request", authH.RequestPhoneChange)
+		r.Post("/phone/change/verify", authH.VerifyPhoneChange)
 		r.Post("/location", driver.NearbyDriversHandler(driverSvc))
 		r.Get("/fare-estimate", fareH.FareEstimate)
 

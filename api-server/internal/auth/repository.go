@@ -106,6 +106,17 @@ func (r *Repository) UpdateUserDeviceID(ctx context.Context, userID, deviceID st
 	return err
 }
 
+// UpdateUserPhone swaps a user's phone number. phone_number is UNIQUE, so a
+// concurrent claim of the same number surfaces as a 23505 unique violation —
+// the caller maps that to a friendly "already in use" error.
+func (r *Repository) UpdateUserPhone(ctx context.Context, userID, newPhone string) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE users SET phone_number = $1, updated_at = NOW() WHERE id = $2`,
+		newPhone, userID,
+	)
+	return err
+}
+
 func (r *Repository) CreateOTP(ctx context.Context, phone, otpHash, purpose string, expiresAt time.Time) error {
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO otp_verifications (phone_number, otp_hash, purpose, expires_at)
