@@ -31,6 +31,7 @@ import (
 	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/internal/fare"
+	"github.com/workspace/ride-platform/internal/finance"
 	"github.com/workspace/ride-platform/internal/inbox"
 	"github.com/workspace/ride-platform/internal/incidents"
 	"github.com/workspace/ride-platform/internal/location"
@@ -221,6 +222,10 @@ func main() {
 	settingsSvc := settings.NewService(settingsRepo)
 	teamSvc := team.NewService(teamRepo, cfg, rdb)
 	dashSvc := dashboard.NewService(dbRead, rdb, log)
+
+	financeRepo := finance.NewRepository(db)
+	financeSvc := finance.NewService(financeRepo)
+	financeH := finance.NewHandler(financeSvc)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	custSvc := customer.NewService(custRepo)
@@ -873,6 +878,13 @@ func main() {
 			r.Get("/reports/{id}", reportH.Get)
 			r.Get("/reports/{id}/download", reportH.Download)
 			r.Delete("/reports/{id}", reportH.Delete)
+
+			// Finance Reporting & Ledger
+			r.Get("/finance/ledger", financeH.GetGeneralLedger)
+			r.Get("/finance/trial-balance", financeH.GetTrialBalance)
+			r.Get("/finance/balance-sheet", financeH.GetBalanceSheet)
+			r.Get("/finance/export", financeH.ExportFinanceReport)
+			r.Get("/finance/staff-analytics", financeH.GetStaffAnalytics)
 		})
 
 		// --- Finance Write Bucket (Super Admin, Finance Manager) ---
