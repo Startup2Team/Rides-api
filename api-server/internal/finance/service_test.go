@@ -12,7 +12,7 @@ func TestDoubleEntryMapping(t *testing.T) {
 	// Since GetGeneralLedger queries the database, we can mock the repository queries by creating
 	// a mock repo or subclassing it, or test the logic by instantiating the service.
 	// Let's define a service and test that TOP_UP produces a matching Debit/Credit pair.
-	
+
 	now := time.Now()
 	txns := []DBWalletTransaction{
 		{
