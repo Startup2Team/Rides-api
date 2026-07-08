@@ -476,6 +476,11 @@ func main() {
 			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
 				Post("/location", driverH.UpdateLocation)
 
+			// Demand heatmap — where riders are requesting, so a driver can
+			// reposition. Read-only; per-user limit keeps polling reasonable.
+			r.With(mw.UserRateLimit(rdb, "driver_demand_heatmap", 30, time.Minute)).
+				Get("/demand-heatmap", driverH.DemandHeatmap)
+
 			r.Get("/packages", pkgH.ListPackages)
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
 			// Cap purchase attempts per driver so a loop can't spam MoMo prompts

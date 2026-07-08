@@ -3,6 +3,7 @@ package driver
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -22,6 +23,59 @@ type Handler struct {
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+// GET /api/v1/driver/demand-heatmap?lat=&lng=&radius_km=&window_min=
+// Bucketed pickup demand so a driver can see where riders are requesting.
+// lat+lng (both, optional) scope the result to radius_km around that point;
+// omit them for the busiest cells platform-wide. Defaults: window 120 min,
+// radius 5 km. Bounds: window 15–1440 min, radius 0.5–50 km.
+func (h *Handler) DemandHeatmap(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	windowMin := 120
+	if v, err := strconv.Atoi(q.Get("window_min")); err == nil && v > 0 {
+		windowMin = v
+	}
+	if windowMin < 15 {
+		windowMin = 15
+	} else if windowMin > 1440 {
+		windowMin = 1440
+	}
+
+	radiusM := 5000
+	if v, err := strconv.ParseFloat(q.Get("radius_km"), 64); err == nil && v > 0 {
+		radiusM = int(v * 1000)
+	}
+	if radiusM < 500 {
+		radiusM = 500
+	} else if radiusM > 50000 {
+		radiusM = 50000
+	}
+
+	var center *geo.Point
+	latStr, lngStr := q.Get("lat"), q.Get("lng")
+	if latStr != "" || lngStr != "" {
+		lat, err1 := strconv.ParseFloat(latStr, 64)
+		lng, err2 := strconv.ParseFloat(lngStr, 64)
+		if err1 != nil || err2 != nil || lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+			respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "lat and lng must both be valid coordinates")
+			return
+		}
+		center = &geo.Point{Lat: lat, Lng: lng}
+	}
+
+	cells, err := h.svc.DemandHeatmap(r.Context(), windowMin, center, radiusM)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{
+		"window_minutes": windowMin,
+		"radius_meters":  radiusM,
+		"scoped":         center != nil,
+		"points":         cells,
+	})
 }
 
 // POST /api/v1/driver/apply

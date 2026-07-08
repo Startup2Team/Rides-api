@@ -307,6 +307,53 @@ func (r *Repository) UpsertLocation(ctx context.Context, driverProfileID string,
 	return err
 }
 
+// DemandCell is one bucketed pickup-demand cell for the driver heatmap.
+type DemandCell struct {
+	Lat   float64 `json:"lat"`
+	Lng   float64 `json:"lng"`
+	Count int     `json:"count"`
+}
+
+// DemandHeatmap buckets recent ride pickups onto a ~110 m grid (3-decimal
+// rounding) over the last windowMin minutes, busiest cells first. When center
+// is non-nil it restricts to radiusM metres around it; otherwise it returns the
+// busiest cells platform-wide. Read-only; safe for drivers to poll.
+func (r *Repository) DemandHeatmap(ctx context.Context, windowMin int, center *geo.Point, radiusM int) ([]DemandCell, error) {
+	q := `
+		SELECT ROUND(ST_Y(pickup_point::geometry)::NUMERIC, 3) AS lat_bucket,
+		       ROUND(ST_X(pickup_point::geometry)::NUMERIC, 3) AS lng_bucket,
+		       COUNT(*) AS demand_count
+		FROM rides
+		WHERE pickup_point IS NOT NULL
+		  AND created_at >= NOW() - ($1 || ' minutes')::INTERVAL`
+	args := []interface{}{windowMin}
+	if center != nil {
+		q += `
+		  AND ST_DWithin(pickup_point, ST_GeographyFromText($2), $3)`
+		args = append(args, center.WKT(), radiusM)
+	}
+	q += `
+		GROUP BY lat_bucket, lng_bucket
+		ORDER BY demand_count DESC
+		LIMIT 300`
+
+	rows, err := r.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cells := make([]DemandCell, 0)
+	for rows.Next() {
+		var c DemandCell
+		if err := rows.Scan(&c.Lat, &c.Lng, &c.Count); err != nil {
+			return nil, err
+		}
+		cells = append(cells, c)
+	}
+	return cells, rows.Err()
+}
+
 func (r *Repository) FindNearby(ctx context.Context, loc geo.Point, radiusM int, transportType string, excludedIDs []string) ([]*NearbyCandidate, error) {
 	if excludedIDs == nil {
 		excludedIDs = []string{}

@@ -79,6 +79,19 @@ func (s *Service) SetCreditChecker(cc CreditChecker) {
 	s.creditChecker = cc
 }
 
+// DemandHeatmap returns bucketed pickup demand over the last windowMin minutes,
+// optionally scoped to radiusM metres around center — so a driver can see where
+// riders are requesting and reposition. Read-only.
+func (s *Service) DemandHeatmap(ctx context.Context, windowMin int, center *geo.Point, radiusM int) ([]DemandCell, error) {
+	cells, err := s.repo.DemandHeatmap(ctx, windowMin, center, radiusM)
+	if err != nil {
+		s.log.Error().Err(err).Int("window_min", windowMin).Msg("driver demand-heatmap: query failed")
+		return nil, err
+	}
+	s.log.Debug().Int("window_min", windowMin).Int("cells", len(cells)).Msg("driver demand-heatmap served")
+	return cells, nil
+}
+
 // Apply submits a driver application.
 // In dev mode (DEV_AUTO_APPROVE_DRIVERS=true) the profile is immediately
 // approved and the user's role_state is promoted to DRIVER_ACTIVE so
