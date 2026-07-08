@@ -41,6 +41,7 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		Sector                  string `json:"sector"           validate:"required"`
 		Cell                    string `json:"cell"             validate:"required"`
 		Village                 string `json:"village"          validate:"required"`
+		Gender                  string `json:"gender"           validate:"omitempty,oneof=male female other"`
 		PassengerSeats          *int   `json:"passenger_seats"`
 		LoadCapacityKg          *int   `json:"load_capacity_kg"`
 		LicenseExpiryDate       string `json:"license_expiry_date"`
@@ -122,6 +123,7 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		Sector:                  body.Sector,
 		Cell:                    body.Cell,
 		Village:                 body.Village,
+		Gender:                  body.Gender,
 		PassengerSeats:          body.PassengerSeats,
 		LoadCapacityKg:          body.LoadCapacityKg,
 		DateOfBirth:             dob,

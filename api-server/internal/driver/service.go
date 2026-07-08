@@ -49,6 +49,7 @@ type ApplyInput struct {
 	Sector                  string
 	Cell                    string
 	Village                 string
+	Gender                  string
 	PassengerSeats          *int
 	LoadCapacityKg          *int
 	LicenseExpiryDate       *time.Time
