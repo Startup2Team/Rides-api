@@ -61,6 +61,11 @@ services:
       dockerfile: Dockerfile
     restart: always
     env_file: .env
+    volumes:
+      # FCM Admin SDK credentials — mounted read-only. The file lives on the box
+      # only (gitignored, never baked into the image). FIREBASE_SERVICE_ACCOUNT_PATH
+      # in .env points at ./firebase-service-account.json → /app/... at runtime.
+      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
