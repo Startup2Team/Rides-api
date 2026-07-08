@@ -122,6 +122,10 @@ func (s *Service) UpdateName(ctx context.Context, id, name string) error {
 	return s.repo.UpdateName(ctx, id, name)
 }
 
+func (s *Service) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
+	return s.repo.UpdateProfile(ctx, id, name, phone, photoURL)
+}
+
 func (s *Service) SetPassword(ctx context.Context, id, password string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {

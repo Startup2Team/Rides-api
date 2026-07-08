@@ -13,6 +13,8 @@ type AdminAccount struct {
 	LastActiveAt *time.Time `json:"last_active_at"`
 	InvitedAt    time.Time  `json:"invited_at"`
 	CreatedAt    time.Time  `json:"created_at"`
+	Phone        *string    `json:"phone,omitempty"`
+	PhotoURL     *string    `json:"photo_url,omitempty"`
 }
 
 type Role struct {

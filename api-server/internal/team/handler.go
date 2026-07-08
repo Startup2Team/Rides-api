@@ -203,13 +203,15 @@ func (h *Handler) GetAccount(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) UpdateAccount(w http.ResponseWriter, r *http.Request) {
 	claims := mw.GetClaims(r)
 	var body struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		Phone    string `json:"phone"`
+		PhotoURL string `json:"photo_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
 		return
 	}
-	if err := h.svc.UpdateName(r.Context(), claims.UserID, body.Name); err != nil {
+	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.Name, body.Phone, body.PhotoURL); err != nil {
 		respond.Error(w, err)
 		return
 	}

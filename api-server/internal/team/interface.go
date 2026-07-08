@@ -31,6 +31,7 @@ type TeamService interface {
 	ResetMember2FA(ctx context.Context, actorID, memberID string) error
 	GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
 	UpdateName(ctx context.Context, id, name string) error
+	UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error
 	ChangePassword(ctx context.Context, id, currentPassword, newPassword string) error
 	SetPassword(ctx context.Context, id, password string) error
 }

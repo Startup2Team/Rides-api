@@ -102,6 +102,9 @@ func (m *mockRepo) UpdateName(ctx context.Context, id, name string) error {
 	}
 	return nil
 }
+func (m *mockRepo) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
+	return nil
+}
 func (m *mockRepo) SetPassword(ctx context.Context, id, hash string) error {
 	if m.setPasswordFn != nil {
 		return m.setPasswordFn(ctx, id, hash)

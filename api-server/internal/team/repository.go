@@ -59,7 +59,8 @@ func (r *Repository) ListAdmins(ctx context.Context, status, roleID, search stri
 
 	q := fmt.Sprintf(`
 		SELECT a.id, a.name, a.email, a.role_id, ar.name,
-		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at
+		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at,
+		       a.phone, a.photo_url
 		FROM admin_accounts a
 		JOIN admin_roles ar ON ar.id = a.role_id
 		%s ORDER BY a.created_at DESC
@@ -75,7 +76,8 @@ func (r *Repository) ListAdmins(ctx context.Context, status, roleID, search stri
 	for rows.Next() {
 		a := &AdminAccount{}
 		if err := rows.Scan(&a.ID, &a.Name, &a.Email, &a.RoleID, &a.RoleName,
-			&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt); err != nil {
+			&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt,
+			&a.Phone, &a.PhotoURL); err != nil {
 			return nil, err
 		}
 		result = append(result, a)
@@ -136,6 +138,23 @@ func (r *Repository) UpdateName(ctx context.Context, id, name string) error {
 	return err
 }
 
+func (r *Repository) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
+	var phoneVal *string
+	if phone != "" {
+		phoneVal = &phone
+	}
+	var photoVal *string
+	if photoURL != "" {
+		photoVal = &photoURL
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE admin_accounts
+		SET name = $1, phone = $2, photo_url = $3, updated_at = NOW()
+		WHERE id = $4
+	`, name, phoneVal, photoVal, id)
+	return err
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────
 
 // FindByEmail returns the account + password hash for login.
@@ -145,14 +164,14 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*AdminAccou
 	err := r.db.QueryRow(ctx, `
 		SELECT a.id, a.name, a.email, a.role_id, ar.name,
 		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at,
-		       a.password_hash
+		       a.password_hash, a.phone, a.photo_url
 		FROM admin_accounts a
 		JOIN admin_roles ar ON ar.id = a.role_id
 		WHERE a.email = $1
 	`, email).Scan(
 		&a.ID, &a.Name, &a.Email, &a.RoleID, &a.RoleName,
 		&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt,
-		&passwordHash,
+		&passwordHash, &a.Phone, &a.PhotoURL,
 	)
 	return a, passwordHash, err
 }
@@ -164,14 +183,14 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*AdminAccount, *s
 	err := r.db.QueryRow(ctx, `
 		SELECT a.id, a.name, a.email, a.role_id, ar.name,
 		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at,
-		       a.password_hash
+		       a.password_hash, a.phone, a.photo_url
 		FROM admin_accounts a
 		JOIN admin_roles ar ON ar.id = a.role_id
 		WHERE a.id = $1
 	`, id).Scan(
 		&a.ID, &a.Name, &a.Email, &a.RoleID, &a.RoleName,
 		&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt,
-		&passwordHash,
+		&passwordHash, &a.Phone, &a.PhotoURL,
 	)
 	return a, passwordHash, err
 }
