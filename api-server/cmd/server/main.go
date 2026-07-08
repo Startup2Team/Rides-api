@@ -187,7 +187,7 @@ func main() {
 	dashSvc := dashboard.NewService(db, rdb, log)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
-	custSvc := customer.NewService(custRepo)
+	custSvc := customer.NewService(custRepo, log)
 
 	authH := auth.NewHandler(authSvc, cfg.Env)
 	authH.SetDriverService(driverSvc) // force-offline driver on logout
@@ -416,6 +416,7 @@ func main() {
 
 		r.Get("/profile", custH.GetProfile)
 		r.Put("/profile", custH.UpdateProfile)
+		r.Get("/level", custH.GetLevel) // loyalty / gamification
 		// Phone-number change (OTP-verified). Tight per-user limit on the request
 		// leg so it can't be abused to spam SMS to arbitrary numbers.
 		r.With(mw.UserRateLimit(rdb, "phone_change_req", 5, 10*time.Minute)).

@@ -30,6 +30,19 @@ func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, profile)
 }
 
+// GET /api/v1/customer/level
+// Returns the customer's loyalty level (gamification) + progress to the next tier.
+func (h *Handler) GetLevel(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+
+	level, err := h.svc.GetLevel(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, level)
+}
+
 // PUT /api/v1/customer/profile
 func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
