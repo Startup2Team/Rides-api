@@ -115,10 +115,12 @@ func (r *Repository) GetPayments(ctx context.Context, start, end *time.Time) ([]
 func (r *Repository) GetStaffActivity(ctx context.Context) ([]StaffActivity, error) {
 	query := `
 		SELECT a.id, a.name, a.email, r.name as role,
-		       (SELECT COUNT(*) FROM admin_audit_log WHERE admin_id = a.id) as action_count,
-		       (SELECT MAX(occurred_at) FROM admin_audit_log WHERE admin_id = a.id) as last_active
+		       COUNT(l.id) as action_count,
+		       MAX(l.occurred_at) as last_active
 		FROM admin_accounts a
 		JOIN admin_roles r ON a.role_id = r.id
+		LEFT JOIN admin_audit_log l ON l.admin_id = a.id
+		GROUP BY a.id, a.name, a.email, r.name
 		ORDER BY action_count DESC
 	`
 	rows, err := r.db.Query(ctx, query)
