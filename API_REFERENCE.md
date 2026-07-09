@@ -250,6 +250,32 @@ No body. **Response** `204`.
 ### `GET /driver/documents`
 **Response** `200 { "data": { "documents": [ { "id", "document_type", "file_url", "uploaded_at" } ] } }`
 
+### `GET /driver/session` — one-call bootstrap
+Profile + active vehicle + ride flag + document-expiry alerts, for app startup/reconnect.
+**Response** `200`
+```json
+{ "data": {
+  "profile": { "…driver profile incl. approval_status, is_online, expiry dates…" },
+  "active_vehicle": { "id": "uuid", "vehicle_type_code": "MOTO_BIKE", "plate_number": "RA123B", "is_active": true },
+  "vehicle_count": 2,
+  "has_active_ride": false,
+  "document_alerts": [
+    { "document": "insurance", "expires_on": "2026-07-20", "days_left": 11, "status": "EXPIRING_SOON" }
+  ]
+} }
+```
+
+### Vehicles — multi-vehicle + switching
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET` | `/driver/vehicles` | Own vehicles, active first. Legacy profiles are lazily backfilled. |
+| `POST` | `/driver/vehicles` | `{vehicle_type_code, plate_number, …}` — first one auto-activates. `409 DUPLICATE_PLATE`. |
+| `PATCH` | `/driver/vehicles/{id}` | Partial update. |
+| `DELETE` | `/driver/vehicles/{id}` | `409 LAST_VEHICLE` if it's the only one; deleting the active one activates the oldest remaining. |
+| `POST` | `/driver/vehicles/{id}/activate` | Switch. Syncs `transport_type` for matching in one transaction. **`403 DRIVER_NOT_APPROVED`**, **`409 VEHICLE_SWITCH_ON_RIDE`** during an active ride. |
+
+> Daily job: drivers get a push + in-app notification when license/insurance/authorization expires within 30 days (day marks 30/14/7/3/1/0, once after expiry).
+
 ### `POST /driver/availability` — go online/offline
 **Request** `{ "is_online": true }`
 **Response** `204`. **Error**: `DRIVER_OFFLINE_COOLDOWN` (403) if toggling too fast.

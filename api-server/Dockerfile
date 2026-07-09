@@ -1,15 +1,21 @@
 # ── Build stage ────────────────────────────────────────────────────────────────
-FROM golang:1.24-bookworm AS builder
+# Run the builder on the NATIVE arch ($BUILDPLATFORM) and let Go cross-compile to
+# the target arch. This avoids emulating the Go toolchain under QEMU (which
+# segfaults when building amd64 on an Apple-Silicon/arm64 host) and makes CI
+# builds faster. TARGETOS/TARGETARCH are provided automatically by buildx.
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS builder
+ARG TARGETOS TARGETARCH
 
 WORKDIR /app
 
-# Cache module downloads
+# Cache module downloads (runs natively — no emulation)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and build
+# Copy source and cross-compile a static binary for the target platform
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/dist/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -ldflags="-s -w" -o /app/dist/server ./cmd/server
 
 # ── Runtime stage ───────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

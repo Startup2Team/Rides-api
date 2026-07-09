@@ -78,6 +78,17 @@ func (s *Service) send(ctx context.Context, userID, fcmToken, title, body, nType
 	return s.client.Send(ctx, fcmToken, title, body, data)
 }
 
+// SendToUser sends a generic push to a user's device AND persists it for the
+// in-app notification list. fcmToken may be empty (e.g. push permission denied)
+// — the notification is still persisted so the user sees it in the app.
+func (s *Service) SendToUser(ctx context.Context, userID, fcmToken, title, body, nType string, data map[string]string) error {
+	if fcmToken == "" {
+		s.Persist(ctx, userID, title, body, nType, data)
+		return nil
+	}
+	return s.send(ctx, userID, fcmToken, title, body, nType, data)
+}
+
 // SendRideRequest sends a high-priority FCM push to a driver when a ride is matched.
 func (s *Service) SendRideRequest(ctx context.Context, fcmToken, rideID, pickupAddress, destAddress string, distanceM float64) error {
 	data := map[string]string{
