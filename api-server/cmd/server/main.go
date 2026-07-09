@@ -932,6 +932,7 @@ func main() {
 			r.Post("/team/members/{id}/reset-2fa", teamH.ResetMember2FA)
 			r.Get("/team/members/{id}/activity", teamH.GetMemberActivity)
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+			r.Post("/team/members/{id}/welcome-email", teamH.SendWelcomeEmail)
 			r.Post("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
 
 			// Audit Log

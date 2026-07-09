@@ -30,6 +30,7 @@ type TeamService interface {
 	ResendInvite(ctx context.Context, id string) error
 	ResetMember2FA(ctx context.Context, actorID, memberID string) error
 	GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
+	SendWelcomeEmail(ctx context.Context, id, tempPassword, loginURL string) error
 	UpdateName(ctx context.Context, id, name string) error
 	UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error
 	ChangePassword(ctx context.Context, id, currentPassword, newPassword string) error
