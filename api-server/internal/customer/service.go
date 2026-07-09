@@ -6,12 +6,21 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Repo is the persistence surface the customer service needs. It's an interface
+// (not the concrete *Repository) so the service can be unit-tested with a mock —
+// see service_test.go. *Repository satisfies it.
+type Repo interface {
+	FindByID(ctx context.Context, userID string) (*Profile, error)
+	UpdateProfile(ctx context.Context, userID string, fullName, email, fcmToken, profileImageURL *string) error
+	RideStats(ctx context.Context, userID string) (completedRides int, totalSpend float64, err error)
+}
+
 type Service struct {
-	repo *Repository
+	repo Repo
 	log  zerolog.Logger
 }
 
-func NewService(repo *Repository, log zerolog.Logger) *Service {
+func NewService(repo Repo, log zerolog.Logger) *Service {
 	return &Service{repo: repo, log: log}
 }
 

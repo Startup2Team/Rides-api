@@ -82,6 +82,19 @@ All require JWT. Roles: `CUSTOMER_ONLY`, `DRIVER_PENDING`, `DRIVER_ACTIVE`.
 | `GET` | `/customer/profile` | Get own profile (name, phone, email, fcm_token, role_state) |
 | `PUT` | `/customer/profile` | Update profile |
 
+### Phone Number Change (OTP-verified)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/customer/phone/change/request` | Send an OTP to a new number. Body: `{new_phone}` (E.164). Rejects the current number (`SAME_PHONE`) or one already in use (`409 PHONE_TAKEN`). Rate-limited 5 / 10 min per user. |
+| `POST` | `/customer/phone/change/verify` | Verify the OTP and swap the number. Body: `{new_phone, otp}`. On success `users.phone_number` is updated; existing JWTs stay valid. `409 PHONE_TAKEN` on a racing claim, `OTP_*` on a bad/expired code. |
+
+### Loyalty / Gamification
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/customer/level` | Customer loyalty tier from lifetime **completed** rides. Returns `{level, level_index, completed_rides, total_spend, current_threshold, next_level, next_threshold, rides_to_next_level, progress_to_next (0–1), perks[]}`. Tiers: `BRONZE` (0), `SILVER` (10), `GOLD` (50), `PREMIUM` (150). |
+
 ### Nearby Drivers
 
 | Method | Path | Description |
@@ -168,6 +181,7 @@ All require JWT. Roles: `CUSTOMER_ONLY`, `DRIVER_PENDING`, `DRIVER_ACTIVE`.
 |---|---|---|
 | `POST` | `/driver/availability` | Toggle online/offline. Body: `{online: true}`. Cooldown: 10 min between toggles. Going offline clears GPS history. |
 | `POST` | `/driver/location` | Update GPS position. Body: `{lat, lng}`. Runs plausibility check (>200 km/h → anomaly). Updates Redis GEO index. |
+| `GET` | `/driver/demand-heatmap` | Bucketed recent ride-pickup demand (~110 m grid) so a driver can reposition. Query: `lat`,`lng` (optional pair → scope to `radius_km` via PostGIS `ST_DWithin`; omit for busiest cells platform-wide), `window_min` (default 120, clamped 15–1440), `radius_km` (default 5, clamped 0.5–50). Returns `{window_minutes, radius_meters, scoped, points:[{lat,lng,count}]}`. Rate-limited 30/min. |
 
 ### Packages & Credits (DRIVER_ACTIVE)
 
