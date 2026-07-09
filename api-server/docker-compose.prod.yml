@@ -56,11 +56,24 @@ services:
 
   # ── API Server (Go) ────────────────────────────────────────────────────────
   api:
+    # `image` + `build` are both set on purpose during the GHCR migration:
+    #   • `docker compose up -d --build api`  → builds locally, tags it as `image`
+    #     (the legacy build-on-box path — still works).
+    #   • `docker compose pull api && up -d api` → pulls the CI-built image from
+    #     GHCR (the new path — no Go compile on the box).
+    # API_IMAGE_TAG is set by the deploy job to the git SHA for a pinned, roll-
+    # back-able release; it defaults to `latest` for manual runs on the box.
+    image: ghcr.io/startup2team/rides-api:${API_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
     restart: always
     env_file: .env
+    volumes:
+      # FCM Admin SDK credentials — mounted read-only. The file lives on the box
+      # only (gitignored, never baked into the image). FIREBASE_SERVICE_ACCOUNT_PATH
+      # in .env points at ./firebase-service-account.json → /app/... at runtime.
+      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379

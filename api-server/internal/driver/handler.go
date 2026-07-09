@@ -2,7 +2,10 @@ package driver
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -24,6 +27,75 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// GET /api/v1/driver/demand-heatmap?lat=&lng=&radius_km=&window_min=
+// Bucketed pickup demand so a driver can see where riders are requesting.
+// lat+lng (both, optional) scope the result to radius_km around that point;
+// omit them for the busiest cells platform-wide. Defaults: window 120 min,
+// radius 5 km. Bounds: window 15–1440 min, radius 0.5–50 km.
+func (h *Handler) DemandHeatmap(w http.ResponseWriter, r *http.Request) {
+	windowMin, radiusM, center, err := parseDemandHeatmapParams(r.URL.Query())
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	cells, err := h.svc.DemandHeatmap(r.Context(), windowMin, center, radiusM)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{
+		"window_minutes": windowMin,
+		"radius_meters":  radiusM,
+		"scoped":         center != nil,
+		"points":         cells,
+	})
+}
+
+// errHeatmapCoords is returned when lat/lng are present but not a valid pair.
+var errHeatmapCoords = errors.New("lat and lng must both be valid coordinates")
+
+// parseDemandHeatmapParams reads + clamps the demand-heatmap query params, kept
+// pure (no *http.Request) so every bound can be unit-tested:
+//   - window_min: default 120, clamped to [15, 1440] minutes
+//   - radius_km:  default 5 km, clamped to [0.5, 50] km, returned as metres
+//   - lat+lng:    optional, but must appear TOGETHER and be valid coordinates;
+//     when present they set center for a radius-scoped query. A lone/invalid
+//     coordinate is a hard error (not silently ignored) so the caller can't
+//     accidentally get a platform-wide result when they meant a scoped one.
+func parseDemandHeatmapParams(q url.Values) (windowMin, radiusM int, center *geo.Point, err error) {
+	windowMin = 120
+	if v, e := strconv.Atoi(q.Get("window_min")); e == nil && v > 0 {
+		windowMin = v
+	}
+	if windowMin < 15 {
+		windowMin = 15
+	} else if windowMin > 1440 {
+		windowMin = 1440
+	}
+
+	radiusM = 5000
+	if v, e := strconv.ParseFloat(q.Get("radius_km"), 64); e == nil && v > 0 {
+		radiusM = int(v * 1000)
+	}
+	if radiusM < 500 {
+		radiusM = 500
+	} else if radiusM > 50000 {
+		radiusM = 50000
+	}
+
+	latStr, lngStr := q.Get("lat"), q.Get("lng")
+	if latStr != "" || lngStr != "" {
+		lat, e1 := strconv.ParseFloat(latStr, 64)
+		lng, e2 := strconv.ParseFloat(lngStr, 64)
+		if e1 != nil || e2 != nil || lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+			return 0, 0, nil, errHeatmapCoords
+		}
+		center = &geo.Point{Lat: lat, Lng: lng}
+	}
+	return windowMin, radiusM, center, nil
+}
+
 // POST /api/v1/driver/apply
 func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
@@ -41,6 +113,7 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		Sector                  string `json:"sector"           validate:"required"`
 		Cell                    string `json:"cell"             validate:"required"`
 		Village                 string `json:"village"          validate:"required"`
+		Gender                  string `json:"gender"           validate:"omitempty,oneof=male female other"`
 		PassengerSeats          *int   `json:"passenger_seats"`
 		LoadCapacityKg          *int   `json:"load_capacity_kg"`
 		LicenseExpiryDate       string `json:"license_expiry_date"`
@@ -122,6 +195,7 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		Sector:                  body.Sector,
 		Cell:                    body.Cell,
 		Village:                 body.Village,
+		Gender:                  body.Gender,
 		PassengerSeats:          body.PassengerSeats,
 		LoadCapacityKg:          body.LoadCapacityKg,
 		DateOfBirth:             dob,

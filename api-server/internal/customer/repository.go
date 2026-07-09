@@ -45,6 +45,18 @@ func (r *Repository) FindByID(ctx context.Context, userID string) (*Profile, err
 	return p, nil
 }
 
+// RideStats returns the customer's lifetime COMPLETED-ride count and the sum of
+// agreed fares — the inputs to the gamification level. COALESCE keeps the sum at
+// 0 (never NULL) for a customer with no completed rides.
+func (r *Repository) RideStats(ctx context.Context, userID string) (completedRides int, totalSpend float64, err error) {
+	err = r.db.QueryRow(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(agreed_fare), 0)
+		 FROM rides WHERE customer_id = $1 AND status = 'COMPLETED'`,
+		userID,
+	).Scan(&completedRides, &totalSpend)
+	return completedRides, totalSpend, err
+}
+
 func (r *Repository) UpdateProfile(ctx context.Context, userID string, fullName, email, fcmToken, profileImageURL *string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE users

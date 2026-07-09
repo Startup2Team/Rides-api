@@ -115,6 +115,58 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /api/v1/customer/phone/change/request  (authenticated)
+// Sends an OTP to a new phone number the signed-in user wants to switch to.
+func (h *Handler) RequestPhoneChange(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	var body struct {
+		NewPhone string `json:"new_phone" validate:"required,e164"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	devOTP, err := h.svc.RequestPhoneChange(r.Context(), claims.UserID, body.NewPhone)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	if h.env != "production" && devOTP != "" {
+		respond.OK(w, map[string]string{"dev_otp": devOTP})
+		return
+	}
+	respond.NoContent(w)
+}
+
+// POST /api/v1/customer/phone/change/verify  (authenticated)
+// Validates the OTP and swaps the signed-in user's phone number.
+func (h *Handler) VerifyPhoneChange(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	var body struct {
+		NewPhone string `json:"new_phone" validate:"required,e164"`
+		OTP      string `json:"otp"       validate:"required,len=6"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	if err := h.svc.VerifyPhoneChange(r.Context(), claims.UserID, body.NewPhone, body.OTP); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"phone_number": body.NewPhone})
+}
+
 // POST /api/v1/auth/refresh
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var body struct {

@@ -113,6 +113,29 @@ Requires role `CUSTOMER_ONLY`, `DRIVER_ACTIVE`, or `DRIVER_PENDING`, and a non-s
 **Request** (all optional) `{ "full_name": "…", "email": "…", "fcm_token": "…" }`
 **Response** `204`
 
+### `POST /customer/phone/change/request` — send OTP to a new number
+**Request** `{ "new_phone": "+2507…" }` (E.164)
+**Response** `204` (in non-prod: `200 { "data": { "dev_otp": "123456" } }`)
+**Errors**: `SAME_PHONE` (400, already your number), `PHONE_TAKEN` (409, in use by another account). Rate-limited **5 / 10 min** per user.
+
+### `POST /customer/phone/change/verify` — confirm + swap
+**Request** `{ "new_phone": "+2507…", "otp": "123456" }`
+**Response** `200 { "data": { "phone_number": "+2507…" } }` — `users.phone_number` is updated; existing JWTs stay valid (keyed on user_id).
+**Errors**: `PHONE_TAKEN` (409, racing claim), `OTP_EXPIRED`/`INVALID_OTP`/`OTP_LOCKED` on a bad code.
+
+### `GET /customer/level` — loyalty / gamification
+Loyalty tier derived from lifetime **COMPLETED** rides (the reliable on-platform signal — fares are paid off-app). Tiers: `BRONZE` (0), `SILVER` (10), `GOLD` (50), `PREMIUM` (150 rides).
+**Response** `200`
+```json
+{ "data": {
+  "level": "GOLD", "level_index": 2, "completed_rides": 55, "total_spend": 42000,
+  "current_threshold": 50, "next_level": "PREMIUM", "next_threshold": 150,
+  "rides_to_next_level": 95, "progress_to_next": 0.05,
+  "perks": ["Faster support responses", "Early access to new features"]
+} }
+```
+At `PREMIUM` (top tier): `next_level`/`next_threshold` are `null`, `progress_to_next` is `1`.
+
 ### `POST /customer/location` — nearby drivers
 **Request**
 ```json
@@ -238,6 +261,17 @@ Rate-limited 20/min. Prefer the **WebSocket** `location_update` while online.
 { "lat": -1.9441, "lng": 30.0619, "speed_kmh": 24.5, "heading": 180.0 }  // speed_kmh, heading optional
 ```
 **Response** `204`. **Errors**: `GPS_PLAUSIBILITY` (422), `GPS_INVALID_COORDS` (400).
+
+### `GET /driver/demand-heatmap` — where riders are requesting
+Bucketed recent ride-pickup demand (~110 m grid) so a driver can reposition. Rate-limited 30/min.
+**Query** (all optional): `lat` + `lng` (a valid **pair** scopes to `radius_km` around the point via PostGIS `ST_DWithin`; omit both for busiest cells platform-wide — a lone/invalid coordinate is a `400 VALIDATION`), `window_min` (default 120, clamped 15–1440), `radius_km` (default 5, clamped 0.5–50).
+**Response** `200`
+```json
+{ "data": {
+  "window_minutes": 120, "radius_meters": 5000, "scoped": true,
+  "points": [ { "lat": -1.944, "lng": 30.061, "count": 12 } ]
+} }
+```
 
 ### Packages & credits
 | Method | Path | Body / Query | Response |

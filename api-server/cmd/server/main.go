@@ -187,7 +187,7 @@ func main() {
 	dashSvc := dashboard.NewService(db, rdb, log)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
-	custSvc := customer.NewService(custRepo)
+	custSvc := customer.NewService(custRepo, log)
 
 	authH := auth.NewHandler(authSvc, cfg.Env)
 	authH.SetDriverService(driverSvc) // force-offline driver on logout
@@ -416,6 +416,12 @@ func main() {
 
 		r.Get("/profile", custH.GetProfile)
 		r.Put("/profile", custH.UpdateProfile)
+		r.Get("/level", custH.GetLevel) // loyalty / gamification
+		// Phone-number change (OTP-verified). Tight per-user limit on the request
+		// leg so it can't be abused to spam SMS to arbitrary numbers.
+		r.With(mw.UserRateLimit(rdb, "phone_change_req", 5, 10*time.Minute)).
+			Post("/phone/change/request", authH.RequestPhoneChange)
+		r.Post("/phone/change/verify", authH.VerifyPhoneChange)
 		r.Post("/location", driver.NearbyDriversHandler(driverSvc))
 		r.Get("/fare-estimate", fareH.FareEstimate)
 
@@ -469,6 +475,11 @@ func main() {
 			// 429) so the app doesn't log a red error when a burst is trimmed.
 			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
 				Post("/location", driverH.UpdateLocation)
+
+			// Demand heatmap — where riders are requesting, so a driver can
+			// reposition. Read-only; per-user limit keeps polling reasonable.
+			r.With(mw.UserRateLimit(rdb, "driver_demand_heatmap", 30, time.Minute)).
+				Get("/demand-heatmap", driverH.DemandHeatmap)
 
 			r.Get("/packages", pkgH.ListPackages)
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)

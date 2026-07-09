@@ -28,6 +28,7 @@ type Profile struct {
 	Sector                  string     `json:"sector"`
 	Cell                    string     `json:"cell"`
 	Village                 string     `json:"village"`
+	Gender                  string     `json:"gender,omitempty"`
 	PassengerSeats          *int       `json:"passenger_seats,omitempty"`
 	LoadCapacityKg          *int       `json:"load_capacity_kg,omitempty"`
 	ApprovalStatus          string     `json:"approval_status"`
@@ -94,6 +95,7 @@ const profileSelectCols = `
 	COALESCE(dp.momo_provider, ''),
 	COALESCE(dp.province, ''), COALESCE(dp.district, ''), COALESCE(dp.sector, ''),
 	COALESCE(dp.cell, ''), COALESCE(dp.village, ''),
+	COALESCE(dp.gender, ''),
 	dp.passenger_seats, dp.load_capacity_kg,
 	dp.approval_status, dp.approved_by, dp.approved_at,
 	dp.rejection_reason, dp.suspension_reason,
@@ -112,6 +114,7 @@ func scanProfile(row pgx.Row) (*Profile, error) {
 		&p.DateOfBirth, &p.City, &p.MomoPayCode,
 		&p.MomoProvider,
 		&p.Province, &p.District, &p.Sector, &p.Cell, &p.Village,
+		&p.Gender,
 		&p.PassengerSeats, &p.LoadCapacityKg,
 		&p.ApprovalStatus, &p.ApprovedBy, &p.ApprovedAt,
 		&p.RejectionReason, &p.SuspensionReason,
@@ -199,8 +202,9 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 			city, momo_pay_code, momo_provider,
 			province, district, sector, cell, village,
 			passenger_seats, load_capacity_kg,
-			license_expiry_date, insurance_expiry_date, authorization_expiry_date
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+			license_expiry_date, insurance_expiry_date, authorization_expiry_date,
+			gender
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		RETURNING id
 	`,
 		in.UserID, in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
@@ -208,6 +212,7 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
+		in.Gender,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
@@ -300,6 +305,53 @@ func (r *Repository) UpsertLocation(ctx context.Context, driverProfileID string,
 		    updated_at = NOW()
 	`, driverProfileID, loc.WKT(), speedKMH, heading)
 	return err
+}
+
+// DemandCell is one bucketed pickup-demand cell for the driver heatmap.
+type DemandCell struct {
+	Lat   float64 `json:"lat"`
+	Lng   float64 `json:"lng"`
+	Count int     `json:"count"`
+}
+
+// DemandHeatmap buckets recent ride pickups onto a ~110 m grid (3-decimal
+// rounding) over the last windowMin minutes, busiest cells first. When center
+// is non-nil it restricts to radiusM metres around it; otherwise it returns the
+// busiest cells platform-wide. Read-only; safe for drivers to poll.
+func (r *Repository) DemandHeatmap(ctx context.Context, windowMin int, center *geo.Point, radiusM int) ([]DemandCell, error) {
+	q := `
+		SELECT ROUND(ST_Y(pickup_point::geometry)::NUMERIC, 3) AS lat_bucket,
+		       ROUND(ST_X(pickup_point::geometry)::NUMERIC, 3) AS lng_bucket,
+		       COUNT(*) AS demand_count
+		FROM rides
+		WHERE pickup_point IS NOT NULL
+		  AND created_at >= NOW() - ($1 || ' minutes')::INTERVAL`
+	args := []interface{}{windowMin}
+	if center != nil {
+		q += `
+		  AND ST_DWithin(pickup_point, ST_GeographyFromText($2), $3)`
+		args = append(args, center.WKT(), radiusM)
+	}
+	q += `
+		GROUP BY lat_bucket, lng_bucket
+		ORDER BY demand_count DESC
+		LIMIT 300`
+
+	rows, err := r.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cells := make([]DemandCell, 0)
+	for rows.Next() {
+		var c DemandCell
+		if err := rows.Scan(&c.Lat, &c.Lng, &c.Count); err != nil {
+			return nil, err
+		}
+		cells = append(cells, c)
+	}
+	return cells, rows.Err()
 }
 
 func (r *Repository) FindNearby(ctx context.Context, loc geo.Point, radiusM int, transportType string, excludedIDs []string) ([]*NearbyCandidate, error) {
