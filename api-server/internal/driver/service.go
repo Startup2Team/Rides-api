@@ -72,12 +72,13 @@ type CreditChecker interface {
 
 // Service handles driver business logic.
 type Service struct {
-	repo          *Repository
-	redis         goredis.UniversalClient
-	analytics     *analytics.Service
-	cfg           *config.Config
-	log           zerolog.Logger
-	creditChecker CreditChecker
+	repo           *Repository
+	redis          goredis.UniversalClient
+	analytics      *analytics.Service
+	cfg            *config.Config
+	log            zerolog.Logger
+	creditChecker  CreditChecker
+	expiryNotifier expiryNotifier
 }
 
 func NewService(repo *Repository, rdb goredis.UniversalClient, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
@@ -156,6 +157,9 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 		}
 		return nil, err
 	}
+	// Mirror the application's vehicle into driver_vehicles (the multi-vehicle
+	// source of truth). Tolerate a duplicate plate: the profile row is already
+	// created and the vehicles list lazily backfills from it.
 	if vErr := s.repo.CreateVehicleFromApply(ctx, profile.ID, in); vErr != nil && !isUniqueViolation(vErr) {
 		return nil, vErr
 	}
