@@ -472,6 +472,8 @@ func parseFlexibleDate(dateStr string) (time.Time, error) {
 	return time.Time{}, lastErr
 }
 
+// ── Vehicle endpoints (multi-vehicle + switching) ─────────────────────────────
+
 // GET /api/v1/driver/vehicles
 func (h *Handler) ListVehicles(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
@@ -532,6 +534,8 @@ func (h *Handler) DeleteVehicle(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/driver/vehicles/{id}/activate
+// POST /api/v1/driver/vehicles/{id}/activate — switch the active vehicle.
+// 403 DRIVER_NOT_APPROVED unless approved; 409 VEHICLE_SWITCH_ON_RIDE mid-ride.
 func (h *Handler) ActivateVehicle(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 	id := chi.URLParam(r, "id")
@@ -541,4 +545,16 @@ func (h *Handler) ActivateVehicle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, v)
+}
+
+// GET /api/v1/driver/session — one-call bootstrap: profile, active vehicle,
+// ride-in-progress flag and document-expiry alerts.
+func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	sess, err := h.svc.GetSession(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, sess)
 }

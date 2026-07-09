@@ -293,6 +293,11 @@ func main() {
 	// staring at a spinner forever.
 	go recoverOrphanedRides(bgCtx, db, rdb, engine, hub, log.With().Str("component", "recovery").Logger())
 
+	// Daily driver document-expiry notifications (license/insurance/authorization)
+	// — push + in-app, at the 30/14/7/3/1/0/-1 day marks.
+	driverSvc.SetExpiryNotifier(notifySvc)
+	go driverSvc.RunDocumentExpiryNotifier(bgCtx)
+
 	// Pre-warm landmark route cache
 	locSvc.WarmLandmarkRoutes(bgCtx)
 
@@ -602,6 +607,11 @@ func main() {
 			r.Get("/profile", driverH.GetProfile)
 			r.Put("/profile", driverH.UpdateProfile)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
+			// One-call bootstrap: profile + active vehicle + ride flag + doc alerts.
+			r.Get("/session", driverH.GetSession)
+
+			// Multi-vehicle management + switching. Activation enforces the
+			// business rules (approved driver, no active ride) in the service.
 			r.Get("/vehicles", driverH.ListVehicles)
 			r.Post("/vehicles", driverH.CreateVehicle)
 			r.Patch("/vehicles/{id}", driverH.UpdateVehicle)
