@@ -65,3 +65,42 @@ jobs:
           echo "Pushed:" >> "$GITHUB_STEP_SUMMARY"
           echo "- \`${{ steps.img.outputs.name }}:latest\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- \`${{ steps.img.outputs.name }}:${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # Deploy runs AFTER the image is pushed (needs:) so the box can never pull a
+  # tag that doesn't exist yet. The box pulls the prebuilt image — no Go
+  # compilation on the production machine. Rollback = re-run with an older SHA:
+  #   ssh box 'cd /opt/rides/Rides-api/api-server && \
+  #     API_IMAGE_TAG=<old-sha> docker compose -f docker-compose.prod.yml up -d api'
+  deploy:
+    name: Deploy to Vultr (pull image)
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -H 139.84.251.242 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync tracked files + pull image + restart api
+        run: |
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          # Overlay tracked files (compose/nginx/migrations reference copy) —
+          # ~2 MB now; keeps the box's .env + certs untouched.
+          git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
+          # Pin the box to this commit's image and restart only the api service.
+          $SSH "cd /opt/rides/Rides-api/api-server && \
+                export API_IMAGE_TAG=${{ github.sha }} && \
+                docker compose -f docker-compose.prod.yml pull api && \
+                docker compose -f docker-compose.prod.yml up -d api && \
+                docker image prune -f"
+
+      - name: Verify health
+        run: |
+          sleep 10
+          code=$(curl -s -o /dev/null -w "%{http_code}" https://api.rides.rw/health)
+          echo "health: HTTP $code"
+          test "$code" = "200"
