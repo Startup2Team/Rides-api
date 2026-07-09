@@ -56,6 +56,14 @@ services:
 
   # ── API Server (Go) ────────────────────────────────────────────────────────
   api:
+    # `image` + `build` are both set on purpose during the GHCR migration:
+    #   • `docker compose up -d --build api`  → builds locally, tags it as `image`
+    #     (the legacy build-on-box path — still works).
+    #   • `docker compose pull api && up -d api` → pulls the CI-built image from
+    #     GHCR (the new path — no Go compile on the box).
+    # API_IMAGE_TAG is set by the deploy job to the git SHA for a pinned, roll-
+    # back-able release; it defaults to `latest` for manual runs on the box.
+    image: ghcr.io/startup2team/rides-api:${API_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
