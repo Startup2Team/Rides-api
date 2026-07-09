@@ -256,6 +256,15 @@ func (l *LedgerService) AdminGrant(ctx context.Context, profileID, vehicleTypeID
 	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "ADMIN_GRANT", rides, bonus, nil, nil, &adminID, reason, nil)
 }
 
+// AdminGrantByCode resolves a vehicle-type code to its id, then grants credits.
+func (l *LedgerService) AdminGrantByCode(ctx context.Context, profileID, vehicleTypeCode, adminID string, rides, bonus int, reason string) error {
+	var vtID string
+	if err := l.repo.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, vehicleTypeCode).Scan(&vtID); err != nil {
+		return err
+	}
+	return l.AdminGrant(ctx, profileID, vtID, adminID, rides, bonus, reason)
+}
+
 // DeductForRide spends one credit at fare agreement, idempotent on the ride.
 func (l *LedgerService) DeductForRide(ctx context.Context, userID, vehicleTypeCode, rideID string) (bool, error) {
 	profileID, vehicleTypeID, _, err := l.repo.resolveProfile(ctx, userID, vehicleTypeCode)

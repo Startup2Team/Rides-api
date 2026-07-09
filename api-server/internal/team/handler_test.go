@@ -109,6 +109,9 @@ func (m *mockSvc) UpdateRoleByID(ctx context.Context, roleID, name, description 
 func (m *mockSvc) DeleteRoleByID(ctx context.Context, roleID string) error {
 	return m.deleteRoleByIDFn(ctx, roleID)
 }
+func (m *mockSvc) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return nil
+}
 func (m *mockSvc) UpdateRole(ctx context.Context, id, roleID string) error {
 	return m.updateRoleFn(ctx, id, roleID)
 }
@@ -128,6 +131,9 @@ func (m *mockSvc) GetMemberActivity(ctx context.Context, adminID string, limit i
 }
 func (m *mockSvc) UpdateName(ctx context.Context, id, name string) error {
 	return m.updateNameFn(ctx, id, name)
+}
+func (m *mockSvc) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
+	return nil
 }
 func (m *mockSvc) ChangePassword(ctx context.Context, id, current, newPw string) error {
 	return m.changePasswordFn(ctx, id, current, newPw)

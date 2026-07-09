@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -202,13 +203,15 @@ func (h *Handler) GetAccount(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) UpdateAccount(w http.ResponseWriter, r *http.Request) {
 	claims := mw.GetClaims(r)
 	var body struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		Phone    string `json:"phone"`
+		PhotoURL string `json:"photo_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
 		return
 	}
-	if err := h.svc.UpdateName(r.Context(), claims.UserID, body.Name); err != nil {
+	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.Name, body.Phone, body.PhotoURL); err != nil {
 		respond.Error(w, err)
 		return
 	}
@@ -576,6 +579,35 @@ func (h *Handler) DeleteRoleByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, map[string]string{"message": "deleted"})
+}
+
+// GET /api/v1/admin/team/members/:id/activity
+// Recent audit entries for one admin, shaped for the team console.
+func (h *Handler) MemberActivity(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	entries, err := h.svc.GetMemberActivity(r.Context(), id, 50)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	type activityItem struct {
+		ID        string    `json:"id"`
+		Action    string    `json:"action"`
+		Detail    string    `json:"detail"`
+		IP        string    `json:"ip"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	items := make([]activityItem, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, activityItem{
+			ID:        strconv.FormatInt(e.ID, 10),
+			Action:    e.Action,
+			Detail:    e.Detail,
+			IP:        e.IP,
+			CreatedAt: e.OccurredAt,
+		})
+	}
+	respond.OK(w, map[string]interface{}{"activity": items})
 }
 
 // GET /api/v1/admin/audit

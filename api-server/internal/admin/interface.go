@@ -45,4 +45,5 @@ type AdminService interface {
 	GetLiveRide(ctx context.Context, rideID string) (map[string]interface{}, error)
 	InterveneRide(ctx context.Context, rideID, action, reason string) error
 	UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error
+	LaunchReadiness(ctx context.Context) (map[string]interface{}, error)
 }

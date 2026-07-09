@@ -15,6 +15,7 @@ type TeamRepo interface {
 	Delete(ctx context.Context, id string) error
 	TouchInvitedAt(ctx context.Context, id string) error
 	UpdateName(ctx context.Context, id, name string) error
+	UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error
 	SetPassword(ctx context.Context, id, hash string) error
 	GetTOTPSecret(ctx context.Context, id string) (*string, error)
 	SaveTOTP(ctx context.Context, id, secret string) error
@@ -24,7 +25,9 @@ type TeamRepo interface {
 	ListRoles(ctx context.Context) ([]*Role, error)
 	CreateRole(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
 	UpdateRoleByID(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
+	UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error
 	DeleteRoleByID(ctx context.Context, roleID string) error
+	ReissueInvite(ctx context.Context, id string) (int64, error)
 	LogAction(ctx context.Context, adminID, action, targetType, targetID, detail, ip string) error
 	GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
 	ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error)

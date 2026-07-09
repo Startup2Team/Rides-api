@@ -1,0 +1,3 @@
+ALTER TABLE admin_accounts
+    ADD COLUMN IF NOT EXISTS phone     VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS photo_url TEXT;

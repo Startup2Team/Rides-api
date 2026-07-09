@@ -50,6 +50,12 @@ func NewService(repo *Repository, rdb goredis.UniversalClient, tel *telephony.Se
 // In non-production the plaintext OTP is returned so the handler can echo it back to the
 // client — eliminates the need to read Docker logs during development.
 func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email *string) (devOTP string, err error) {
+	// Pindo Verify mode: Pindo generates + sends the PIN and owns its lifecycle.
+	// Cheaper (~$0.002 per successful verification) and no OTP for us to store.
+	if s.cfg.OTPMode == "pindo_verify" {
+		return "", s.initiateWithPindoVerify(ctx, phone, purpose, fullName, email)
+	}
+
 	otp, err := generateOTP()
 	if err != nil {
 		return "", fmt.Errorf("generate otp: %w", err)
@@ -107,31 +113,80 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 	return devOTP, nil
 }
 
+// initiateWithPindoVerify starts a Pindo Verify session (Pindo generates + sends
+// the PIN) and stashes the request_id so VerifyOTP can validate the entered code.
+func (s *Service) initiateWithPindoVerify(ctx context.Context, phone, purpose, fullName string, email *string) error {
+	reqID, err := s.telephony.StartVerify(ctx, phone)
+	if err != nil {
+		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: pindo verify start failed")
+		return fmt.Errorf("verify start: %w", err)
+	}
+	s.redis.Set(ctx, "otp:verify:"+phone, reqID, otpExpiryMinutes*time.Minute)
+
+	// Stash registration metadata (same as the self-SMS path) for first sign-up.
+	if purpose == PurposeRegistration && fullName != "" {
+		metaKey := "otp:meta:" + phone
+		s.redis.HSet(ctx, metaKey, "full_name", fullName)
+		if email != nil {
+			s.redis.HSet(ctx, metaKey, "email", *email)
+		}
+		s.redis.Expire(ctx, metaKey, otpExpiryMinutes*time.Minute)
+	}
+	return nil
+}
+
+// verifyWithPindo validates the entered code against the stored Pindo Verify
+// request_id. Wrong/expired code → ErrInvalidOTP; transport failure → 502.
+func (s *Service) verifyWithPindo(ctx context.Context, phone, code string) error {
+	key := "otp:verify:" + phone
+	reqID, err := s.redis.Get(ctx, key).Result()
+	if err != nil || reqID == "" {
+		return apperrors.New(400, "OTP_EXPIRED", "Your code expired. Request a new one.")
+	}
+	ok, err := s.telephony.CheckVerify(ctx, reqID, code)
+	if err != nil {
+		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: pindo verify check failed")
+		return apperrors.New(502, "VERIFY_UNAVAILABLE", "Verification service is unavailable. Try again shortly.")
+	}
+	if !ok {
+		return apperrors.ErrInvalidOTP
+	}
+	s.redis.Del(ctx, key)
+	return nil
+}
+
 // VerifyOTP validates the submitted OTP code and returns JWT tokens.
 func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID, platform, appVersion, ipAddr string) (*TokenPair, *User, error) {
-	// Lock the code after too many wrong guesses in its window — caps brute force.
-	attemptsKey := "otp:attempts:" + phone + ":" + purpose
-	if n, _ := s.redis.Get(ctx, attemptsKey).Int(); n >= maxOTPAttempts {
-		return nil, nil, apperrors.New(429, "OTP_LOCKED", "Too many incorrect attempts. Request a new code.")
-	}
-
-	record, err := s.repo.FindLatestOTP(ctx, phone, purpose)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(record.OTPHash), []byte(code)); err != nil {
-		// Count the failed attempt; set TTL = OTP lifetime on first failure.
-		if c, e := s.redis.Incr(ctx, attemptsKey).Result(); e == nil && c == 1 {
-			s.redis.Expire(ctx, attemptsKey, otpExpiryMinutes*time.Minute)
+	if s.cfg.OTPMode == "pindo_verify" {
+		// Pindo owns the PIN check (and its own attempt limiting).
+		if err := s.verifyWithPindo(ctx, phone, code); err != nil {
+			return nil, nil, err
 		}
-		return nil, nil, apperrors.ErrInvalidOTP
-	}
+	} else {
+		// Lock the code after too many wrong guesses in its window — caps brute force.
+		attemptsKey := "otp:attempts:" + phone + ":" + purpose
+		if n, _ := s.redis.Get(ctx, attemptsKey).Int(); n >= maxOTPAttempts {
+			return nil, nil, apperrors.New(429, "OTP_LOCKED", "Too many incorrect attempts. Request a new code.")
+		}
 
-	// Correct code — clear the attempt counter and consume the OTP.
-	s.redis.Del(ctx, attemptsKey)
-	if err := s.repo.MarkOTPUsed(ctx, record.ID); err != nil {
-		return nil, nil, fmt.Errorf("mark otp used: %w", err)
+		record, err := s.repo.FindLatestOTP(ctx, phone, purpose)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := bcrypt.CompareHashAndPassword([]byte(record.OTPHash), []byte(code)); err != nil {
+			// Count the failed attempt; set TTL = OTP lifetime on first failure.
+			if c, e := s.redis.Incr(ctx, attemptsKey).Result(); e == nil && c == 1 {
+				s.redis.Expire(ctx, attemptsKey, otpExpiryMinutes*time.Minute)
+			}
+			return nil, nil, apperrors.ErrInvalidOTP
+		}
+
+		// Correct code — clear the attempt counter and consume the OTP.
+		s.redis.Del(ctx, attemptsKey)
+		if err := s.repo.MarkOTPUsed(ctx, record.ID); err != nil {
+			return nil, nil, fmt.Errorf("mark otp used: %w", err)
+		}
 	}
 
 	// Upsert user — create on first registration, return existing on login.

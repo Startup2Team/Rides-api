@@ -91,11 +91,18 @@ func (m *mockRepo) Delete(ctx context.Context, id string) error {
 	}
 	return nil
 }
-func (m *mockRepo) TouchInvitedAt(ctx context.Context, id string) error { return nil }
+func (m *mockRepo) TouchInvitedAt(ctx context.Context, id string) error         { return nil }
+func (m *mockRepo) ReissueInvite(ctx context.Context, id string) (int64, error) { return 1, nil }
+func (m *mockRepo) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return nil
+}
 func (m *mockRepo) UpdateName(ctx context.Context, id, name string) error {
 	if m.updateNameFn != nil {
 		return m.updateNameFn(ctx, id, name)
 	}
+	return nil
+}
+func (m *mockRepo) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
 	return nil
 }
 func (m *mockRepo) SetPassword(ctx context.Context, id, hash string) error {

@@ -113,8 +113,17 @@ func (s *Service) DeleteRoleByID(ctx context.Context, roleID string) error {
 	return s.repo.DeleteRoleByID(ctx, roleID)
 }
 
+// UpdateRolePermissions replaces the permissions of a non-system role.
+func (s *Service) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return s.repo.UpdateRolePermissions(ctx, roleID, permissions)
+}
+
 func (s *Service) UpdateName(ctx context.Context, id, name string) error {
 	return s.repo.UpdateName(ctx, id, name)
+}
+
+func (s *Service) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
+	return s.repo.UpdateProfile(ctx, id, name, phone, photoURL)
 }
 
 func (s *Service) SetPassword(ctx context.Context, id, password string) error {

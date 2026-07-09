@@ -59,6 +59,7 @@ type mockSvc struct {
 	clearOTPLockoutFn       func(ctx context.Context, userID string) error
 	clearDeviceCollisionFn  func(ctx context.Context, userID, deviceID string) error
 	getAccountTimelineFn    func(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
+	launchReadinessFn       func(ctx context.Context) (map[string]interface{}, error)
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
@@ -177,6 +178,12 @@ func (m *mockSvc) GetLiveRide(ctx context.Context, rideID string) (map[string]in
 }
 func (m *mockSvc) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error {
 	return nil
+}
+func (m *mockSvc) LaunchReadiness(ctx context.Context) (map[string]interface{}, error) {
+	if m.launchReadinessFn != nil {
+		return m.launchReadinessFn(ctx)
+	}
+	return map[string]interface{}{}, nil
 }
 func (m *mockSvc) InterveneRide(ctx context.Context, rideID, action, reason string) error {
 	return m.interveneRideFn(ctx, rideID, action, reason)

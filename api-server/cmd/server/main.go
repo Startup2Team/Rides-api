@@ -736,6 +736,7 @@ func main() {
 			r.Get("/dashboard/recent-activity", dashH.RecentActivity)
 			r.Get("/dashboard/alerts", dashH.Alerts)
 			r.Get("/dashboard/live-map", dashH.LiveMap)
+			r.Get("/launch-readiness", adminH.LaunchReadiness)
 
 			// Drivers
 			r.Post("/drivers/send-otp", adminH.SendDriverOTP)

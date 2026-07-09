@@ -21,6 +21,7 @@ type TeamService interface {
 	ListRoles(ctx context.Context) ([]*Role, error)
 	CreateRole(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
 	UpdateRoleByID(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
+	UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error
 	DeleteRoleByID(ctx context.Context, roleID string) error
 	UpdateRole(ctx context.Context, id, roleID string) error
 	Suspend(ctx context.Context, id string) error
@@ -30,6 +31,7 @@ type TeamService interface {
 	ResetMember2FA(ctx context.Context, actorID, memberID string) error
 	GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
 	UpdateName(ctx context.Context, id, name string) error
+	UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error
 	ChangePassword(ctx context.Context, id, currentPassword, newPassword string) error
 	SetPassword(ctx context.Context, id, password string) error
 }
