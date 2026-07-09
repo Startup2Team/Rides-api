@@ -14,6 +14,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/dist/server ./cmd
 # ── Runtime stage ───────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
+# Link the published GHCR package back to this repo (shows "in Startup2Team/
+# Rides-api" on the package page, and lets GitHub apply the repo's access).
+LABEL org.opencontainers.image.source="https://github.com/Startup2Team/Rides-api" \
+      org.opencontainers.image.description="Rides API — Go backend for the Rides platform"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \

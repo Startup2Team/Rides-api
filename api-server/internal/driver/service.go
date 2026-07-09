@@ -58,6 +58,7 @@ type ApplyInput struct {
 	Sector                  string
 	Cell                    string
 	Village                 string
+	Gender                  string
 	PassengerSeats          *int
 	LoadCapacityKg          *int
 	LicenseExpiryDate       *time.Time
@@ -85,6 +86,19 @@ func NewService(repo *Repository, rdb goredis.UniversalClient, ana *analytics.Se
 
 func (s *Service) SetCreditChecker(cc CreditChecker) {
 	s.creditChecker = cc
+}
+
+// DemandHeatmap returns bucketed pickup demand over the last windowMin minutes,
+// optionally scoped to radiusM metres around center — so a driver can see where
+// riders are requesting and reposition. Read-only.
+func (s *Service) DemandHeatmap(ctx context.Context, windowMin int, center *geo.Point, radiusM int) ([]DemandCell, error) {
+	cells, err := s.repo.DemandHeatmap(ctx, windowMin, center, radiusM)
+	if err != nil {
+		s.log.Error().Err(err).Int("window_min", windowMin).Msg("driver demand-heatmap: query failed")
+		return nil, err
+	}
+	s.log.Debug().Int("window_min", windowMin).Int("cells", len(cells)).Msg("driver demand-heatmap served")
+	return cells, nil
 }
 
 // Apply submits a driver application.
@@ -329,6 +343,26 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		return apperrors.ErrDriverNotActive
 	}
 
+	if anomaly, speed := s.checkGPSPlausibility(ctx, profile.ID, newPoint); anomaly {
+		_ = s.repo.LogGPSAnomaly(ctx, profile.ID, speed, nil, &newPoint)
+
+		anomalyKey := rkeys.K.GPSAnomalyCount(profile.ID)
+		count, _ := s.redis.Incr(ctx, anomalyKey).Result()
+		s.redis.Expire(ctx, anomalyKey, 8*time.Hour)
+
+		s.analytics.Publish(ctx, "gps.anomaly_detected", "DRIVER", userID, nil, map[string]interface{}{
+			"driver_id":          profile.ID,
+			"computed_speed_kmh": speed,
+		})
+
+		if count >= 3 {
+			_ = s.repo.SetApprovalStatus(ctx, profile.ID, "SUSPENDED", "", nil)
+			s.log.Warn().Str("driver_id", profile.ID).Msg("driver auto-suspended: 3 GPS anomalies")
+		}
+
+		return apperrors.ErrGPSPlausibility
+	}
+
 	locJSON, _ := json.Marshal(map[string]interface{}{
 		"lat":        update.Lat,
 		"lng":        update.Lng,
@@ -336,10 +370,23 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		"heading":    update.Heading,
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
+	// 120s TTL: clients now throttle pings (idle drivers send a heartbeat only
+	// every ~60s), so a 30s TTL would let the location key expire between
+	// heartbeats. 120s leaves headroom for a missed beat before the geofence
+	// has to fall back to the PostGIS location.
 	s.redis.Set(ctx, rkeys.K.DriverLocation(profile.ID), locJSON, 120*time.Second)
 	s.redis.LPush(ctx, rkeys.K.DriverLocationHistory(profile.ID), locJSON)
 	s.redis.LTrim(ctx, rkeys.K.DriverLocationHistory(profile.ID), 0, 9)
 
+	// Re-assert the driver's presence in the Redis GEO index on EVERY ping.
+	//
+	// We used to skip this when movement was < 15m (a write-saving "noise
+	// filter"), but that left a parked-yet-online driver invisible: if their
+	// geo entry was ever dropped (trip handoff, Redis restart/eviction, manual
+	// flush) while stationary, no subsequent ping would re-add them and they
+	// became unmatchable despite being online. GeoAdd is O(log N) and
+	// idempotent for an unchanged position, so always re-adding is the correct
+	// trade-off — an online driver who is pinging is always discoverable.
 	s.redis.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
 		Name:      profile.ID,
 		Longitude: update.Lng,

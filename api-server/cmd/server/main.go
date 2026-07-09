@@ -115,6 +115,9 @@ func main() {
 		if (cfg.Payments.Enabled || hasMomoCreds) && cfg.Payments.WebhookSecret == "" {
 			log.Fatal().Msg("FATAL: Payments are enabled or MoMo credentials are configured in production but PAYMENTS_WEBHOOK_SECRET is not set — refusing to start")
 		}
+		if cfg.Payments.Enabled && cfg.MoMo.APIKey == "" {
+			log.Fatal().Msg("FATAL: Payments are enabled in production but MOMO_API_KEY is not set — refusing to start")
+		}
 	} else {
 		if cfg.Ride.DevSkipGeofence {
 			log.Warn().Msg("⚠️  DEV_SKIP_GEOFENCE=true — geofence checks disabled (dev only)")
@@ -186,7 +189,8 @@ func main() {
 	teamRepo := team.NewRepository(db)
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
-	hub := tracking.NewHub(rdb, log)
+	// Redis-backed so WebSocket delivery works across multiple API instances.
+	hub := tracking.NewHub(rdb, log) // starts its Redis pub/sub subscriber internally
 
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
@@ -228,7 +232,7 @@ func main() {
 	financeH := finance.NewHandler(financeSvc)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
-	custSvc := customer.NewService(custRepo)
+	custSvc := customer.NewService(custRepo, log)
 
 	authH := auth.NewHandler(authSvc, cfg.Env)
 	authH.SetDriverService(driverSvc) // force-offline driver on logout
@@ -245,7 +249,9 @@ func main() {
 	// Go-online credit gate reads the same v4 ledger that ride deduction debits,
 	// so a driver with a real v4 package isn't wrongly blocked with NO_CREDITS.
 	driverSvc.SetCreditChecker(ledgerSvc)
-	devAutoConfirm := cfg.Env == "development"
+	// Dev: auto-confirm purchases without a real MoMo callback. In development
+	// this is always on; in other non-prod envs it follows PAYMENTS_ENABLED.
+	devAutoConfirm := cfg.Env == "development" || (cfg.Env != "production" && cfg.Payments.Enabled)
 	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
 	pkgH := packages.NewHandler(pkgSvc, auditLog, cfg)
 	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
@@ -391,6 +397,13 @@ func main() {
 		"/health", "/metrics", apiV1Prefix+"/ws/",
 	))
 	r.Use(mw.MetricsMiddleware)
+	// Global per-IP rate limit (application-layer DDoS/abuse backstop). Skip health
+	// checks and the long-lived WebSocket upgrades — reconnect storms behind
+	// carrier-grade NAT would otherwise drain a bucket shared by many real users.
+	r.Use(mw.SkipPaths(
+		mw.IPRateLimit(cfg, rdb, "global", cfg.Security.GlobalRateLimitPerMin, time.Minute),
+		"/health", apiV1Prefix+"/ws/",
+	))
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
 
@@ -493,7 +506,14 @@ func main() {
 	// API docs — gated: 404 when disabled (default in prod), optional Basic auth
 	// so the API surface isn't world-readable. Set SWAGGER_ENABLED / SWAGGER_BASIC_AUTH.
 	swaggerGate := mw.SwaggerGate(cfg.Security.SwaggerEnabled, cfg.Security.SwaggerBasicAuth)
+	// Swagger UI needs to load its CSS/JS (from unpkg) and run scripts, which the
+	// API-wide strict CSP (default-src 'none'; sandbox) forbids. Override the CSP
+	// for just this page so the docs render, while every other route stays locked.
+	swaggerCSP := "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; " +
+		"style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https:; " +
+		"font-src 'self' data: https://unpkg.com; connect-src 'self'"
 	r.With(swaggerGate).Get("/swagger", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", swaggerCSP)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(swaggerHTML))
 	})
@@ -521,6 +541,9 @@ func main() {
 	// is gated by a shared secret instead of a user session. Without this any
 	// caller could POST a fake "SUCCESS" and have credits granted for free.
 	webhookSecretRequired := cfg.Payments.Enabled || cfg.MoMo.APIKey != "" || cfg.MoMo.SubscriptionKey != "" || cfg.MoMo.APIUser != ""
+	if cfg.Env == "production" && cfg.Payments.WebhookSecret == "" {
+		log.Warn().Msg("MOMO_WEBHOOK_SECRET is unset in production — the MoMo callback is UNAUTHENTICATED; set it before enabling payments")
+	}
 	r.With(
 		mw.IPRateLimit(cfg, rdb, "momo_webhook", cfg.Security.MomoWebhookRateLimit, time.Minute),
 		momoWebhookAuth(cfg.Payments.WebhookSecret, webhookSecretRequired),
@@ -529,11 +552,20 @@ func main() {
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		// Per-user backstop (keyed on JWT user_id, NOT IP): immune to carrier NAT.
+		// Generous — hot endpoints keep their own tighter per-user limits below this.
+		r.Use(mw.UserRateLimit429(rdb, "customer_group", 600, time.Minute))
 		r.Use(mw.RequireNotSuspended())
 		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
 
 		r.Get("/profile", custH.GetProfile)
 		r.Put("/profile", custH.UpdateProfile)
+		r.Get("/level", custH.GetLevel) // loyalty / gamification
+		// Phone-number change (OTP-verified). Tight per-user limit on the request
+		// leg so it can't be abused to spam SMS to arbitrary numbers.
+		r.With(mw.UserRateLimit(rdb, "phone_change_req", 5, 10*time.Minute)).
+			Post("/phone/change/request", authH.RequestPhoneChange)
+		r.Post("/phone/change/verify", authH.VerifyPhoneChange)
 		r.Post("/location", driver.NearbyDriversHandler(driverSvc))
 		r.Get("/fare-estimate", fareH.FareEstimate)
 
@@ -558,6 +590,9 @@ func main() {
 	// ── Driver ────────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/driver", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
+		// Per-user backstop (keyed on JWT user_id, NOT IP): immune to carrier NAT.
+		// Generous — hot endpoints (e.g. location) keep their own tighter limits.
+		r.Use(mw.UserRateLimit429(rdb, "driver_group", 600, time.Minute))
 		r.Use(mw.RequireNotSuspended())
 
 		r.Post("/apply", driverH.Apply)
@@ -591,6 +626,13 @@ func main() {
 				Post("/location", driverH.UpdateLocation)
 			r.With(mw.UserRateLimit(rdb, "driver_location_batch", cfg.Security.DriverLocationRateLimit, time.Minute)).
 				Post("/locations", driverH.UpdateLocationsBatch)
+			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
+				Post("/location", driverH.UpdateLocation)
+
+			// Demand heatmap — where riders are requesting, so a driver can
+			// reposition. Read-only; per-user limit keeps polling reasonable.
+			r.With(mw.UserRateLimit(rdb, "driver_demand_heatmap", 30, time.Minute)).
+				Get("/demand-heatmap", driverH.DemandHeatmap)
 
 			r.Get("/packages", pkgH.ListPackages)
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
@@ -704,6 +746,10 @@ func main() {
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_login", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
 
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
@@ -923,6 +969,7 @@ func main() {
 			r.Get("/team/roles", teamH.ListRoles)
 			r.Post("/team/roles", teamH.CreateRole)
 			r.Patch("/team/roles/{roleId}", teamH.UpdateRoleByID)
+			r.Patch("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
 			r.Delete("/team/roles/{roleId}", teamH.DeleteRoleByID)
 			r.Post("/team/members/{id}/role", teamH.UpdateRole)
 			r.Post("/team/members/{id}/suspend", teamH.Suspend)
@@ -933,6 +980,11 @@ func main() {
 			r.Get("/team/members/{id}/activity", teamH.GetMemberActivity)
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
 			r.Post("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
+			// r.Post("/team/members/{id}/remove", teamH.Remove) REMOVED - suspend/reinstate only
+			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+			r.Get("/team/members/{id}/activity", teamH.MemberActivity)
+			r.Post("/team/members/{id}/resend-invite", teamH.ResendInvite)
+			r.Post("/team/members/{id}/reset-2fa", teamH.ResetMember2FA)
 
 			// Audit Log
 			r.Get("/audit", teamH.ListAuditLog)
@@ -941,6 +993,9 @@ func main() {
 			r.Get("/packages", pkgH.AdminListPackages)
 			r.Get("/packages-purchases", pkgH.AdminListPurchases)
 			r.Get("/packages/{id}/subscribers", pkgH.AdminListPackageSubscribers)
+			// Entitlements — admin-wide balances + manual grant
+			r.Get("/entitlements", pkgH.AdminListEntitlements)
+			r.Post("/entitlements/grant", pkgH.AdminGrantEntitlement)
 			r.Post("/packages", pkgH.AdminCreatePackage)
 			r.Patch("/packages/{id}", pkgH.AdminUpdatePackage)
 			r.Post("/packages/{id}/toggle", pkgH.AdminTogglePackage)
