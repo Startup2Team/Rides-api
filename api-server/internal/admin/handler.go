@@ -435,6 +435,17 @@ func (h *Handler) GetDriver(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, driver)
 }
 
+// GET /api/v1/admin/drivers/:id/referrals
+func (h *Handler) GetDriverReferrals(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	referrals, err := h.svc.GetDriverReferrals(r.Context(), profileID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, referrals)
+}
+
 // PATCH /api/v1/admin/drivers/:id
 func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 	profileID := chi.URLParam(r, "id")

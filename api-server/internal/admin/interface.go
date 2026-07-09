@@ -19,6 +19,7 @@ type AdminService interface {
 	SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
 	ReinstateDriver(ctx context.Context, profileID string) error
 	GetDriver(ctx context.Context, profileID string) (map[string]interface{}, error)
+	GetDriverReferrals(ctx context.Context, profileID string) ([]map[string]interface{}, error)
 	UpdateDriver(ctx context.Context, profileID string, fields map[string]interface{}) error
 	DeleteDriver(ctx context.Context, profileID string) error
 	ClearGPSFlags(ctx context.Context, profileID string) error

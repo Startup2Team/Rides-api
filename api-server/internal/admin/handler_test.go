@@ -60,6 +60,7 @@ type mockSvc struct {
 	clearDeviceCollisionFn  func(ctx context.Context, userID, deviceID string) error
 	getAccountTimelineFn    func(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
 	launchReadinessFn       func(ctx context.Context) (map[string]interface{}, error)
+	getDriverReferralsFn    func(ctx context.Context, profileID string) ([]map[string]interface{}, error)
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
@@ -211,6 +212,13 @@ func (m *mockSvc) GetAccountTimeline(ctx context.Context, userID string, limit i
 		return m.getAccountTimelineFn(ctx, userID, limit)
 	}
 	return map[string]interface{}{}, nil
+}
+
+func (m *mockSvc) GetDriverReferrals(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
+	if m.getDriverReferralsFn != nil {
+		return m.getDriverReferralsFn(ctx, profileID)
+	}
+	return []map[string]interface{}{}, nil
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────
