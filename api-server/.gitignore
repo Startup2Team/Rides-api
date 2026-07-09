@@ -1,5 +1,9 @@
 # Compiled binary
 dist/
+# Stray local `go build` output at the package root (the Docker build uses dist/).
+# This was committed by mistake once (a 49 MB ELF binary) and bloated every
+# archive/clone/deploy — keep it out for good.
+/server
 
 # Environment secrets — NEVER commit
 .env
