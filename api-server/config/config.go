@@ -26,6 +26,7 @@ type Config struct {
 	// the PIN lifecycle — cheaper, ~$0.002 per successful verification).
 	OTPMode  string
 	Firebase FirebaseConfig
+	Telegram TelegramConfig
 	GMaps    GoogleMapsConfig
 	MoMo     MoMoConfig
 	Storage  StorageConfig
@@ -110,6 +111,13 @@ type PindoConfig struct {
 
 type FirebaseConfig struct {
 	ServiceAccountPath string
+}
+
+// TelegramConfig drives operational alerting (pkg/alerting): error-level log
+// events and deploy notices go to the team's Telegram group. Empty = disabled.
+type TelegramConfig struct {
+	BotToken string // TELEGRAM_BOT_TOKEN — from @BotFather
+	ChatID   string // TELEGRAM_CHAT_ID — the team group's chat id
 }
 
 type GoogleMapsConfig struct {
@@ -240,6 +248,9 @@ func Load() (*Config, error) {
 	cfg.OTPMode = getEnv("OTP_MODE", "self_sms")
 
 	cfg.Firebase.ServiceAccountPath = getEnv("FIREBASE_SERVICE_ACCOUNT_PATH", "./firebase-service-account.json")
+
+	cfg.Telegram.BotToken = getEnv("TELEGRAM_BOT_TOKEN", "")
+	cfg.Telegram.ChatID = getEnv("TELEGRAM_CHAT_ID", "")
 
 	cfg.GMaps.APIKey = getEnv("GOOGLE_MAPS_API_KEY", "")
 
