@@ -68,9 +68,12 @@ jobs:
 
   # Deploy runs AFTER the image is pushed (needs:) so the box can never pull a
   # tag that doesn't exist yet. The box pulls the prebuilt image — no Go
-  # compilation on the production machine. Rollback = re-run with an older SHA:
+  # compilation on the production machine.
+  #
+  # On health failure we automatically restore the previously running image tag
+  # (recorded before the swap). Manual rollback:
   #   ssh box 'cd /opt/rides/Rides-api/api-server && \
-  #     API_IMAGE_TAG=<old-sha> docker compose -f docker-compose.prod.yml up -d api'
+  #     API_IMAGE_TAG=<old-sha> docker compose -f docker-compose.prod.yml up -d --no-build --pull never api'
   deploy:
     name: Deploy to Vultr (pull image)
     runs-on: ubuntu-latest
@@ -85,6 +88,16 @@ jobs:
           chmod 600 ~/.ssh/deploy
           ssh-keyscan -H 139.84.251.242 >> ~/.ssh/known_hosts 2>/dev/null
 
+      - name: Record previous image tag (for auto-rollback)
+        id: prev
+        run: |
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          prev=$($SSH "docker inspect api-server-api-1 --format '{{index .Config.Image}}' 2>/dev/null || true")
+          # Strip registry prefix → tag only (e.g. 6a8103b8…)
+          tag="${prev##*:}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Previous image tag: ${tag:-none}"
+
       - name: Sync tracked files + pull image + restart api
         run: |
           SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
@@ -98,9 +111,42 @@ jobs:
                 docker compose -f docker-compose.prod.yml up -d api && \
                 docker image prune -f"
 
-      - name: Verify health
+      - name: Verify health (auto-rollback on failure)
         run: |
-          sleep 10
-          code=$(curl -s -o /dev/null -w "%{http_code}" https://api.rides.rw/health)
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          PREV_TAG="${{ steps.prev.outputs.tag }}"
+          NEW_SHA="${{ github.sha }}"
+
+          # Give the new container time to boot (or crash-loop).
+          sleep 12
+          code=$(curl -s -o /dev/null -w "%{http_code}" https://api.rides.rw/health || echo "000")
           echo "health: HTTP $code"
-          test "$code" = "200"
+
+          if [ "$code" = "200" ]; then
+            echo "Deploy healthy."
+            exit 0
+          fi
+
+          echo "::error::Health check failed (HTTP $code). Rolling back to previous image."
+
+          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "$NEW_SHA" ] || [ "$PREV_TAG" = "latest" ]; then
+            echo "::error::No safe previous tag to restore (prev='${PREV_TAG}'). Manual intervention required."
+            exit 1
+          fi
+
+          $SSH "cd /opt/rides/Rides-api/api-server && \
+                docker stop api-server-api-1 || true; \
+                docker rm api-server-api-1 || true; \
+                export API_IMAGE_TAG=${PREV_TAG} && \
+                docker compose -f docker-compose.prod.yml create --no-build api && \
+                docker compose -f docker-compose.prod.yml start api"
+
+          sleep 10
+          rb=$(curl -s -o /dev/null -w "%{http_code}" https://api.rides.rw/health || echo "000")
+          echo "rollback health: HTTP $rb"
+          if [ "$rb" != "200" ]; then
+            echo "::error::Rollback to ${PREV_TAG} also failed health (HTTP $rb)."
+            exit 1
+          fi
+          echo "Rolled back to ${PREV_TAG} successfully — new deploy rejected."
+          exit 1
