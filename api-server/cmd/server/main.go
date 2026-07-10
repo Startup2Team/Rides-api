@@ -51,6 +51,7 @@ import (
 	"github.com/workspace/ride-platform/internal/upload"
 	"github.com/workspace/ride-platform/internal/wallet"
 	"github.com/workspace/ride-platform/pkg/adminrole"
+	"github.com/workspace/ride-platform/pkg/alerting"
 	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
@@ -68,7 +69,21 @@ func main() {
 	}
 
 	log := logger.New(cfg.Env)
+
+	// Telegram alerting: every Error-level log event anywhere in the app becomes
+	// a deduped, rate-limited message to the team group. Attached BEFORE any
+	// service is constructed so every child logger inherits the hook. Disabled
+	// (nil notifier) when TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are unset.
+	alerts := alerting.NewTelegram(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Env)
+	if alerts != nil {
+		log = log.Hook(alerts.Hook())
+		log.Info().Msg("alerting: telegram error alerts enabled")
+	} else {
+		log.Warn().Msg("alerting: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — telegram alerts disabled")
+	}
+
 	log.Info().Str("env", cfg.Env).Str("port", cfg.Port).Msg("ride-platform: starting")
+	alerts.Notify("🚀 Rides API starting (" + cfg.Env + ")")
 
 	// ── Production safety guards ──────────────────────────────────────────────
 	// Catch dev-only flags that must never be true in production.
