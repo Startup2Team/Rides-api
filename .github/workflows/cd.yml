@@ -1,17 +1,15 @@
-name: CD (Vultr JNB)
+name: CD fallback — build on box (manual only)
 
-# Continuous deployment to the production box in Johannesburg.
-# The GitHub runner checks out this repo, ships the code to the server over SSH
-# (git archive → tar), and rebuilds the Docker stack. No deploy keys needed —
-# the runner already has read access to its own repo.
+# MANUAL FALLBACK. Normal deploys are pull-based and live in image.yml
+# (build & push to GHCR → box pulls the prebuilt image). Use this workflow
+# only when the registry path is unavailable (GHCR outage, image build broken)
+# — it ships the source and rebuilds the Docker stack ON the box, the old way.
 #
 # Required GitHub Secret:
 #   DEPLOY_SSH_KEY — private SSH key trusted by root@139.84.251.242
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:   # lets you trigger a deploy manually from the Actions tab
+  workflow_dispatch:   # manual trigger from the Actions tab only
 
 jobs:
   deploy:
