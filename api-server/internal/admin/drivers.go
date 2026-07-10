@@ -8,14 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Admin driver management: approval lifecycle, listing, documents,
-// admin-created drivers and force-offline.
+// admin-created drivers, referrals and force-offline.
 
 func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID string) error {
 	var driverUserID, transportType string
@@ -75,6 +74,7 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 			}
 		}
 	}
+	s.revokeUserSessions(ctx, driverUserID)
 	return nil
 }
 
@@ -97,24 +97,25 @@ func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reas
 	return nil
 }
 
-// RequestDriverMoreInfo puts a pending driver into NEEDS_MORE_INFO with a note
-// explaining what's missing, so they re-submit. Treated as not-approved by the
-// driver side, so they stay blocked from going online until re-reviewed.
+// RequestDriverMoreInfo asks the driver to resubmit documents or clarify onboarding details.
 func (s *Service) RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		return apperrors.New(http.StatusBadRequest, "REASON_REQUIRED", "reason is required")
+	}
 	tag, err := s.db.Exec(ctx, `
 		UPDATE driver_profiles
 		SET approval_status = 'NEEDS_MORE_INFO',
 		    approved_by = $1,
 		    rejection_reason = $2,
 		    updated_at = NOW()
-		WHERE id = $3 AND approval_status = 'PENDING_REVIEW'
+		WHERE id = $3 AND approval_status IN ('PENDING_REVIEW', 'NEEDS_MORE_INFO')
 	`, adminUserID, reason, profileID)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return apperrors.Newf(http.StatusConflict, "INVALID_STATE",
-			"driver is not pending review or does not exist")
+			"driver is not in review or does not exist")
 	}
 	return nil
 }
@@ -378,6 +379,39 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 	}, nil
 }
 
+func (s *Service) GetDriverReferrals(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT dp.id, COALESCE(u.full_name, ''), u.phone_number, dp.transport_type, dp.vehicle_plate, dp.approval_status, dp.created_at
+		FROM driver_profiles dp
+		JOIN users u ON dp.user_id = u.id
+		WHERE dp.referred_by_driver_id = $1
+		ORDER BY dp.created_at DESC
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id, fullName, phone, tType, plate, approvalStatus string
+		var createdAt time.Time
+		if err := rows.Scan(&id, &fullName, &phone, &tType, &plate, &approvalStatus, &createdAt); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{
+			"id":              id,
+			"name":            fullName,
+			"phone":           phone,
+			"transport_type":  tType,
+			"vehicle_plate":   plate,
+			"approval_status": approvalStatus,
+			"created_at":      createdAt.Format(time.RFC3339),
+		})
+	}
+	return result, nil
+}
+
 func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT document_type, file_url, uploaded_at
@@ -438,11 +472,30 @@ func (s *Service) UpdateDriver(ctx context.Context, profileID string, fields map
 	if len(fields) == 0 {
 		return nil
 	}
+	allowedFields := map[string]bool{
+		"vehicle_plate":       true,
+		"license_number":      true,
+		"license_expiry_date": true,
+		"approval_status":     true,
+		"momo_pay_code":       true,
+		"merchant_pay_code":   true,
+		"transport_type":      true,
+		"momo_provider":       true,
+		"date_of_birth":       true,
+		"passenger_seats":     true,
+		"load_capacity_kg":    true,
+	}
+	for k := range fields {
+		if !allowedFields[k] {
+			return apperrors.New(http.StatusBadRequest, "INVALID_FIELD", "unknown or invalid field: "+k)
+		}
+	}
+
 	var setClauses []string
 	var args []interface{}
 	n := 1
 	for k, v := range fields {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", k, n))
+		setClauses = append(setClauses, fmt.Sprintf(`"%s" = $%d`, k, n))
 		args = append(args, v)
 		n++
 	}

@@ -9,6 +9,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/workspace/ride-platform/config"
 )
 
 func newTestRedis(t *testing.T) *redis.Client {
@@ -123,7 +125,8 @@ func TestUserRateLimit_Drops204_AndIsolatesUsers(t *testing.T) {
 func TestIPRateLimit_ThrottlesEveryoneSharingAnIP(t *testing.T) {
 	rdb := newTestRedis(t)
 	limit := 5
-	h := IPRateLimit(rdb, "test", limit, time.Minute)(okHandler)
+	cfg := &config.Config{}
+	h := IPRateLimit(cfg, rdb, "test", limit, time.Minute)(okHandler)
 
 	codes := fireIP(h, "203.0.113.9", limit+2)
 	if ok := countCode(codes, http.StatusOK); ok != limit {
@@ -137,7 +140,8 @@ func TestIPRateLimit_ThrottlesEveryoneSharingAnIP(t *testing.T) {
 func TestIPRateLimit_DifferentIPsAreIndependent(t *testing.T) {
 	rdb := newTestRedis(t)
 	limit := 3
-	h := IPRateLimit(rdb, "test", limit, time.Minute)(okHandler)
+	cfg := &config.Config{}
+	h := IPRateLimit(cfg, rdb, "test", limit, time.Minute)(okHandler)
 
 	_ = fireIP(h, "203.0.113.1", limit) // exhaust IP 1
 	codes := fireIP(h, "203.0.113.2", limit)

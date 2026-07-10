@@ -30,15 +30,16 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		PickupLat     float64  `json:"pickup_lat"    validate:"required,min=-90,max=90"`
-		PickupLng     float64  `json:"pickup_lng"    validate:"required,min=-180,max=180"`
-		PickupAddr    string   `json:"pickup_address" validate:"required"`
-		DestLat       float64  `json:"dest_lat"      validate:"required,min=-90,max=90"`
-		DestLng       float64  `json:"dest_lng"      validate:"required,min=-180,max=180"`
-		DestAddr      string   `json:"dest_address"  validate:"required"`
-		TransportType string   `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
-		InitialFare   *float64 `json:"initial_fare"`
-		DistanceKM    *float64 `json:"distance_km"`
+		PickupLat      float64  `json:"pickup_lat"    validate:"required,min=-90,max=90"`
+		PickupLng      float64  `json:"pickup_lng"    validate:"required,min=-180,max=180"`
+		PickupAddr     string   `json:"pickup_address" validate:"required"`
+		DestLat        float64  `json:"dest_lat"      validate:"required,min=-90,max=90"`
+		DestLng        float64  `json:"dest_lng"      validate:"required,min=-180,max=180"`
+		DestAddr       string   `json:"dest_address"  validate:"required"`
+		TransportType  string   `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+		InitialFare    *float64 `json:"initial_fare"`
+		DistanceKM     *float64 `json:"distance_km"`
+		IdempotencyKey string   `json:"idempotency_key"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -53,15 +54,16 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 	pickup := geo.Point{Lat: body.PickupLat, Lng: body.PickupLng}
 	dest := geo.Point{Lat: body.DestLat, Lng: body.DestLng}
 
-	ride, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare, body.DistanceKM)
+	ride, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare, body.DistanceKM, body.IdempotencyKey)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
 
 	respond.Created(w, map[string]interface{}{
-		"ride_id": ride.ID,
-		"status":  ride.Status,
+		"ride_id":      ride.ID,
+		"status":       ride.Status,
+		"ride_version": ride.RideVersion,
 	})
 }
 

@@ -59,12 +59,12 @@ type SavedLocation struct {
 // Service handles route cache, landmarks, saved locations, suggestions, mode switching.
 type Service struct {
 	db    *pgxpool.Pool
-	redis *goredis.Client
+	redis goredis.UniversalClient
 	cfg   *config.Config
 	log   zerolog.Logger
 }
 
-func NewService(db *pgxpool.Pool, rdb *goredis.Client, cfg *config.Config, log zerolog.Logger) *Service {
+func NewService(db *pgxpool.Pool, rdb goredis.UniversalClient, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{db: db, redis: rdb, cfg: cfg, log: log}
 }
 
@@ -375,7 +375,18 @@ func (s *Service) SwitchMode(ctx context.Context, userID, mode string) error {
 	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE users SET role_state = $1, updated_at = NOW() WHERE id = $2`, roleState, userID)
-	return err
+	if err != nil {
+		return err
+	}
+	s.revokeUserSessions(ctx, userID)
+	return nil
+}
+
+func (s *Service) revokeUserSessions(ctx context.Context, userID string) {
+	iter := s.redis.Scan(ctx, 0, "session:"+userID+":*", 100).Iterator()
+	for iter.Next(ctx) {
+		s.redis.Del(ctx, iter.Val())
+	}
 }
 
 // ── Startup warm ──────────────────────────────────────────────────────────

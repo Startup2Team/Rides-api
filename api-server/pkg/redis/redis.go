@@ -7,8 +7,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// New parses REDIS_URL and returns a connected Redis client.
-func New(ctx context.Context, redisURL string) (*redis.Client, error) {
+// New parses REDIS_URL and returns a connected Redis client (UniversalClient for cluster support).
+func New(ctx context.Context, redisURL string, clusterMode bool) (redis.UniversalClient, error) {
+	if clusterMode {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			return nil, fmt.Errorf("redis cluster: parse url: %w", err)
+		}
+		client := redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:    []string{opt.Addr},
+			Password: opt.Password,
+		})
+
+		if err := client.Ping(ctx).Err(); err != nil {
+			return nil, fmt.Errorf("redis cluster: ping: %w", err)
+		}
+
+		return client, nil
+	}
+
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, fmt.Errorf("redis: parse url: %w", err)

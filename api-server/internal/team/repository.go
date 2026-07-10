@@ -2,8 +2,14 @@ package team
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -53,7 +59,8 @@ func (r *Repository) ListAdmins(ctx context.Context, status, roleID, search stri
 
 	q := fmt.Sprintf(`
 		SELECT a.id, a.name, a.email, a.role_id, ar.name,
-		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at
+		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at,
+		       a.phone, a.photo_url
 		FROM admin_accounts a
 		JOIN admin_roles ar ON ar.id = a.role_id
 		%s ORDER BY a.created_at DESC
@@ -69,7 +76,8 @@ func (r *Repository) ListAdmins(ctx context.Context, status, roleID, search stri
 	for rows.Next() {
 		a := &AdminAccount{}
 		if err := rows.Scan(&a.ID, &a.Name, &a.Email, &a.RoleID, &a.RoleName,
-			&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt); err != nil {
+			&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt,
+			&a.Phone, &a.PhotoURL); err != nil {
 			return nil, err
 		}
 		result = append(result, a)
@@ -109,9 +117,41 @@ func (r *Repository) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// TouchInvitedAt bumps invited_at for a pending admin invite (resend flow).
+func (r *Repository) TouchInvitedAt(ctx context.Context, id string) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE admin_accounts SET invited_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND status IN ('INVITED', 'ACTIVE')
+	`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("admin not found or not eligible for invite resend")
+	}
+	return nil
+}
+
 func (r *Repository) UpdateName(ctx context.Context, id, name string) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE admin_accounts SET name=$1, updated_at=NOW() WHERE id=$2`, name, id)
+	return err
+}
+
+func (r *Repository) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
+	var phoneVal *string
+	if phone != "" {
+		phoneVal = &phone
+	}
+	var photoVal *string
+	if photoURL != "" {
+		photoVal = &photoURL
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE admin_accounts
+		SET name = $1, phone = $2, photo_url = $3, updated_at = NOW()
+		WHERE id = $4
+	`, name, phoneVal, photoVal, id)
 	return err
 }
 
@@ -124,14 +164,14 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*AdminAccou
 	err := r.db.QueryRow(ctx, `
 		SELECT a.id, a.name, a.email, a.role_id, ar.name,
 		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at,
-		       a.password_hash
+		       a.password_hash, a.phone, a.photo_url
 		FROM admin_accounts a
 		JOIN admin_roles ar ON ar.id = a.role_id
 		WHERE a.email = $1
 	`, email).Scan(
 		&a.ID, &a.Name, &a.Email, &a.RoleID, &a.RoleName,
 		&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt,
-		&passwordHash,
+		&passwordHash, &a.Phone, &a.PhotoURL,
 	)
 	return a, passwordHash, err
 }
@@ -143,14 +183,14 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*AdminAccount, *s
 	err := r.db.QueryRow(ctx, `
 		SELECT a.id, a.name, a.email, a.role_id, ar.name,
 		       a.status, a.two_factor, a.last_active_at, a.invited_at, a.created_at,
-		       a.password_hash
+		       a.password_hash, a.phone, a.photo_url
 		FROM admin_accounts a
 		JOIN admin_roles ar ON ar.id = a.role_id
 		WHERE a.id = $1
 	`, id).Scan(
 		&a.ID, &a.Name, &a.Email, &a.RoleID, &a.RoleName,
 		&a.Status, &a.TwoFactor, &a.LastActiveAt, &a.InvitedAt, &a.CreatedAt,
-		&passwordHash,
+		&passwordHash, &a.Phone, &a.PhotoURL,
 	)
 	return a, passwordHash, err
 }
@@ -200,17 +240,87 @@ func (r *Repository) GetTOTPSecret(ctx context.Context, id string) (*string, err
 	var secret *string
 	err := r.db.QueryRow(ctx,
 		`SELECT totp_secret FROM admin_accounts WHERE id=$1`, id).Scan(&secret)
-	return secret, err
+	if err != nil {
+		return nil, err
+	}
+	if secret == nil {
+		return nil, nil
+	}
+	decrypted, err := decryptTOTP(*secret)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt totp: %w", err)
+	}
+	return &decrypted, nil
 }
 
 // SaveTOTP stores the verified TOTP secret and marks two_factor = true.
 func (r *Repository) SaveTOTP(ctx context.Context, id, secret string) error {
-	_, err := r.db.Exec(ctx, `
+	encrypted, err := encryptTOTP(secret)
+	if err != nil {
+		return fmt.Errorf("encrypt totp: %w", err)
+	}
+	_, err = r.db.Exec(ctx, `
 		UPDATE admin_accounts
 		SET totp_secret=$1, two_factor=TRUE, updated_at=NOW()
 		WHERE id=$2
-	`, secret, id)
+	`, encrypted, id)
 	return err
+}
+
+func getEncryptionKey() []byte {
+	k := os.Getenv("TOTP_ENCRYPTION_KEY")
+	if k == "" {
+		k = "default-dev-totp-encryption-key-do-not-use-in-prod"
+	}
+	hash := sha256.Sum256([]byte(k))
+	return hash[:]
+}
+
+func encryptTOTP(plaintext string) (string, error) {
+	key := getEncryptionKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return "enc:" + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func decryptTOTP(ciphertextStr string) (string, error) {
+	if !strings.HasPrefix(ciphertextStr, "enc:") {
+		return ciphertextStr, nil
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ciphertextStr, "enc:"))
+	if err != nil {
+		return "", err
+	}
+	key := getEncryptionKey()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
 }
 
 // ClearTOTP removes TOTP and backup codes and marks two_factor = false.

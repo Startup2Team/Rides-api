@@ -48,7 +48,7 @@ type PackagesService interface {
 // Service handles ride lifecycle business logic.
 type Service struct {
 	repo      *Repository
-	redis     *goredis.Client
+	redis     goredis.UniversalClient
 	notify    *notification.Service
 	analytics *analytics.Service
 	hub       *tracking.Hub
@@ -69,7 +69,7 @@ type FareConfigRepository interface {
 	GetConfigByID(ctx context.Context, id string) (*fare.Config, error)
 }
 
-func NewService(repo *Repository, rdb *goredis.Client, notify *notification.Service, ana *analytics.Service, hub *tracking.Hub, cfg *config.Config, log zerolog.Logger) *Service {
+func NewService(repo *Repository, rdb goredis.UniversalClient, notify *notification.Service, ana *analytics.Service, hub *tracking.Hub, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{repo: repo, redis: rdb, notify: notify, analytics: ana, hub: hub, cfg: cfg, log: log}
 }
 
@@ -90,7 +90,14 @@ func (s *Service) SetFareRepository(repo FareConfigRepository) {
 }
 
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
-func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64) (*Ride, error) {
+func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64, idempotencyKey string) (*Ride, error) {
+	if idempotencyKey != "" {
+		if existing, err := s.repo.FindRideByIdempotency(ctx, customerID, idempotencyKey); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return existing, nil
+		}
+	}
 	// ── Concurrent-creation guard ─────────────────────────────────────────────
 	// Use SET NX with a 10-second TTL to prevent two simultaneous requests from
 	// the same customer (e.g. double-tap, retry storm) creating duplicate rides.
@@ -157,6 +164,9 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 
 	if s.engine != nil {
 		s.engine.StartSearch(r.ID, pickup, transportType)
+	}
+	if err := s.repo.SaveRideIdempotency(ctx, customerID, idempotencyKey, r.ID); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", r.ID).Msg("ride: failed to save idempotency key")
 	}
 	return r, nil
 }

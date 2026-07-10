@@ -5,10 +5,9 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // Admin trust & safety: GPS anomalies, device collisions, lockout/flag

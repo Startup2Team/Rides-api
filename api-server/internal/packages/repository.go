@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -15,6 +16,26 @@ import (
 // Repository handles all credit and package database operations.
 type Repository struct {
 	db *pgxpool.Pool
+}
+
+type txKey struct{}
+
+type dbExecutor interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func (r *Repository) getDB(ctx context.Context) dbExecutor {
+	if tx, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
+		return tx
+	}
+	return r.db
+}
+
+func (r *Repository) getTx(ctx context.Context) (pgx.Tx, bool) {
+	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
+	return tx, ok
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {

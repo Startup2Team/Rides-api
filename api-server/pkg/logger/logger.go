@@ -26,3 +26,15 @@ func New(env string) zerolog.Logger {
 		Timestamp().
 		Logger()
 }
+
+// MaskMSISDN masks a phone number to prevent exposing PII in logs.
+// Example: +250788123456 -> +2507***
+func MaskMSISDN(phone string) string {
+	if len(phone) == 0 {
+		return ""
+	}
+	if len(phone) >= 6 {
+		return phone[:5] + "***"
+	}
+	return phone
+}

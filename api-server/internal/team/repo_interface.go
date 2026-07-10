@@ -13,7 +13,9 @@ type TeamRepo interface {
 	UpdateRole(ctx context.Context, id, roleID string) error
 	UpdateStatus(ctx context.Context, id, status string) error
 	Delete(ctx context.Context, id string) error
+	TouchInvitedAt(ctx context.Context, id string) error
 	UpdateName(ctx context.Context, id, name string) error
+	UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error
 	SetPassword(ctx context.Context, id, hash string) error
 	GetTOTPSecret(ctx context.Context, id string) (*string, error)
 	SaveTOTP(ctx context.Context, id, secret string) error

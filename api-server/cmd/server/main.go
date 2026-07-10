@@ -31,6 +31,7 @@ import (
 	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/internal/fare"
+	"github.com/workspace/ride-platform/internal/finance"
 	"github.com/workspace/ride-platform/internal/inbox"
 	"github.com/workspace/ride-platform/internal/incidents"
 	"github.com/workspace/ride-platform/internal/location"
@@ -98,6 +99,37 @@ func main() {
 		if cfg.JWT.AccessSecret == "local_dev_access_secret_change_before_any_shared_environment_0123456789" {
 			log.Fatal().Msg("FATAL: Default development JWT_ACCESS_SECRET detected in production — refusing to start")
 		}
+		if cfg.JWT.RefreshSecret == "local_dev_refresh_secret_change_before_any_shared_environment_0123456789" {
+			log.Fatal().Msg("FATAL: Default development JWT_REFRESH_SECRET detected in production — refusing to start")
+		}
+		if cfg.JWT.AdminAccessSecret == cfg.JWT.AccessSecret {
+			log.Fatal().Msg("FATAL: JWT_ADMIN_ACCESS_SECRET must be different from JWT_ACCESS_SECRET in production — refusing to start")
+		}
+		if cfg.JWT.AdminAccessSecret == "local_dev_access_secret_change_before_any_shared_environment_0123456789" {
+			log.Fatal().Msg("FATAL: Default development JWT_ADMIN_ACCESS_SECRET detected in production — refusing to start")
+		}
+		if len(cfg.JWT.AccessSecret) < 32 {
+			log.Fatal().Msg("FATAL: JWT_ACCESS_SECRET is too short (< 32 chars) in production — refusing to start")
+		}
+		if len(cfg.JWT.RefreshSecret) < 32 {
+			log.Fatal().Msg("FATAL: JWT_REFRESH_SECRET is too short (< 32 chars) in production — refusing to start")
+		}
+		if len(cfg.JWT.AdminAccessSecret) < 32 {
+			log.Fatal().Msg("FATAL: JWT_ADMIN_ACCESS_SECRET is too short (< 32 chars) in production — refusing to start")
+		}
+		if cfg.JWT.AccessExpiryMinutes > 60 {
+			log.Fatal().Msg("FATAL: JWT_ACCESS_EXPIRY_MINUTES is > 60 minutes in production — refusing to start")
+		}
+		if os.Getenv("TOTP_ENCRYPTION_KEY") == "" || os.Getenv("TOTP_ENCRYPTION_KEY") == "default-dev-totp-encryption-key-do-not-use-in-prod" {
+			log.Fatal().Msg("FATAL: TOTP_ENCRYPTION_KEY is empty or using development default in production — refusing to start")
+		}
+		if cfg.Payments.Enabled && cfg.MoMo.APIKey == "" {
+			log.Fatal().Msg("FATAL: Payments are enabled in production but MOMO_API_KEY is not set — refusing to start")
+		}
+		hasMomoCreds := cfg.MoMo.APIKey != "" || cfg.MoMo.SubscriptionKey != "" || cfg.MoMo.APIUser != ""
+		if (cfg.Payments.Enabled || hasMomoCreds) && cfg.Payments.WebhookSecret == "" {
+			log.Fatal().Msg("FATAL: Payments are enabled or MoMo credentials are configured in production but PAYMENTS_WEBHOOK_SECRET is not set — refusing to start")
+		}
 		if cfg.Payments.Enabled && cfg.MoMo.APIKey == "" {
 			log.Fatal().Msg("FATAL: Payments are enabled in production but MOMO_API_KEY is not set — refusing to start")
 		}
@@ -107,6 +139,9 @@ func main() {
 		}
 		if cfg.Driver.DevAutoApprove {
 			log.Warn().Msg("⚠️  DEV_AUTO_APPROVE_DRIVERS=true — driver approval skipped (dev only)")
+		}
+		if os.Getenv("JWT_ADMIN_ACCESS_SECRET") == "" {
+			log.Warn().Msg("⚠️  JWT_ADMIN_ACCESS_SECRET is not set, falling back to JWT_ACCESS_SECRET (dev only)")
 		}
 	}
 
@@ -121,8 +156,15 @@ func main() {
 	defer db.Close()
 	log.Info().Msg("postgres: connected")
 
+	dbRead, err := pgpkg.New(ctx, cfg.Database.ReadURL, cfg.Database.MaxConns, cfg.Database.MinConns)
+	if err != nil {
+		log.Fatal().Err(err).Msg("postgres read-replica: connect")
+	}
+	defer dbRead.Close()
+	log.Info().Msg("postgres read-replica: connected")
+
 	// ── Redis ─────────────────────────────────────────────────────────────────
-	rdb, err := rdpkg.New(ctx, cfg.Redis.URL)
+	rdb, err := rdpkg.New(ctx, cfg.Redis.URL, cfg.Redis.ClusterMode)
 	if err != nil {
 		log.Fatal().Err(err).Msg("redis: connect")
 	}
@@ -140,7 +182,7 @@ func main() {
 	notifySvc := notification.New(cfg, log)
 	paymentSvc := payment.New(cfg, log)
 	anaSvc := analytics.NewService(db, rdb, log)
-	anaRepo := analytics.NewRepository(db)
+	anaRepo := analytics.NewRepository(dbRead)
 
 	// ── Repositories ──────────────────────────────────────────────────────────
 	authRepo := auth.NewRepository(db)
@@ -163,8 +205,7 @@ func main() {
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
 	// Redis-backed so WebSocket delivery works across multiple API instances.
-	hub := tracking.NewHub(log, rdb)
-	go hub.Run(context.Background()) // subscribe to cross-instance fan-out for the process lifetime
+	hub := tracking.NewHub(rdb, log) // starts its Redis pub/sub subscriber internally
 
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
@@ -199,7 +240,11 @@ func main() {
 	reportSvc := reports.NewService(reportRepo)
 	settingsSvc := settings.NewService(settingsRepo)
 	teamSvc := team.NewService(teamRepo, cfg, rdb)
-	dashSvc := dashboard.NewService(db, rdb, log)
+	dashSvc := dashboard.NewService(dbRead, rdb, log)
+
+	financeRepo := finance.NewRepository(db)
+	financeSvc := finance.NewService(financeRepo)
+	financeH := finance.NewHandler(financeSvc)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	custSvc := customer.NewService(custRepo, log)
@@ -253,7 +298,7 @@ func main() {
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
 
-	consumer := analytics.NewConsumer(rdb, log)
+	consumer := analytics.NewConsumer(rdb, cfg.Analytics.BatchSize, log)
 	go consumer.Run(bgCtx)
 
 	// ── Orphaned-ride recovery ────────────────────────────────────────────────
@@ -367,11 +412,16 @@ func main() {
 	// Global request-body cap (memory-exhaustion guard), except large-upload
 	// routes which set their own higher per-handler limit.
 	r.Use(mw.SkipPaths(mw.BodyLimit(cfg.Security.MaxRequestBodyBytes), apiV1Prefix+"/uploads/objects/"))
+	r.Use(mw.SkipPaths(
+		mw.IPRateLimit(cfg, rdb, "global", cfg.Security.GlobalRateLimitPerMin, time.Minute),
+		"/health", "/metrics", apiV1Prefix+"/ws/",
+	))
+	r.Use(mw.MetricsMiddleware)
 	// Global per-IP rate limit (application-layer DDoS/abuse backstop). Skip health
 	// checks and the long-lived WebSocket upgrades — reconnect storms behind
 	// carrier-grade NAT would otherwise drain a bucket shared by many real users.
 	r.Use(mw.SkipPaths(
-		mw.IPRateLimit(rdb, "global", cfg.Security.GlobalRateLimitPerMin, time.Minute),
+		mw.IPRateLimit(cfg, rdb, "global", cfg.Security.GlobalRateLimitPerMin, time.Minute),
 		"/health", apiV1Prefix+"/ws/",
 	))
 	r.Use(mw.WithLogger(log))
@@ -379,6 +429,98 @@ func main() {
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		respond.OK(w, map[string]string{"status": "ok"})
+	})
+
+	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+		total, routes := mw.GlobalMetrics.GetMetrics()
+		fmt.Fprintf(w, "# HELP http_requests_total Total number of HTTP requests\n")
+		fmt.Fprintf(w, "# TYPE http_requests_total counter\n")
+		fmt.Fprintf(w, "http_requests_total %d\n\n", total)
+
+		fmt.Fprintf(w, "# HELP http_request_duration_ms_total Total HTTP request duration in milliseconds\n")
+		fmt.Fprintf(w, "# TYPE http_request_duration_ms_total counter\n")
+		for route, data := range routes {
+			fmt.Fprintf(w, "http_request_duration_ms_total{route=%q} %d\n", route, data.Duration)
+			fmt.Fprintf(w, "http_request_count_total{route=%q} %d\n", route, data.Count)
+		}
+		fmt.Fprintf(w, "\n")
+
+		drivers, customers := hub.ActiveConnectionsCount()
+		fmt.Fprintf(w, "# HELP ws_active_connections Active WebSocket connections\n")
+		fmt.Fprintf(w, "# TYPE ws_active_connections gauge\n")
+		fmt.Fprintf(w, "ws_active_connections{role=\"driver\"} %d\n", drivers)
+		fmt.Fprintf(w, "ws_active_connections{role=\"customer\"} %d\n", customers)
+		fmt.Fprintf(w, "\n")
+
+		dbStat := db.Stat()
+		fmt.Fprintf(w, "# HELP db_pool_max_connections Maximum DB connections allowed in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_max_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_max_connections %d\n", dbStat.MaxConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_active_connections Current active DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_active_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_active_connections %d\n", dbStat.AcquiredConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_idle_connections Current idle DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_idle_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_idle_connections %d\n", dbStat.IdleConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_total_connections Total DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_total_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_total_connections %d\n", dbStat.TotalConns())
+		fmt.Fprintf(w, "\n")
+
+		dbReadStat := dbRead.Stat()
+		fmt.Fprintf(w, "# HELP db_replica_pool_max_connections Maximum DB connections allowed in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_max_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_max_connections %d\n", dbReadStat.MaxConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_active_connections Current active DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_active_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_active_connections %d\n", dbReadStat.AcquiredConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_idle_connections Current idle DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_idle_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_idle_connections %d\n", dbReadStat.IdleConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_total_connections Total DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_total_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_total_connections %d\n", dbReadStat.TotalConns())
+		fmt.Fprintf(w, "\n")
+
+		if client, ok := rdb.(*goredis.Client); ok {
+			redisPool := client.PoolStats()
+			if redisPool != nil {
+				fmt.Fprintf(w, "# HELP redis_pool_hits Total number of times a connection was acquired from the pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_hits counter\n")
+				fmt.Fprintf(w, "redis_pool_hits %d\n", redisPool.Hits)
+
+				fmt.Fprintf(w, "# HELP redis_pool_misses Total number of times a connection could not be acquired from the pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_misses counter\n")
+				fmt.Fprintf(w, "redis_pool_misses %d\n", redisPool.Misses)
+
+				fmt.Fprintf(w, "# HELP redis_pool_timeouts Total number of connection timeouts\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_timeouts counter\n")
+				fmt.Fprintf(w, "redis_pool_timeouts %d\n", redisPool.Timeouts)
+
+				fmt.Fprintf(w, "# HELP redis_pool_total_connections Total number of connections in the Redis pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_total_connections gauge\n")
+				fmt.Fprintf(w, "redis_pool_total_connections %d\n", redisPool.TotalConns)
+
+				fmt.Fprintf(w, "# HELP redis_pool_idle_connections Number of idle connections in the Redis pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_idle_connections gauge\n")
+				fmt.Fprintf(w, "redis_pool_idle_connections %d\n", redisPool.IdleConns)
+			}
+		}
+
+		// 5. MTN Reconcile queue depth metric
+		if depth, err := purchaseSvc.PendingMoMoQueueDepth(r.Context()); err == nil {
+			fmt.Fprintf(w, "# HELP mtn_reconcile_queue_depth Count of pending mobile money purchases awaiting reconciliation\n")
+			fmt.Fprintf(w, "# TYPE mtn_reconcile_queue_depth gauge\n")
+			fmt.Fprintf(w, "mtn_reconcile_queue_depth %d\n", depth)
+		}
 	})
 
 	// API docs — gated: 404 when disabled (default in prod), optional Basic auth
@@ -409,20 +551,22 @@ func main() {
 		r.With(mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour)).Post("/register", authH.Register)
 		// verify-otp is brute-forceable (6-digit code) — cap attempts per phone too.
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
-		r.Post("/refresh", authH.Refresh)
+		r.With(mw.IPRateLimit(cfg, rdb, "auth_refresh", cfg.Security.AuthRefreshRateLimit, 15*time.Minute)).Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
+		r.With(mw.Authenticate(cfg, rdb)).Post("/ws-ticket", authH.WSTicket)
 		r.With(mw.Authenticate(cfg, rdb), mw.OTPRateLimit(rdb, "delete_account", 3, 24*time.Hour)).Delete("/account", authH.DeleteAccount)
 	})
 
 	// MoMo payment callback — public (called by the provider, not the app), so it
 	// is gated by a shared secret instead of a user session. Without this any
 	// caller could POST a fake "SUCCESS" and have credits granted for free.
+	webhookSecretRequired := cfg.Payments.Enabled || cfg.MoMo.APIKey != "" || cfg.MoMo.SubscriptionKey != "" || cfg.MoMo.APIUser != ""
 	if cfg.Env == "production" && cfg.Payments.WebhookSecret == "" {
 		log.Warn().Msg("MOMO_WEBHOOK_SECRET is unset in production — the MoMo callback is UNAUTHENTICATED; set it before enabling payments")
 	}
 	r.With(
-		mw.IPRateLimit(rdb, "momo_webhook", 120, time.Minute),
-		momoWebhookAuth(cfg.Payments.WebhookSecret),
+		mw.IPRateLimit(cfg, rdb, "momo_webhook", cfg.Security.MomoWebhookRateLimit, time.Minute),
+		momoWebhookAuth(cfg.Payments.WebhookSecret, webhookSecretRequired),
 	).Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
 
 	// ── Customer ──────────────────────────────────────────────────────────────
@@ -503,6 +647,10 @@ func main() {
 			// 20 req/min = 1 every 3 s. Drivers send every 5–12 s so this is
 			// headroom for bursts without blocking normal use. Returns 204 (not
 			// 429) so the app doesn't log a red error when a burst is trimmed.
+			r.With(mw.UserRateLimit(rdb, "driver_location", cfg.Security.DriverLocationRateLimit, time.Minute)).
+				Post("/location", driverH.UpdateLocation)
+			r.With(mw.UserRateLimit(rdb, "driver_location_batch", cfg.Security.DriverLocationRateLimit, time.Minute)).
+				Post("/locations", driverH.UpdateLocationsBatch)
 			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
 				Post("/location", driverH.UpdateLocation)
 
@@ -619,14 +767,18 @@ func main() {
 
 	// ── Admin auth (public — no admin JWT required) ───────────────────────────
 	// Rate limit administrative endpoints to prevent brute-force credential stuffing.
-	r.With(mw.IPRateLimit(rdb, "admin_login", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
-	r.With(mw.IPRateLimit(rdb, "admin_2fa", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
-	r.With(mw.IPRateLimit(rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
-	r.With(mw.IPRateLimit(rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_login", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_login", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
 
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
-		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.AuthenticateAdmin(cfg, rdb))
 		r.Use(mw.RequireRole(mw.RoleAdmin))
 
 		// Auth (protected actions) - My Account (unrestricted admin roles)
@@ -660,6 +812,7 @@ func main() {
 			r.Get("/dashboard/recent-activity", dashH.RecentActivity)
 			r.Get("/dashboard/alerts", dashH.Alerts)
 			r.Get("/dashboard/live-map", dashH.LiveMap)
+			r.Get("/launch-readiness", adminH.LaunchReadiness)
 
 			// Drivers
 			r.Post("/drivers/send-otp", adminH.SendDriverOTP)
@@ -668,6 +821,7 @@ func main() {
 			r.Post("/drivers", adminH.CreateDriver)
 			r.Get("/drivers/overview", adminH.DriverOverview)
 			r.Get("/drivers/{id}", adminH.GetDriver)
+			r.Get("/drivers/{id}/referrals", adminH.GetDriverReferrals)
 			r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
 			r.Patch("/drivers/{id}", adminH.UpdateDriver)
 			// r.Delete("/drivers/{id}", adminH.DeleteDriver) REMOVED - suspend/reinstate only
@@ -796,6 +950,13 @@ func main() {
 			r.Get("/reports/{id}", reportH.Get)
 			r.Get("/reports/{id}/download", reportH.Download)
 			r.Delete("/reports/{id}", reportH.Delete)
+
+			// Finance Reporting & Ledger
+			r.Get("/finance/ledger", financeH.GetGeneralLedger)
+			r.Get("/finance/trial-balance", financeH.GetTrialBalance)
+			r.Get("/finance/balance-sheet", financeH.GetBalanceSheet)
+			r.Get("/finance/export", financeH.ExportFinanceReport)
+			r.Get("/finance/staff-analytics", financeH.GetStaffAnalytics)
 		})
 
 		// --- Finance Write Bucket (Super Admin, Finance Manager) ---
@@ -838,6 +999,12 @@ func main() {
 			r.Post("/team/members/{id}/role", teamH.UpdateRole)
 			r.Post("/team/members/{id}/suspend", teamH.Suspend)
 			r.Post("/team/members/{id}/reinstate", teamH.Reinstate)
+			r.Post("/team/members/{id}/remove", teamH.Remove)
+			r.Post("/team/members/{id}/resend-invite", teamH.ResendInvite)
+			r.Post("/team/members/{id}/reset-2fa", teamH.ResetMember2FA)
+			r.Get("/team/members/{id}/activity", teamH.GetMemberActivity)
+			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+			r.Post("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
 			// r.Post("/team/members/{id}/remove", teamH.Remove) REMOVED - suspend/reinstate only
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
 			r.Get("/team/members/{id}/activity", teamH.MemberActivity)
@@ -850,6 +1017,7 @@ func main() {
 			// Packages admin CRUD
 			r.Get("/packages", pkgH.AdminListPackages)
 			r.Get("/packages-purchases", pkgH.AdminListPurchases)
+			r.Get("/packages/{id}/subscribers", pkgH.AdminListPackageSubscribers)
 			// Entitlements — admin-wide balances + manual grant
 			r.Get("/entitlements", pkgH.AdminListEntitlements)
 			r.Post("/entitlements/grant", pkgH.AdminGrantEntitlement)
@@ -876,6 +1044,18 @@ func main() {
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
+
+			// Entitlements admin (ledger-backed)
+			r.Get("/entitlements", pkgH.AdminListEntitlements)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_entitlement_grant", 30, time.Minute),
+			).Post("/entitlements/grant", pkgH.AdminGrantEntitlement)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_entitlement_revoke", 30, time.Minute),
+			).Post("/entitlements/revoke", pkgH.AdminRevokeEntitlement)
+
 			// Bonuses — admin CRUD for bonus tiers
 			r.Get("/bonuses/tiers", bonusH.AdminListTiers)
 			r.Post("/bonuses/tiers", bonusH.AdminCreateTier)
@@ -954,12 +1134,16 @@ func (g momoGateway) QueryStatus(ctx context.Context, provider, externalRef stri
 }
 
 // momoWebhookAuth gates the public MoMo callback with a shared secret. When the
-// secret is empty (dev), it is a pass-through. When set, callers must present a
-// matching X-Webhook-Secret header (constant-time compared) or get 401. This is
-// an interim guard until the provider's signature verification is wired.
-func momoWebhookAuth(secret string) func(http.Handler) http.Handler {
+// secret is empty (dev), it is a pass-through (unless required). When set, callers
+// must present a matching X-Webhook-Secret header (constant-time compared) or get 401.
+// MTN reconcile polling is the primary authoritative settlement path; this webhook is secondary.
+func momoWebhookAuth(secret string, required bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if required && secret == "" {
+				respond.ErrorMsg(w, http.StatusServiceUnavailable, "WEBHOOK_MISCONFIGURED", "momo webhook secret is required but not configured")
+				return
+			}
 			if secret != "" {
 				got := r.Header.Get("X-Webhook-Secret")
 				if subtle.ConstantTimeCompare([]byte(got), []byte(secret)) != 1 {
@@ -1155,7 +1339,7 @@ const apiV1Prefix = "/api/v1"
 func recoverOrphanedRides(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	rdb *goredis.Client,
+	rdb goredis.UniversalClient,
 	engine *matching.Engine,
 	hub *tracking.Hub,
 	log zerolog.Logger,

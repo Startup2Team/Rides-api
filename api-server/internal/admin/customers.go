@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
-	apperrors "github.com/workspace/ride-platform/pkg/errors"
-
 	"github.com/jackc/pgx/v5"
+	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
-// Admin customer management: listing, detail, suspension and bans.
+// Admin customer management: listing, detail, suspension, bans and
+// session revocation.
 
 func (s *Service) ListCustomers(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
 	var wheres []string
@@ -177,7 +177,21 @@ func (s *Service) SuspendUser(ctx context.Context, userID string, durationHours 
 		UPDATE users SET is_suspended = TRUE, suspension_until = $1, updated_at = NOW()
 		WHERE id = $2
 	`, suspendedUntil, userID)
-	return err
+	if err != nil {
+		return err
+	}
+	s.revokeUserSessions(ctx, userID)
+	return nil
+}
+
+func (s *Service) revokeUserSessions(ctx context.Context, userID string) {
+	if s.rdb == nil {
+		return
+	}
+	iter := s.rdb.Scan(ctx, 0, "session:"+userID+":*", 100).Iterator()
+	for iter.Next(ctx) {
+		s.rdb.Del(ctx, iter.Val())
+	}
 }
 
 func (s *Service) ReinstateUser(ctx context.Context, userID string) error {

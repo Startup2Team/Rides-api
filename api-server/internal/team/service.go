@@ -41,10 +41,10 @@ type LoginResult struct {
 type Service struct {
 	repo TeamRepo
 	cfg  *config.Config
-	rdb  *goredis.Client
+	rdb  goredis.UniversalClient
 }
 
-func NewService(repo TeamRepo, cfg *config.Config, rdb *goredis.Client) *Service {
+func NewService(repo TeamRepo, cfg *config.Config, rdb goredis.UniversalClient) *Service {
 	return &Service{repo: repo, cfg: cfg, rdb: rdb}
 }
 
@@ -84,6 +84,19 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
 }
 
+// ResendInvite refreshes the invited_at timestamp for a team member invite.
+func (s *Service) ResendInvite(ctx context.Context, id string) error {
+	return s.repo.TouchInvitedAt(ctx, id)
+}
+
+// ResetMember2FA clears TOTP credentials for another admin account.
+func (s *Service) ResetMember2FA(ctx context.Context, actorID, memberID string) error {
+	if actorID == memberID {
+		return apperrors.New(http.StatusForbidden, "SELF_ACTION", "use account settings to reset your own 2FA")
+	}
+	return s.repo.ClearTOTP(ctx, memberID)
+}
+
 func (s *Service) ListRoles(ctx context.Context) ([]*Role, error) {
 	return s.repo.ListRoles(ctx)
 }
@@ -100,8 +113,17 @@ func (s *Service) DeleteRoleByID(ctx context.Context, roleID string) error {
 	return s.repo.DeleteRoleByID(ctx, roleID)
 }
 
+// UpdateRolePermissions replaces the permissions of a non-system role.
+func (s *Service) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return s.repo.UpdateRolePermissions(ctx, roleID, permissions)
+}
+
 func (s *Service) UpdateName(ctx context.Context, id, name string) error {
 	return s.repo.UpdateName(ctx, id, name)
+}
+
+func (s *Service) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
+	return s.repo.UpdateProfile(ctx, id, name, phone, photoURL)
 }
 
 func (s *Service) SetPassword(ctx context.Context, id, password string) error {
@@ -151,8 +173,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 	}
 
 	// In dev we skip 2FA entirely so testing isn't gated behind authenticator
-	// codes / clock-skew. Production enforces it: a 2FA-enabled admin gets a
-	// short-lived pre-auth token and must pass the TOTP challenge.
+	// codes / clock-skew. Production always enforces it.
 	if admin.TwoFactor && s.cfg.Env == "production" {
 		preAuth, err := s.issuePreAuthToken(admin.ID)
 		if err != nil {
@@ -416,7 +437,7 @@ func (s *Service) issueAccessToken(ctx context.Context, adminID, roleName string
 		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString([]byte(s.cfg.JWT.AccessSecret))
+	signed, err := token.SignedString([]byte(s.cfg.JWT.AdminAccessSecret))
 	if err != nil {
 		return "", err
 	}
@@ -436,7 +457,7 @@ func (s *Service) issuePreAuthToken(adminID string) (string, error) {
 		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.cfg.JWT.AccessSecret))
+	return token.SignedString([]byte(s.cfg.JWT.AdminAccessSecret))
 }
 
 func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
@@ -444,7 +465,7 @@ func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, apperrors.ErrTokenInvalid
 		}
-		return []byte(s.cfg.JWT.AccessSecret), nil
+		return []byte(s.cfg.JWT.AdminAccessSecret), nil
 	})
 	if err != nil || !token.Valid {
 		return "", apperrors.New(http.StatusUnauthorized, "INVALID_PRE_AUTH_TOKEN", "pre-auth token is invalid or expired")
@@ -526,32 +547,6 @@ func (s *Service) LogAction(ctx context.Context, adminID, action, targetType, ta
 // GetMemberActivity returns the most recent audit entries for a given admin.
 func (s *Service) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error) {
 	return s.repo.GetMemberActivity(ctx, adminID, limit)
-}
-
-// UpdateRolePermissions replaces the permissions of a non-system role.
-func (s *Service) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
-	return s.repo.UpdateRolePermissions(ctx, roleID, permissions)
-}
-
-// ResendInvite re-issues an invite for a still-pending admin account.
-func (s *Service) ResendInvite(ctx context.Context, id string) error {
-	n, err := s.repo.ReissueInvite(ctx, id)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return apperrors.New(http.StatusConflict, "ALREADY_ACTIVE", "account is already active or does not exist")
-	}
-	return nil
-}
-
-// AdminResetMember2FA clears another admin's 2FA so they must re-enroll at next
-// login. Unlike ResetTOTP this is an administrative action and needs no code.
-func (s *Service) AdminResetMember2FA(ctx context.Context, id string) error {
-	if _, _, err := s.repo.FindByID(ctx, id); err != nil {
-		return apperrors.ErrNotFound
-	}
-	return s.repo.ClearTOTP(ctx, id)
 }
 
 // ListAuditLog returns the platform-wide admin audit trail, newest first.

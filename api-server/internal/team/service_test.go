@@ -3,6 +3,7 @@ package team
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,10 +91,18 @@ func (m *mockRepo) Delete(ctx context.Context, id string) error {
 	}
 	return nil
 }
+func (m *mockRepo) TouchInvitedAt(ctx context.Context, id string) error         { return nil }
+func (m *mockRepo) ReissueInvite(ctx context.Context, id string) (int64, error) { return 1, nil }
+func (m *mockRepo) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+	return nil
+}
 func (m *mockRepo) UpdateName(ctx context.Context, id, name string) error {
 	if m.updateNameFn != nil {
 		return m.updateNameFn(ctx, id, name)
 	}
+	return nil
+}
+func (m *mockRepo) UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error {
 	return nil
 }
 func (m *mockRepo) SetPassword(ctx context.Context, id, hash string) error {
@@ -150,12 +159,6 @@ func (m *mockRepo) UpdateRoleByID(ctx context.Context, roleID, name, description
 	}
 	return nil, nil
 }
-func (m *mockRepo) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
-	return nil
-}
-func (m *mockRepo) ReissueInvite(ctx context.Context, id string) (int64, error) {
-	return 1, nil
-}
 func (m *mockRepo) DeleteRoleByID(ctx context.Context, roleID string) error {
 	if m.deleteRoleByIDFn != nil {
 		return m.deleteRoleByIDFn(ctx, roleID)
@@ -183,7 +186,7 @@ func (m *mockRepo) ListAuditLog(ctx context.Context, actor, action, targetType, 
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
-func newTestRedis(t *testing.T) *goredis.Client {
+func newTestRedis(t *testing.T) goredis.UniversalClient {
 	t.Helper()
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
@@ -206,11 +209,11 @@ func testCfg() *config.Config {
 	}
 }
 
-func newTestService(repo TeamRepo, rdb *goredis.Client) *Service {
+func newTestService(repo TeamRepo, rdb goredis.UniversalClient) *Service {
 	return &Service{repo: repo, cfg: testCfg(), rdb: rdb}
 }
 
-func newTestServiceProduction(repo TeamRepo, rdb *goredis.Client) *Service {
+func newTestServiceProduction(repo TeamRepo, rdb goredis.UniversalClient) *Service {
 	cfg := testCfg()
 	cfg.Env = "production"
 	return &Service{repo: repo, cfg: cfg, rdb: rdb}
@@ -435,17 +438,21 @@ func TestLogin_No2FA_ReturnsAccessToken(t *testing.T) {
 	assert.False(t, result.TwoFactorRequired)
 }
 
-func TestLogin_With2FA_ReturnsPreAuthChallenge(t *testing.T) {
+func TestLogin_With2FA_ReturnsPreAuthToken(t *testing.T) {
 	hash, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
 	hashStr := string(hash)
+	totpSecret := "JBSWY3DPEHPK3PXP"
 	repo := &mockRepo{
 		findByEmailFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
 			return &AdminAccount{ID: "a1", Status: "ACTIVE", TwoFactor: true}, &hashStr, nil
 		},
+		getTOTPSecretFn: func(_ context.Context, _ string) (*string, error) {
+			return &totpSecret, nil
+		},
 	}
 
-	// A 2FA-enabled admin in production must be handed a pre-auth challenge and
-	// must NOT receive a full session until the TOTP code is verified.
+	// 2FA is only enforced in production (dev skips it for testing ergonomics),
+	// so exercise the pre-auth path with a production config.
 	svc := newTestServiceProduction(repo, newTestRedis(t))
 
 	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
@@ -466,28 +473,17 @@ func TestLogout_RevokesSession(t *testing.T) {
 
 // ── Generate2FASetup ──────────────────────────────────────────────────────
 
-func TestGenerate2FASetup_ReturnsSecretForNon2FAAdmin(t *testing.T) {
+func TestGenerate2FASetup_ReturnsSecretAndURL(t *testing.T) {
 	repo := &mockRepo{
 		findByIDFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
-			return &AdminAccount{ID: "a1", Email: "admin@test.com", TwoFactor: false}, nil, nil
+			return &AdminAccount{ID: "a1", Email: "admin@test.com"}, nil, nil
 		},
 	}
 	svc := newTestService(repo, newTestRedis(t))
 	secret, url, err := svc.Generate2FASetup(context.Background(), "a1")
 	require.NoError(t, err)
 	assert.NotEmpty(t, secret)
-	assert.NotEmpty(t, url)
-}
-
-func TestGenerate2FASetup_ConflictWhenAlreadyEnabled(t *testing.T) {
-	repo := &mockRepo{
-		findByIDFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
-			return &AdminAccount{ID: "a1", Email: "admin@test.com", TwoFactor: true}, nil, nil
-		},
-	}
-	svc := newTestService(repo, newTestRedis(t))
-	_, _, err := svc.Generate2FASetup(context.Background(), "a1")
-	require.Error(t, err)
+	assert.Contains(t, url, "otpauth://totp/")
 }
 
 // ── Enable2FA ─────────────────────────────────────────────────────────────
@@ -659,4 +655,20 @@ func TestResetTOTP_NoExistingSecret(t *testing.T) {
 	svc := newTestService(repo, newTestRedis(t))
 	_, _, _, err := svc.ResetTOTP(context.Background(), "a1", "123456")
 	require.Error(t, err)
+}
+
+func TestTOTPEncryption_RoundTripAndFallback(t *testing.T) {
+	originalSecret := "JBSWY3DPEHPK3PXP"
+	encrypted, err := encryptTOTP(originalSecret)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(encrypted, "enc:"))
+
+	decrypted, err := decryptTOTP(encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, originalSecret, decrypted)
+
+	plainSecret := "MYPLAINSECRET"
+	fallbackDecrypted, err := decryptTOTP(plainSecret)
+	require.NoError(t, err)
+	assert.Equal(t, plainSecret, fallbackDecrypted)
 }

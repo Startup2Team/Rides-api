@@ -248,6 +248,23 @@ func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+// POST /api/v1/auth/ws-ticket
+func (h *Handler) WSTicket(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		respond.Error(w, apperrors.ErrUnauthorized)
+		return
+	}
+
+	ticket, err := h.svc.GenerateWSTicket(r.Context(), claims.UserID, claims.RoleState)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	respond.OK(w, map[string]string{"ticket": ticket})
+}
+
 func realIP(r *http.Request) string {
 	if ip := r.Header.Get("X-Real-IP"); ip != "" {
 		return ip

@@ -35,3 +35,6 @@ pgadmin-pgpass
 pgadmin-servers.json
 # Local upload staging
 .envvar/uploads/
+
+# Compiled linter binaries
+bin/

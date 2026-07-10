@@ -8,9 +8,8 @@ import (
 	"strings"
 	"time"
 
-	apperrors "github.com/workspace/ride-platform/pkg/errors"
-
 	"github.com/jackc/pgx/v5"
+	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
 // Admin ride oversight: history, detail, live rides and intervention.

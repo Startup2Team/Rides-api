@@ -97,16 +97,26 @@ func (h *Handler) RequestDriverMoreInfo(w http.ResponseWriter, r *http.Request) 
 	claims := middleware.GetClaims(r)
 	profileID := chi.URLParam(r, "id")
 	var body struct {
-		Reason    string           `json:"reason"`
-		Documents []map[string]any `json:"documents"`
+		Reason    string `json:"reason"`
+		Documents []struct {
+			DocumentType string `json:"document_type"`
+			Comment      string `json:"comment"`
+		} `json:"documents"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
 	if err := h.svc.RequestDriverMoreInfo(r.Context(), profileID, claims.UserID, body.Reason); err != nil {
 		respond.Error(w, err)
 		return
 	}
 	adminID, role := adminCtx(r)
-	h.audit.Record(r.Context(), adminID, role, "driver.request_more_info", "driver", profileID, "Requested more information from driver", map[string]any{"reason": body.Reason, "documents": body.Documents})
+	meta := map[string]any{"reason": body.Reason}
+	if len(body.Documents) > 0 {
+		meta["documents"] = body.Documents
+	}
+	h.audit.Record(r.Context(), adminID, role, "driver.request_more_info", "driver", profileID, "Requested more driver onboarding info", meta)
 	respond.NoContent(w)
 }
 
@@ -423,6 +433,17 @@ func (h *Handler) GetDriver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, driver)
+}
+
+// GET /api/v1/admin/drivers/:id/referrals
+func (h *Handler) GetDriverReferrals(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	referrals, err := h.svc.GetDriverReferrals(r.Context(), profileID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, referrals)
 }
 
 // PATCH /api/v1/admin/drivers/:id
@@ -780,6 +801,16 @@ func (h *Handler) VerifyDriverOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.OK(w, map[string]string{"status": "verified"})
+}
+
+// GET /api/v1/admin/launch-readiness
+func (h *Handler) LaunchReadiness(w http.ResponseWriter, r *http.Request) {
+	data, err := h.svc.LaunchReadiness(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, data)
 }
 
 func paginate(r *http.Request) (int, int) {

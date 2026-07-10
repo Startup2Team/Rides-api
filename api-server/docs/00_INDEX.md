@@ -23,6 +23,9 @@ This folder is the working documentation hub for the Rides ride-hailing backend.
 | [testing/TEST_STRATEGY.md](testing/TEST_STRATEGY.md) | Test suite strategy, coverage targets, and MVP verification flows. |
 | [project/TASK_TRACKER.md](project/TASK_TRACKER.md) | Task tracker for backend, admin, DevOps, QA, and product work. |
 | [MVP_LOCAL_DEVELOPMENT.md](MVP_LOCAL_DEVELOPMENT.md) | Local development runbook and MVP flow readiness. |
+| [SCALING.md](SCALING.md) | High-scale architecture, horizontal WebSockets, replicas routing, and cluster scaling. |
+| [SECURITY.md](SECURITY.md) | Security threat models, token isolation, single-use tickets, and production startup guards. |
+
 
 ## Current System Summary
 

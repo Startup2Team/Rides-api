@@ -20,8 +20,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/rs/zerolog/log"
 
 	appcfg "github.com/workspace/ride-platform/config"
+	"github.com/workspace/ride-platform/internal/middleware"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
@@ -162,6 +165,13 @@ func (h *Handler) SeedDevMockFiles() {
 }
 
 func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		respond.Error(w, apperrors.ErrUnauthorized)
+		return
+	}
+	userID := claims.UserID
+
 	var body struct {
 		ContentType string `json:"content_type"`
 		Purpose     string `json:"purpose"`
@@ -192,6 +202,11 @@ func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
 	// over ngrok. The client PUTs the bytes to upload_url; this API streams them
 	// into MinIO server-side. file_url serves them back the same way.
 	if h.proxy {
+		token, err := h.generateUploadToken(userID, objectKey)
+		if err != nil {
+			respond.Error(w, apperrors.ErrInternal)
+			return
+		}
 		cdnURL := h.cfg.Storage.CDNURL
 		if r.Host != "" {
 			if strings.Contains(cdnURL, "localhost:8080") {
@@ -201,8 +216,9 @@ func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		base := strings.TrimRight(cdnURL, "/") + "/" + objectKey
+		uploadURL := fmt.Sprintf("%s?token=%s", base, token)
 		respond.OK(w, map[string]any{
-			"upload_url": base,
+			"upload_url": uploadURL,
 			"file_url":   base,
 			"expires_in": 300,
 			"max_size":   maxUploadBytes,
@@ -238,6 +254,10 @@ func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
 
 // PutObject (proxy mode) streams an authenticated upload straight into MinIO.
 // PUT /api/v1/uploads/objects/documents/<key>  — body is the raw file bytes.
+//
+// SECURITY: To prevent anonymous files from filling up disk or MinIO bucket storage,
+// this endpoint requires Content-Type validation, max file size limiting, and logs
+// all incoming uploads for auditability.
 func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	if !h.proxy {
 		respond.ErrorMsg(w, http.StatusNotFound, "NOT_FOUND", "direct upload not enabled")
@@ -248,6 +268,30 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "invalid object key")
 		return
 	}
+
+	tokenStr := r.URL.Query().Get("token")
+	if tokenStr == "" {
+		tokenStr = r.Header.Get("X-Upload-Token")
+	}
+
+	if tokenStr == "" {
+		if h.cfg.Env == "production" {
+			respond.ErrorMsg(w, http.StatusUnauthorized, "UNAUTHORIZED", "upload token required")
+			return
+		}
+		log.Warn().Str("key", objectKey).Msg("SECURITY WARNING: upload PUT accepted without token (dev only)")
+	} else {
+		claims, err := h.verifyUploadToken(tokenStr)
+		if err != nil {
+			respond.ErrorMsg(w, http.StatusUnauthorized, "UNAUTHORIZED", fmt.Sprintf("invalid upload token: %v", err))
+			return
+		}
+		if claims.ObjectKey != objectKey {
+			respond.ErrorMsg(w, http.StatusForbidden, "FORBIDDEN", "token key mismatch")
+			return
+		}
+	}
+
 	contentType := r.Header.Get("Content-Type")
 	if !allowedContentType(contentType) {
 		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "unsupported content_type")
@@ -273,6 +317,14 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, apperrors.ErrInternal)
 		return
 	}
+
+	log.Info().
+		Str("object_key", objectKey).
+		Str("content_type", contentType).
+		Int("size_bytes", len(data)).
+		Str("client_ip", r.RemoteAddr).
+		Msg("upload: file proxy upload succeeded")
+
 	respond.NoContent(w)
 }
 
@@ -361,4 +413,40 @@ func randomKey(ext string) (string, error) {
 		return "", err
 	}
 	return filepath.Base(hex.EncodeToString(b) + ext), nil
+}
+
+type UploadClaims struct {
+	UserID    string `json:"user_id"`
+	ObjectKey string `json:"object_key"`
+	jwt.RegisteredClaims
+}
+
+func (h *Handler) generateUploadToken(userID, objectKey string) (string, error) {
+	claims := &UploadClaims{
+		UserID:    userID,
+		ObjectKey: objectKey,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(h.cfg.JWT.AccessSecret))
+}
+
+func (h *Handler) verifyUploadToken(tokenStr string) (*UploadClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &UploadClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return []byte(h.cfg.JWT.AccessSecret), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := token.Claims.(*UploadClaims)
+	if !ok || !token.Valid {
+		return nil, fmt.Errorf("invalid token claims")
+	}
+	return claims, nil
 }

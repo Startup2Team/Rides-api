@@ -34,7 +34,7 @@ type Service struct {
 	db       DBTX
 	log      zerolog.Logger
 	packages PackagesService
-	rdb      *goredis.Client
+	rdb      goredis.UniversalClient
 	bonus    BonusService
 }
 
@@ -47,7 +47,7 @@ func (s *Service) SetBonusService(svc BonusService)       { s.bonus = svc }
 
 // SetRedis wires the Redis client used by account-assist operations
 // (clearing OTP lockouts, GPS anomaly counters).
-func (s *Service) SetRedis(rdb *goredis.Client) {
+func (s *Service) SetRedis(rdb goredis.UniversalClient) {
 	s.rdb = rdb
 }
 
@@ -98,3 +98,24 @@ func periodToInterval(period string) string {
 // ── Negotiation detail ────────────────────────────────────────────────────
 
 // ── Revenue (unified) ─────────────────────────────────────────────────────
+
+type LaunchTask struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Details       string  `json:"details"`
+	EstimateHours float64 `json:"estimate_hours"`
+	Owner         string  `json:"owner"`
+	Status        string  `json:"status"`
+	CriticalPath  bool    `json:"critical_path,omitempty"`
+}
+
+type LaunchTrack struct {
+	Name  string       `json:"name"`
+	Tasks []LaunchTask `json:"tasks"`
+}
+
+type LaunchTrackerData struct {
+	Team        []string      `json:"team"`
+	APIEndpoint string        `json:"api_endpoint"`
+	Tracks      []LaunchTrack `json:"tracks"`
+}

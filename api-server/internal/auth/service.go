@@ -20,6 +20,7 @@ import (
 
 	"github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/internal/telephony"
+	"github.com/workspace/ride-platform/pkg/logger"
 )
 
 const (
@@ -36,13 +37,13 @@ const (
 // Service handles all authentication business logic.
 type Service struct {
 	repo      *Repository
-	redis     *goredis.Client
+	redis     goredis.UniversalClient
 	telephony *telephony.Service
 	cfg       *config.Config
 	log       zerolog.Logger
 }
 
-func NewService(repo *Repository, rdb *goredis.Client, tel *telephony.Service, cfg *config.Config, log zerolog.Logger) *Service {
+func NewService(repo *Repository, rdb goredis.UniversalClient, tel *telephony.Service, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{repo: repo, redis: rdb, telephony: tel, cfg: cfg, log: log}
 }
 
@@ -86,6 +87,7 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 	// are never blocked waiting for real SMS delivery.
 	if s.cfg.Env != "production" {
 		s.log.Warn().
+			Str("phone", logger.MaskMSISDN(phone)).
 			Str("phone", phone).
 			Str("otp", otp).
 			Msg("⚠️  DEV MODE — OTP (not sent via SMS)")
@@ -93,6 +95,7 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 	}
 
 	if err := s.telephony.SendOTP(ctx, phone, otp); err != nil {
+		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: sms send failed")
 		s.log.Error().Err(err).Str("phone", phone).Msg("otp: sms send failed")
 		if s.cfg.Env == "production" {
 			return "", fmt.Errorf("sms send: %w", err)
@@ -105,9 +108,9 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 	if s.cfg.Env != "production" && s.cfg.AT.WhatsAppEnabled {
 		if err := s.telephony.SendOTPWhatsApp(ctx, phone, otp); err != nil {
 			// Non-fatal — the OTP is already in the dev logs.
-			s.log.Warn().Err(err).Str("phone", phone).Msg("otp: whatsapp send failed (non-fatal in dev)")
+			s.log.Warn().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: whatsapp send failed (non-fatal in dev)")
 		} else {
-			s.log.Info().Str("phone", phone).Msg("otp: sent via WhatsApp (dev mode)")
+			s.log.Info().Str("phone", logger.MaskMSISDN(phone)).Msg("otp: sent via WhatsApp (dev mode)")
 		}
 	}
 
@@ -119,6 +122,7 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 func (s *Service) initiateWithPindoVerify(ctx context.Context, phone, purpose, fullName string, email *string) error {
 	reqID, err := s.telephony.StartVerify(ctx, phone)
 	if err != nil {
+		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: pindo verify start failed")
 		s.log.Error().Err(err).Str("phone", phone).Msg("otp: pindo verify start failed")
 		return fmt.Errorf("verify start: %w", err)
 	}
@@ -146,6 +150,7 @@ func (s *Service) verifyWithPindo(ctx context.Context, phone, code string) error
 	}
 	ok, err := s.telephony.CheckVerify(ctx, reqID, code)
 	if err != nil {
+		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: pindo verify check failed")
 		s.log.Error().Err(err).Str("phone", phone).Msg("otp: pindo verify check failed")
 		return apperrors.New(502, "VERIFY_UNAVAILABLE", "Verification service is unavailable. Try again shortly.")
 	}
@@ -351,9 +356,13 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 		return nil, apperrors.ErrTokenInvalid
 	}
 
+	if claims.ID == "" {
+		return nil, apperrors.ErrTokenInvalid
+	}
+
 	key := rkeys.K.Session(claims.UserID, claims.ID)
 	val, err := s.redis.Get(ctx, key).Result()
-	if err != nil || val == "revoked" {
+	if err != nil || val != "valid" {
 		return nil, apperrors.ErrTokenRevoked
 	}
 
@@ -370,6 +379,11 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 		// Revoke the session so further refresh attempts also fail immediately.
 		_ = s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err()
 		return nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
+	}
+
+	// Revoke the old refresh token session BEFORE issuing the new token pair (refresh token rotation)
+	if err := s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err(); err != nil {
+		return nil, fmt.Errorf("failed to revoke old refresh token: %w", err)
 	}
 
 	return s.issueTokenPair(ctx, user)
@@ -517,4 +531,29 @@ func generateOTP() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+
+func (s *Service) GenerateWSTicket(ctx context.Context, userID, roleState string) (string, error) {
+	ticketJTI := uuid.New().String()
+	claims := &middleware.Claims{
+		UserID:    userID,
+		RoleState: roleState,
+		TokenType: "ws",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        ticketJTI,
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(60 * time.Second)),
+		},
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.JWT.AccessSecret))
+	if err != nil {
+		return "", fmt.Errorf("sign ws ticket: %w", err)
+	}
+
+	ticketKey := "ws-ticket:" + ticketJTI
+	err = s.redis.Set(ctx, ticketKey, "valid", 60*time.Second).Err()
+	if err != nil {
+		return "", fmt.Errorf("store ws ticket: %w", err)
+	}
+	return token, nil
 }

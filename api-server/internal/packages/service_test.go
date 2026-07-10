@@ -95,6 +95,15 @@ func (m *mockRepo) SetCampaignStatus(_ context.Context, _ string, _ string) erro
 func (m *mockRepo) DeleteCampaign(_ context.Context, _ string) error {
 	return nil
 }
+func (m *mockRepo) AdminListEntitlements(_ context.Context, _ bool) ([]*packages.AdminEntitlementRow, error) {
+	return nil, nil
+}
+func (m *mockRepo) GetEntitlementKeys(_ context.Context, _ string) (string, string, string, error) {
+	return "", "", "", nil
+}
+func (m *mockRepo) AdminListPackageSubscribers(_ context.Context, _ string) ([]*packages.PackageSubscriber, error) {
+	return nil, nil
+}
 
 func newSvc(repo packages.Repo) *packages.Service {
 	return packages.NewService(repo, zerolog.Nop())
