@@ -1098,6 +1098,25 @@ func main() {
 		}
 	}()
 
+	// Telegram bot commands (/status /help) — long-poll getUpdates. Disabled
+	// when the notifier is nil. Uses local /health so the reply reflects what
+	// this process is actually serving.
+	alerts.StartCommands(bgCtx, func(ctx context.Context) string {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+cfg.Port+"/health", nil)
+		if err != nil {
+			return "⚠️ status check failed to build request: " + err.Error()
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Sprintf("🔴 Rides API (%s)\nhealth: unreachable\n%v", cfg.Env, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return fmt.Sprintf("✅ Rides API (%s)\nhealth: OK (HTTP %d)\nport: %s", cfg.Env, resp.StatusCode, cfg.Port)
+		}
+		return fmt.Sprintf("🔴 Rides API (%s)\nhealth: HTTP %d", cfg.Env, resp.StatusCode)
+	})
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

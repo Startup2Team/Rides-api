@@ -1,12 +1,13 @@
 # Monitoring & alerting (Telegram — zero external services, zero cost)
 
-Two independent layers. Both post to the same Telegram group; both are free
-(the Telegram Bot API has no charges, ever).
+Three layers. All post to the same Telegram group; all are free (the Telegram
+Bot API has no charges, ever).
 
 | Layer | Catches | Runs |
 |---|---|---|
 | **In-app error alerts** (`pkg/alerting`, zerolog hook) | any `Error`-level log event anywhere in the API — payment failures, DB errors, panics that get logged | inside the api process |
-| **External uptime ping** (`.github/workflows/uptime.yml`) | the box/nginx/DNS being DOWN — the failure on-box alerting can never report | GitHub Actions, every ~5 min |
+| **Bot commands** (`/status`, `/help`) | on-demand health check when you ask in Telegram | inside the api process (long-poll) |
+| **External uptime ping** (`.github/workflows/uptime.yml`) | the box/nginx/DNS being DOWN — the failure on-box alerting can never report; plus a daily ✅ OK | GitHub Actions, every ~5 min + 07:00 UTC |
 
 ## One-time setup (~10 minutes)
 
@@ -25,7 +26,19 @@ Two independent layers. Both post to the same Telegram group; both are free
 5. **Repo secrets** (GitHub → Settings → Secrets and variables → Actions) for
    the uptime workflow: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (same values).
 
-Unset env/secrets = both layers silently disabled (dev default).
+Unset env/secrets = all layers silently disabled (dev default).
+
+## What you can ask the bot
+
+In the team group (or a DM with the bot), send:
+
+| Command | Reply |
+|---|---|
+| `/status` (also `/ping`, `/health`) | ✅/🔴 + env + local `/health` result |
+| `/help` (also `/start`) | list of commands + what auto-alerts mean |
+
+In groups, if the bot ignores commands, either use `/status@rides_rw_alerts_bot`
+or BotFather → `/setprivacy` → **Disable** so it sees all group commands.
 
 ## Flood protection (in-app layer)
 
@@ -37,14 +50,14 @@ Unset env/secrets = both layers silently disabled (dev default).
   or take the app down.
 
 A `🚀 Rides API starting` notice is sent on every boot — doubling as a deploy
-signal in the group.
+signal in the group. Command replies (`/status`) bypass the rate limit so they
+always answer.
 
 ## Testing it
 
 ```bash
 # after setting the env on the box, restart api and watch the group for 🚀
-# force an error alert:
-docker compose -f docker-compose.prod.yml exec api sh -c 'kill -0 1'  # (any op) —
-# or simpler: hit an endpoint that logs an error, or temporarily break a config.
+# in Telegram: /status  → should reply with health OK
 # uptime workflow: Actions → Uptime check → Run workflow (manual dispatch).
+# daily OK: fires automatically at 07:00 UTC; no manual trigger for that job.
 ```

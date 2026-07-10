@@ -5,6 +5,9 @@ name: Uptime check
 # with it. This runs OUTSIDE the box every ~5 minutes and pings the team's
 # Telegram group when the API is unreachable.
 #
+# Also posts a daily ✅ OK message when healthy (07:00 UTC ≈ 09:00 Kigali),
+# so a quiet group still proves the external watcher is alive.
+#
 # Required repo secrets (Settings → Secrets → Actions):
 #   TELEGRAM_BOT_TOKEN — from @BotFather
 #   TELEGRAM_CHAT_ID   — the team group's chat id
@@ -14,12 +17,15 @@ name: Uptime check
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch: # manual test run
+    - cron: "*/5 * * * *"   # down-alert watcher
+    - cron: "0 7 * * *"     # daily OK (07:00 UTC)
+  workflow_dispatch: # manual test run (runs the down-alert path)
 
 jobs:
   ping:
     name: Ping /health
+    # Skip on the daily-OK cron — that job reports success itself.
+    if: github.event_name != 'schedule' || github.event.schedule == '*/5 * * * *'
     runs-on: ubuntu-latest
     steps:
       - name: Check API health (3 attempts, 10s apart)
@@ -49,3 +55,27 @@ jobs:
             > /dev/null
           echo "alert sent"
           exit 1 # mark the run failed so it's visible in the Actions tab too
+
+  daily-ok:
+    name: Daily OK ping
+    if: github.event_name == 'schedule' && github.event.schedule == '0 7 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check health and notify Telegram
+        run: |
+          if [ -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] || [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            echo "Telegram secrets not set — skipping daily OK"
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://api.rides.rw/health || echo "000")
+          echo "health: HTTP $code"
+          if [ "$code" = "200" ]; then
+            text="✅ Daily check: api.rides.rw is UP (HTTP 200) — $(date -u +%Y-%m-%dT%H:%MZ)"
+          else
+            text="🚨 Daily check: api.rides.rw is DOWN (HTTP $code) — $(date -u +%Y-%m-%dT%H:%MZ)"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="$text" > /dev/null
+          echo "notified"
+          test "$code" = "200"
