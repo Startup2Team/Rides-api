@@ -427,9 +427,14 @@ func (r *Repository) SetPriorityTier(ctx context.Context, driverProfileID string
 func (r *Repository) SetApprovalStatus(ctx context.Context, profileID, status, approvedBy string, rejectionReason *string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE driver_profiles
-		SET approval_status = $1,
-		    approved_by = CASE WHEN $1 = 'APPROVED' AND $2 != '' THEN $2::UUID ELSE approved_by END,
-		    approved_at = CASE WHEN $1 = 'APPROVED' THEN NOW() ELSE approved_at END,
+		-- Every $1/$2 use is explicitly ::text so Postgres deduces ONE type per
+		-- parameter: mixing an untyped assignment with CASE comparisons made it
+		-- deduce inconsistent types and reject the statement at parse time. The
+		-- uuid cast runs only in the taken branch (NULLIF keeps '' out — the
+		-- dev-auto-approve caller passes no admin id).
+		SET approval_status = $1::text,
+		    approved_by = CASE WHEN $1::text = 'APPROVED' AND NULLIF($2::text, '') IS NOT NULL THEN NULLIF($2::text, '')::UUID ELSE approved_by END,
+		    approved_at = CASE WHEN $1::text = 'APPROVED' THEN NOW() ELSE approved_at END,
 		    rejection_reason = $3,
 		    updated_at = NOW()
 		WHERE id = $4
