@@ -358,6 +358,32 @@ func (h *Handler) ResendInvite(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+type WelcomeEmailInput struct {
+	TempPassword string `json:"temp_password"`
+	LoginURL     string `json:"login_url"`
+}
+
+// POST /api/v1/admin/team/members/:id/welcome-email
+func (h *Handler) SendWelcomeEmail(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var in WelcomeEmailInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON body")
+		return
+	}
+	if in.TempPassword == "" || in.LoginURL == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "temp_password and login_url are required")
+		return
+	}
+
+	if err := h.svc.SendWelcomeEmail(r.Context(), id, in.TempPassword, in.LoginURL); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
 // POST /api/v1/admin/team/members/:id/reset-2fa
 func (h *Handler) ResetMember2FA(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
