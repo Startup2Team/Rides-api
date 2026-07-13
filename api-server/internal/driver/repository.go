@@ -202,8 +202,6 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 			city, momo_pay_code, momo_provider,
 			province, district, sector, cell, village,
 			passenger_seats, load_capacity_kg,
-			license_expiry_date, insurance_expiry_date, authorization_expiry_date
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 			license_expiry_date, insurance_expiry_date, authorization_expiry_date,
 			gender
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
