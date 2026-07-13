@@ -120,7 +120,7 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 			}
 
 			if s.cfg.Driver.DevAutoApprove {
-				if aerr := s.repo.SetApprovalStatus(ctx, existing.ID, "APPROVED", "dev-auto-approve", nil); aerr != nil {
+				if aerr := s.repo.SetApprovalStatus(ctx, existing.ID, "APPROVED", "", nil); aerr != nil {
 					return nil, fmt.Errorf("dev auto-approve: %w", aerr)
 				}
 				if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); aerr != nil {
@@ -166,7 +166,7 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 
 	if s.cfg.Driver.DevAutoApprove {
 		// Skip admin queue — approve immediately for dev/testing.
-		if err := s.repo.SetApprovalStatus(ctx, profile.ID, "APPROVED", "dev-auto-approve", nil); err != nil {
+		if err := s.repo.SetApprovalStatus(ctx, profile.ID, "APPROVED", "", nil); err != nil {
 			return nil, fmt.Errorf("dev auto-approve: %w", err)
 		}
 		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); err != nil {
