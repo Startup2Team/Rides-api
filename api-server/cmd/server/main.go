@@ -264,9 +264,11 @@ func main() {
 	// Go-online credit gate reads the same v4 ledger that ride deduction debits,
 	// so a driver with a real v4 package isn't wrongly blocked with NO_CREDITS.
 	driverSvc.SetCreditChecker(ledgerSvc)
-	// Dev: auto-confirm purchases without a real MoMo callback. In development
-	// this is always on; in other non-prod envs it follows PAYMENTS_ENABLED.
-	devAutoConfirm := cfg.Env == "development" || (cfg.Env != "production" && cfg.Payments.Enabled)
+	// Auto-confirm purchases ONLY when real payments are off in a non-prod env
+	// (mobile dev without MoMo creds). With PAYMENTS_ENABLED=true the real
+	// gateway + reconcile path runs even locally, so the MTN sandbox flow can be
+	// exercised end-to-end before production. Never auto-confirms in prod.
+	devAutoConfirm := cfg.Env != "production" && !cfg.Payments.Enabled
 	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
 	pkgH := packages.NewHandler(pkgSvc, auditLog, cfg)
 	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
