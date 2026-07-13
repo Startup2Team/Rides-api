@@ -1,5 +1,15 @@
 package driver
 
+// Multi-vehicle support: a driver registers one or more vehicles in
+// driver_vehicles and exactly one is active at a time. The active vehicle is
+// what matching uses (ActivateVehicle syncs driver_profiles.transport_type)
+// and what per-vehicle package credits resolve against. Ported from the dev
+// branch (PR #56) with the production business rules added:
+//   - activation requires an APPROVED driver profile,
+//   - activation is blocked while the driver has a ride in progress,
+//   - ListVehicles lazily backfills a vehicle row from the profile for
+//     drivers who applied before this table was written to.
+
 import (
 	"context"
 	"errors"
@@ -150,6 +160,8 @@ func (r *Repository) CreateVehicle(ctx context.Context, driverProfileID string, 
 	return r.GetVehicle(ctx, driverProfileID, id)
 }
 
+// CreateVehicleFromApply mirrors a new driver application into driver_vehicles
+// so the vehicle list and per-vehicle credits work from day one.
 func (r *Repository) CreateVehicleFromApply(ctx context.Context, profileID string, in ApplyInput) error {
 	seats := in.PassengerSeats
 	var load *float64
@@ -224,6 +236,9 @@ func (r *Repository) DeleteVehicle(ctx context.Context, driverProfileID, vehicle
 	return nil
 }
 
+// ActivateVehicle makes one vehicle the active one and syncs the denormalised
+// vehicle fields on driver_profiles (transport_type drives matching) in the
+// same transaction, so matching can never see a half-switched driver.
 func (r *Repository) ActivateVehicle(ctx context.Context, driverProfileID, vehicleID string) (*Vehicle, error) {
 	v, err := r.GetVehicle(ctx, driverProfileID, vehicleID)
 	if err != nil {
@@ -258,12 +273,42 @@ func (r *Repository) ActivateVehicle(ctx context.Context, driverProfileID, vehic
 	return r.GetVehicle(ctx, driverProfileID, vehicleID)
 }
 
+// ── Service layer ─────────────────────────────────────────────────────────────
+
+// ListVehicles returns the driver's vehicles. Drivers who applied before
+// driver_vehicles was written to have a profile but no vehicle rows — for them
+// we lazily backfill one row from the profile so the list, switching and
+// per-vehicle credits all work without a data migration.
 func (s *Service) ListVehicles(ctx context.Context, userID string) ([]*Vehicle, error) {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.ListVehicles(ctx, profile.ID)
+	list, err := s.repo.ListVehicles(ctx, profile.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(list) == 0 && profile.TransportType != "" && profile.VehiclePlate != "" {
+		var load *float64
+		if profile.LoadCapacityKg != nil {
+			v := float64(*profile.LoadCapacityKg)
+			load = &v
+		}
+		if _, err := s.repo.CreateVehicle(ctx, profile.ID, CreateVehicleInput{
+			VehicleTypeCode: profile.TransportType,
+			PlateNumber:     profile.VehiclePlate,
+			PassengerSeats:  profile.PassengerSeats,
+			LoadCapacityKg:  load,
+		}, true); err != nil {
+			// Backfill is best-effort (e.g. plate scrubbed after account deletion) —
+			// return the empty list rather than failing the read.
+			s.log.Warn().Err(err).Str("driver_profile_id", profile.ID).Msg("vehicles: lazy backfill from profile failed")
+			return list, nil
+		}
+		s.log.Info().Str("driver_profile_id", profile.ID).Msg("vehicles: backfilled vehicle row from legacy profile")
+		return s.repo.ListVehicles(ctx, profile.ID)
+	}
+	return list, nil
 }
 
 func (s *Service) CreateVehicle(ctx context.Context, userID string, in CreateVehicleInput) (*Vehicle, error) {
@@ -292,10 +337,28 @@ func (s *Service) DeleteVehicle(ctx context.Context, userID, vehicleID string) e
 	return s.repo.DeleteVehicle(ctx, profile.ID, vehicleID)
 }
 
+// ActivateVehicle switches the driver's active vehicle, enforcing the
+// production rules: the driver must be APPROVED, and switching is forbidden
+// while a ride is in progress (the customer agreed to a specific vehicle).
 func (s *Service) ActivateVehicle(ctx context.Context, userID, vehicleID string) (*Vehicle, error) {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.ActivateVehicle(ctx, profile.ID, vehicleID)
+	if profile.ApprovalStatus != "APPROVED" {
+		return nil, apperrors.New(403, "DRIVER_NOT_APPROVED", "Your driver account must be approved before switching vehicles.")
+	}
+	if s.repo.HasActiveRide(ctx, userID) {
+		return nil, apperrors.New(409, "VEHICLE_SWITCH_ON_RIDE", "You cannot switch vehicles during an active ride.")
+	}
+	v, err := s.repo.ActivateVehicle(ctx, profile.ID, vehicleID)
+	if err != nil {
+		return nil, err
+	}
+	s.log.Info().
+		Str("driver_profile_id", profile.ID).
+		Str("vehicle_id", v.ID).
+		Str("transport_type", v.VehicleTypeCode).
+		Msg("driver switched active vehicle")
+	return v, nil
 }

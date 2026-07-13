@@ -1,1 +1,0 @@
-DROP INDEX IF EXISTS idx_package_purchases_provider_txn_id;

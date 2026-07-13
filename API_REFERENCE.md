@@ -113,6 +113,29 @@ Requires role `CUSTOMER_ONLY`, `DRIVER_ACTIVE`, or `DRIVER_PENDING`, and a non-s
 **Request** (all optional) `{ "full_name": "…", "email": "…", "fcm_token": "…" }`
 **Response** `204`
 
+### `POST /customer/phone/change/request` — send OTP to a new number
+**Request** `{ "new_phone": "+2507…" }` (E.164)
+**Response** `204` (in non-prod: `200 { "data": { "dev_otp": "123456" } }`)
+**Errors**: `SAME_PHONE` (400, already your number), `PHONE_TAKEN` (409, in use by another account). Rate-limited **5 / 10 min** per user.
+
+### `POST /customer/phone/change/verify` — confirm + swap
+**Request** `{ "new_phone": "+2507…", "otp": "123456" }`
+**Response** `200 { "data": { "phone_number": "+2507…" } }` — `users.phone_number` is updated; existing JWTs stay valid (keyed on user_id).
+**Errors**: `PHONE_TAKEN` (409, racing claim), `OTP_EXPIRED`/`INVALID_OTP`/`OTP_LOCKED` on a bad code.
+
+### `GET /customer/level` — loyalty / gamification
+Loyalty tier derived from lifetime **COMPLETED** rides (the reliable on-platform signal — fares are paid off-app). Tiers: `BRONZE` (0), `SILVER` (10), `GOLD` (50), `PREMIUM` (150 rides).
+**Response** `200`
+```json
+{ "data": {
+  "level": "GOLD", "level_index": 2, "completed_rides": 55, "total_spend": 42000,
+  "current_threshold": 50, "next_level": "PREMIUM", "next_threshold": 150,
+  "rides_to_next_level": 95, "progress_to_next": 0.05,
+  "perks": ["Faster support responses", "Early access to new features"]
+} }
+```
+At `PREMIUM` (top tier): `next_level`/`next_threshold` are `null`, `progress_to_next` is `1`.
+
 ### `POST /customer/location` — nearby drivers
 **Request**
 ```json
@@ -227,6 +250,32 @@ No body. **Response** `204`.
 ### `GET /driver/documents`
 **Response** `200 { "data": { "documents": [ { "id", "document_type", "file_url", "uploaded_at" } ] } }`
 
+### `GET /driver/session` — one-call bootstrap
+Profile + active vehicle + ride flag + document-expiry alerts, for app startup/reconnect.
+**Response** `200`
+```json
+{ "data": {
+  "profile": { "…driver profile incl. approval_status, is_online, expiry dates…" },
+  "active_vehicle": { "id": "uuid", "vehicle_type_code": "MOTO_BIKE", "plate_number": "RA123B", "is_active": true },
+  "vehicle_count": 2,
+  "has_active_ride": false,
+  "document_alerts": [
+    { "document": "insurance", "expires_on": "2026-07-20", "days_left": 11, "status": "EXPIRING_SOON" }
+  ]
+} }
+```
+
+### Vehicles — multi-vehicle + switching
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET` | `/driver/vehicles` | Own vehicles, active first. Legacy profiles are lazily backfilled. |
+| `POST` | `/driver/vehicles` | `{vehicle_type_code, plate_number, …}` — first one auto-activates. `409 DUPLICATE_PLATE`. |
+| `PATCH` | `/driver/vehicles/{id}` | Partial update. |
+| `DELETE` | `/driver/vehicles/{id}` | `409 LAST_VEHICLE` if it's the only one; deleting the active one activates the oldest remaining. |
+| `POST` | `/driver/vehicles/{id}/activate` | Switch. Syncs `transport_type` for matching in one transaction. **`403 DRIVER_NOT_APPROVED`**, **`409 VEHICLE_SWITCH_ON_RIDE`** during an active ride. |
+
+> Daily job: drivers get a push + in-app notification when license/insurance/authorization expires within 30 days (day marks 30/14/7/3/1/0, once after expiry).
+
 ### `POST /driver/availability` — go online/offline
 **Request** `{ "is_online": true }`
 **Response** `204`. **Error**: `DRIVER_OFFLINE_COOLDOWN` (403) if toggling too fast.
@@ -238,6 +287,17 @@ Rate-limited 20/min. Prefer the **WebSocket** `location_update` while online.
 { "lat": -1.9441, "lng": 30.0619, "speed_kmh": 24.5, "heading": 180.0 }  // speed_kmh, heading optional
 ```
 **Response** `204`. **Errors**: `GPS_PLAUSIBILITY` (422), `GPS_INVALID_COORDS` (400).
+
+### `GET /driver/demand-heatmap` — where riders are requesting
+Bucketed recent ride-pickup demand (~110 m grid) so a driver can reposition. Rate-limited 30/min.
+**Query** (all optional): `lat` + `lng` (a valid **pair** scopes to `radius_km` around the point via PostGIS `ST_DWithin`; omit both for busiest cells platform-wide — a lone/invalid coordinate is a `400 VALIDATION`), `window_min` (default 120, clamped 15–1440), `radius_km` (default 5, clamped 0.5–50).
+**Response** `200`
+```json
+{ "data": {
+  "window_minutes": 120, "radius_meters": 5000, "scoped": true,
+  "points": [ { "lat": -1.944, "lng": 30.061, "count": 12 } ]
+} }
+```
 
 ### Packages & credits
 | Method | Path | Body / Query | Response |
