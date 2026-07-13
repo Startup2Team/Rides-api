@@ -122,21 +122,13 @@ CREATE TABLE IF NOT EXISTS driver_entitlements (
     CONSTRAINT uniq_entitlement UNIQUE (driver_id, vehicle_type_id)
 );
 
--- ── Admin audit (every admin write) ──────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS admin_audit_log (
-    id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    actor_admin_id uuid        NOT NULL,
-    action         varchar(50) NOT NULL,
-    entity_type    varchar(30) NOT NULL,
-    entity_id      uuid,
-    before         jsonb,
-    after          jsonb,
-    reason         text,
-    created_at     timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_audit_time   ON admin_audit_log USING brin (created_at);
-CREATE INDEX IF NOT EXISTS idx_audit_entity ON admin_audit_log (entity_type, entity_id);
-CREATE INDEX IF NOT EXISTS idx_audit_actor  ON admin_audit_log (actor_admin_id);
+-- ── Admin audit ───────────────────────────────────────────────────────────────
+-- admin_audit_log is owned by migrations 034/035 (columns: admin_id, admin_role,
+-- action, target_type, target_id, occurred_at). The parallel v4 branch duplicated
+-- it here with a conflicting schema (actor_admin_id / entity_type / created_at),
+-- which broke clean-DB setup because CREATE TABLE IF NOT EXISTS skipped the
+-- existing 034 table and the created_at index then failed. The Go audit writer
+-- (pkg/audit) uses the 034/035 columns, so this duplicate is removed.
 
 -- ── Backfill: one ACTIVE version per existing package ─────────────────────────
 INSERT INTO ride_package_versions
