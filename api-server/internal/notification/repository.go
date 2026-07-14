@@ -87,3 +87,83 @@ func (r *Repository) MarkAllRead(ctx context.Context, userID string) error {
 	`, userID)
 	return err
 }
+
+// ── Device tokens (multi-device FCM) ─────────────────────────────────────────
+
+// UpsertDeviceToken registers (or refreshes) an FCM token for a user. A token
+// can only belong to one account at a time, so any prior owner is cleared first;
+// then it is upserted for this user and mirrored to the legacy users.fcm_token
+// column so the matching engine / expiry notifier keep working.
+func (r *Repository) UpsertDeviceToken(ctx context.Context, userID, token, platform string) error {
+	if platform == "" {
+		platform = "unknown"
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Reassign the token from any other user to this one.
+	if _, err := tx.Exec(ctx, `DELETE FROM device_tokens WHERE token = $1 AND user_id <> $2`, token, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO device_tokens (user_id, token, platform, last_seen, updated_at)
+		VALUES ($1, $2, $3, NOW(), NOW())
+		ON CONFLICT (user_id, token)
+		DO UPDATE SET platform = EXCLUDED.platform, last_seen = NOW(), updated_at = NOW()
+	`, userID, token, platform); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2`, token, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ListDeviceTokens returns every FCM token registered for a user, unioned with
+// the legacy users.fcm_token so users who registered before this table existed
+// (or only via a profile update) still receive pushes.
+func (r *Repository) ListDeviceTokens(ctx context.Context, userID string) ([]string, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT token FROM device_tokens WHERE user_id = $1
+		UNION
+		SELECT fcm_token FROM users WHERE id = $1 AND fcm_token IS NOT NULL AND fcm_token <> ''
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+// DeleteDeviceToken removes a token for a user (explicit unregister, e.g. logout
+// on that device).
+func (r *Repository) DeleteDeviceToken(ctx context.Context, userID, token string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM device_tokens WHERE user_id = $1 AND token = $2`, userID, token)
+	if err != nil {
+		return err
+	}
+	// Clear the legacy mirror if it pointed at this token.
+	_, err = r.db.Exec(ctx, `UPDATE users SET fcm_token = NULL WHERE id = $1 AND fcm_token = $2`, userID, token)
+	return err
+}
+
+// PruneDeviceToken removes a dead token everywhere (FCM said it's unregistered).
+func (r *Repository) PruneDeviceToken(ctx context.Context, token string) error {
+	if _, err := r.db.Exec(ctx, `DELETE FROM device_tokens WHERE token = $1`, token); err != nil {
+		return err
+	}
+	_, err := r.db.Exec(ctx, `UPDATE users SET fcm_token = NULL WHERE fcm_token = $1`, token)
+	return err
+}
