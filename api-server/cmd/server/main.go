@@ -1175,28 +1175,42 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
 
-		_, valid := engine.ValidateAcceptTTL(r.Context(), rideID)
+		pendingDriverID, valid := engine.ValidateAcceptTTL(r.Context(), rideID)
 		if !valid {
 			respond.Error(w, apperrors.ErrAcceptExpired)
 			return
 		}
 
-		// Gate: driver must have credits for their vehicle type to accept rides.
+		// Identity check: this ride must currently be offered to THIS driver.
+		// Without it, any authenticated driver who learns a ride_id with a live
+		// offer could accept it (and be assigned the ride). We need the profile
+		// anyway for the credit gate, so a load failure is a hard reject here.
 		profile, err := driverSvc.GetProfile(r.Context(), claims.UserID)
-		if err == nil {
-			hasCredits, credErr := credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
-			if credErr == nil && !hasCredits && cfg.Env != "production" {
-				// Dev/local: auto-grant free trial (same as admin approval flow).
-				_ = credits.GrantFreeTrialIfEligible(r.Context(), claims.UserID, profile.TransportType)
-				hasCredits, _ = credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
-			}
-			if credErr == nil && !hasCredits {
-				respond.Error(w, apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding."))
-				return
-			}
+		if err != nil {
+			respond.Error(w, apperrors.ErrAcceptExpired)
+			return
+		}
+		if profile.ID != pendingDriverID {
+			respond.Error(w, apperrors.New(http.StatusForbidden, "NOT_YOUR_OFFER", "this ride is not currently offered to you"))
+			return
 		}
 
-		engine.AcceptRide(rideID)
+		// Gate: driver must have credits for their vehicle type to accept rides.
+		hasCredits, credErr := credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+		if credErr == nil && !hasCredits && cfg.Env != "production" {
+			// Dev/local: auto-grant free trial (same as admin approval flow).
+			_ = credits.GrantFreeTrialIfEligible(r.Context(), claims.UserID, profile.TransportType)
+			hasCredits, _ = credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+		}
+		if credErr == nil && !hasCredits {
+			respond.Error(w, apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding."))
+			return
+		}
+
+		// Signal the matching loop with our identity; it only honors the accept
+		// if we are the candidate it is currently offering (closes the TOCTOU
+		// where the offer rotates between the check above and this signal).
+		engine.AcceptRide(rideID, profile.ID)
 		respond.NoContent(w)
 	}
 }
@@ -1205,7 +1219,11 @@ func driverDeclineHandler(engine *matching.Engine, driverSvc *driver.Service) ht
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
-		engine.DeclineRide(rideID)
+		// Only signal the decline with a verified identity, so one driver can't
+		// decline an offer that's currently extended to another driver.
+		if profile, err := driverSvc.GetProfile(r.Context(), claims.UserID); err == nil {
+			engine.DeclineRide(rideID, profile.ID)
+		}
 		_ = driverSvc.RecordDecline(r.Context(), claims.UserID)
 		respond.NoContent(w)
 	}
