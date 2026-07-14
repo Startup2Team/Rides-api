@@ -34,6 +34,7 @@ import (
 	"github.com/workspace/ride-platform/internal/finance"
 	"github.com/workspace/ride-platform/internal/inbox"
 	"github.com/workspace/ride-platform/internal/incidents"
+	"github.com/workspace/ride-platform/internal/ledger"
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
 	mw "github.com/workspace/ride-platform/internal/middleware"
@@ -255,6 +256,9 @@ func main() {
 	// exercised end-to-end before production. Never auto-confirms in prod.
 	devAutoConfirm := cfg.Env != "production" && !cfg.Payments.Enabled
 	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
+	// Double-entry general ledger: paid package sales post a balanced accounting
+	// entry (Dr Cash / Cr Package Sales Revenue) that the finance reports read.
+	purchaseSvc.SetSaleLedger(ledger.NewService(db))
 	pkgH := packages.NewHandler(pkgSvc, auditLog, cfg)
 	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
 	pkgH.SetLedger(ledgerSvc)     // v4 entitlements
