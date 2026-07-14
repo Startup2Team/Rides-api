@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/workspace/ride-platform/internal/ledger"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -58,6 +60,7 @@ type resolvedOffer struct {
 type PurchaseService struct {
 	repo           *Repository
 	ledger         *LedgerService
+	saleLedger     *ledger.Service // double-entry GL; nil = accounting posting disabled
 	momo           MoMoGateway
 	log            zerolog.Logger
 	devAutoConfirm bool // dev only: simulate a successful MoMo callback inline
@@ -65,6 +68,44 @@ type PurchaseService struct {
 
 func NewPurchaseService(repo *Repository, ledger *LedgerService, momo MoMoGateway, devAutoConfirm bool, log zerolog.Logger) *PurchaseService {
 	return &PurchaseService{repo: repo, ledger: ledger, momo: momo, devAutoConfirm: devAutoConfirm, log: log}
+}
+
+// SetSaleLedger wires the double-entry general ledger so paid package purchases
+// post a balanced sale entry (Dr Cash / Cr Package Sales Revenue).
+func (s *PurchaseService) SetSaleLedger(l *ledger.Service) { s.saleLedger = l }
+
+// postSale records the accounting entry for a PAID purchase. It reads the sale
+// through the ambient executor (the confirm tx when present, else the pool) so
+// it commits atomically with the purchase inside confirm(). Free/promo
+// purchases (price 0) move no cash and post nothing. Idempotent per purchase.
+func (s *PurchaseService) postSale(ctx context.Context, purchaseID string) error {
+	if s.saleLedger == nil {
+		return nil
+	}
+	price, provider, paidAt, ref, err := s.repo.getSaleInfo(ctx, purchaseID)
+	if err != nil {
+		return fmt.Errorf("ledger: load sale %s: %w", purchaseID, err)
+	}
+	if price <= 0 {
+		return nil // free/promotional grant — no cash movement
+	}
+	cashAcct := ledger.AcctCashManual
+	switch strings.ToLower(provider) {
+	case "mtn", "airtel", "momo":
+		cashAcct = ledger.AcctCashMoMo
+	}
+	sid := purchaseID
+	return s.saleLedger.Post(ctx, s.repo.getDB(ctx), ledger.Entry{
+		Date:           paidAt,
+		Description:    "Package sale " + ref,
+		SourceType:     "package_purchase",
+		SourceID:       &sid,
+		IdempotencyKey: "purchase_paid:" + purchaseID,
+		Lines: []ledger.Line{
+			{Account: cashAcct, Debit: int64(price), Memo: "package sale"},
+			{Account: ledger.AcctPackageRevenue, Credit: int64(price), Memo: "package sale"},
+		},
+	})
 }
 
 // resolveOffer picks the active version + best matching active campaign for a
@@ -302,6 +343,11 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 	if err := s.repo.markCreditsGranted(txCtx, p); err != nil {
 		return err
 	}
+	// Post the accounting entry inside the same tx so a purchase is never
+	// PAID-and-granted without its ledger entry (or vice versa).
+	if err := s.postSale(txCtx, p); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -426,6 +472,12 @@ func (s *PurchaseService) AdminCreateOnBehalf(ctx context.Context, adminID strin
 			return nil, fmt.Errorf("admin grant: %w", err)
 		}
 		_ = s.repo.markCreditsGranted(ctx, id)
+		// This path isn't transactional (matches the existing admin flow), so a
+		// ledger failure is logged, not fatal — the backfill/idempotent key
+		// covers any gap on the next run.
+		if err := s.postSale(ctx, id); err != nil {
+			s.log.Error().Err(err).Str("purchase_id", id).Msg("packages: admin sale ledger post failed")
+		}
 	}
 	return s.repo.getPurchaseByID(ctx, id)
 }
@@ -677,6 +729,20 @@ func (r *Repository) markPaid(ctx context.Context, id, providerTxnID string) err
 func (r *Repository) markFailed(ctx context.Context, id string) error {
 	_, err := r.getDB(ctx).Exec(ctx, `UPDATE package_purchases SET status='FAILED', updated_at=now() WHERE id=$1`, id)
 	return err
+}
+
+// getSaleInfo returns the money-relevant fields of a purchase for ledger
+// posting: amount paid, the payment provider, the settlement time, and the
+// payment reference. Reads through the ambient executor (tx or pool).
+func (r *Repository) getSaleInfo(ctx context.Context, id string) (priceRWF int, provider string, paidAt time.Time, paymentRef string, err error) {
+	err = r.getDB(ctx).QueryRow(ctx, `
+		SELECT price_paid_rwf, COALESCE(payment_provider, ''), COALESCE(paid_at, now()), payment_ref
+		FROM package_purchases WHERE id = $1`, id,
+	).Scan(&priceRWF, &provider, &paidAt, &paymentRef)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = apperrors.ErrNotFound
+	}
+	return
 }
 
 // purchaseRefAndStatus returns the payment_ref + current status for a purchase
