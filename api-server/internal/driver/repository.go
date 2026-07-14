@@ -325,7 +325,7 @@ func (r *Repository) DemandHeatmap(ctx context.Context, windowMin int, center *g
 		       COUNT(*) AS demand_count
 		FROM rides
 		WHERE pickup_point IS NOT NULL
-		  AND created_at >= NOW() - ($1 || ' minutes')::INTERVAL`
+		  AND created_at >= NOW() - make_interval(mins => $1)`
 	args := []interface{}{windowMin}
 	if center != nil {
 		q += `
