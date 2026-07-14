@@ -369,7 +369,11 @@ func (s *PurchaseService) AdminConfirm(ctx context.Context, purchaseID, adminID 
 		return nil, err
 	}
 	if status == "PENDING" {
-		txnRef := "MANUAL-" + adminID
+		// Include the per-purchase paymentRef so the provider_txn_id is unique
+		// across purchases. "MANUAL-"+adminID alone collides on the cross-row
+		// duplicate guard / UNIQUE(provider_txn_id) the moment the same admin
+		// settles a second purchase, blocking legitimate confirmations.
+		txnRef := "MANUAL-" + adminID + "-" + paymentRef
 		if err := s.confirm(ctx, paymentRef, txnRef, success); err != nil {
 			return nil, err
 		}
@@ -412,7 +416,9 @@ func (s *PurchaseService) AdminCreateOnBehalf(ctx context.Context, adminID strin
 	}
 
 	if in.MarkPaid {
-		if err := s.repo.markPaid(ctx, id, "MANUAL-"+adminID); err != nil {
+		// paymentRef is unique per purchase — keep it in the txn id so repeated
+		// admin-recorded sales don't collide on UNIQUE(provider_txn_id).
+		if err := s.repo.markPaid(ctx, id, "MANUAL-"+adminID+"-"+paymentRef); err != nil {
 			return nil, err
 		}
 		expiresAt := time.Now().Add(time.Duration(offer.validityDays) * 24 * time.Hour)
