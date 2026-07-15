@@ -39,7 +39,7 @@ jobs:
         run: |
           SHA="${{ github.event.workflow_run.head_sha || github.event.inputs.sha || github.sha }}"
           echo "value=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Deploying sha-$SHA to staging"
+          echo "Deploying image tag $SHA to staging"
 
       - name: Set up SSH
         run: |
@@ -54,4 +54,4 @@ jobs:
           # Ship the current tree (compose files, migrations, deploy script) but
           # deploy the pre-built image by SHA — no build on the box.
           git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
-          $SSH "cd /opt/rides/Rides-api/api-server && ./deploy/deploy.sh staging sha-${{ steps.sha.outputs.value }}"
+          $SSH "cd /opt/rides/Rides-api/api-server && ./deploy/deploy.sh staging ${{ steps.sha.outputs.value }}"

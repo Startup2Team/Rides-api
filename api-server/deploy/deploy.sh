@@ -7,8 +7,9 @@
 # boot), waits for /health to pass, and AUTO-ROLLS-BACK to the previously
 # deployed tag if the health gate fails. Idempotent and safe to re-run.
 #
-# The image tag is normally sha-<gitsha> (immutable). The previously deployed
-# tag is remembered in a state file so rollback is one command.
+# The image tag is normally the full git SHA (immutable), matching the existing
+# GHCR package convention. The previously deployed tag is remembered in a state
+# file so rollback is one command.
 set -euo pipefail
 
 ENV="${1:?usage: deploy.sh <staging|prod> <image_tag>}"

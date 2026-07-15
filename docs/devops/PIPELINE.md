@@ -39,9 +39,9 @@ Direct pushes to `dev`/`main` are blocked; history is linear (squash/rebase).
 | File | Trigger | Does |
 |------|---------|------|
 | `ci.yml` | every PR + push to dev/main | Lint (vet+gofmt), Test (`-race`+coverage), **Docker Build** (real image, no push). The merge gate. |
-| `build-image.yml` | push to dev/main, tag `v*` | Builds **one immutable image** `ghcr.io/…/rides-api:sha-<sha>` (+ moving tags). |
-| `deploy-staging.yml` | after Build Image succeeds on `dev` | Deploys `sha-<sha>` to the staging stack, migrates, smoke-tests. |
-| `deploy-prod.yml` | Release published | **Waits for manual approval** (production environment), promotes the same `sha-<sha>`, smoke-tests, **auto-rolls-back** on failure. |
+| `build-image.yml` | push to dev/main, tag `v*` | Builds **one immutable image** `ghcr.io/…/rides-api:<sha>` (+ moving tags). |
+| `deploy-staging.yml` | after Build Image succeeds on `dev` | Deploys `<sha>` to the staging stack, migrates, smoke-tests. |
+| `deploy-prod.yml` | Release published | **Waits for manual approval** (production environment), promotes the same `<sha>`, smoke-tests, **auto-rolls-back** on failure. |
 
 Why "Docker Build" is a required check: `go build` on a dev machine uses your
 local Go; only the container build exercises the pinned base image + `go mod
@@ -66,7 +66,7 @@ download`. That check is what catches toolchain/dependency drift before merge.
 ```bash
 cd /opt/rides/Rides-api/api-server
 cat .prod_current_tag          # see what's live
-./deploy/deploy.sh prod sha-<previous-good-sha>
+./deploy/deploy.sh prod <previous-good-sha>
 ```
 
 ## 5. Logging & observability
@@ -87,7 +87,7 @@ Same images, same Postgres/Redis versions everywhere. To run a prod-like stack
 locally, pull the built image instead of building:
 ```bash
 cd api-server
-export API_IMAGE_TAG=sha-<sha>           # any tag from GHCR
+export API_IMAGE_TAG=<sha>           # any tag from GHCR
 docker compose -f docker-compose.prod.yml pull api
 docker compose -f docker-compose.prod.yml up -d
 curl -fsS localhost:8080/health
@@ -113,8 +113,8 @@ Then add the `DEPLOY_SSH_KEY` secret (Settings → Secrets → Actions).
 
 **The box** (once):
 ```bash
-# pull private GHCR images
-docker login ghcr.io -u <user> -p <PAT-with-read:packages>
+# The rides-api package is PUBLIC → the box pulls with NO login.
+# (Only if you later make it private: docker login ghcr.io -u <user> -p <PAT read:packages>)
 # shared network so prod nginx can reach the staging api
 docker network create rides-edge
 # staging config

@@ -67,7 +67,8 @@ cat <<'DONE'
 
 ==> Done. Remaining manual steps (secrets — never scripted):
     • Settings → Secrets → Actions → add DEPLOY_SSH_KEY (private key for root@139.84.251.242)
-    • On the box: docker login ghcr.io   (so it can pull private images)
+    • The rides-api GHCR package is PUBLIC → the box needs NO docker login
+      (only if you make it private later: docker login ghcr.io with a read:packages PAT)
     • On the box: docker network create rides-edge   (shared nginx↔staging network)
     • See docs/devops/PIPELINE.md for the full box + nginx setup.
 DONE

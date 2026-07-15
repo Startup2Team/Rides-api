@@ -42,7 +42,7 @@ jobs:
           # On a release event, github.sha is the tagged commit.
           SHA="${{ github.event.inputs.sha || github.sha }}"
           echo "value=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Promoting sha-$SHA to production"
+          echo "Promoting image tag $SHA to production"
 
       - name: Set up SSH
         run: |
@@ -55,12 +55,12 @@ jobs:
         run: |
           SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
           git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
-          $SSH "cd /opt/rides/Rides-api/api-server && ./deploy/deploy.sh prod sha-${{ steps.sha.outputs.value }}"
+          $SSH "cd /opt/rides/Rides-api/api-server && ./deploy/deploy.sh prod ${{ steps.sha.outputs.value }}"
 
       - name: Deployment summary
         if: always()
         run: |
           echo "### Production deploy" >> "$GITHUB_STEP_SUMMARY"
           echo "- Release: \`${{ github.event.release.tag_name || github.event.inputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Image: \`sha-${{ steps.sha.outputs.value }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${{ steps.sha.outputs.value }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
