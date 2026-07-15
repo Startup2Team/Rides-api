@@ -54,6 +54,7 @@ import (
 	"github.com/workspace/ride-platform/internal/upload"
 	"github.com/workspace/ride-platform/internal/wallet"
 	"github.com/workspace/ride-platform/pkg/adminrole"
+	"github.com/workspace/ride-platform/pkg/alerting"
 	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
@@ -71,7 +72,21 @@ func main() {
 	}
 
 	log := logger.New(cfg.Env)
+
+	// Telegram alerting: every Error-level log event anywhere in the app becomes
+	// a deduped, rate-limited message to the team group. Attached BEFORE any
+	// service is constructed so every child logger inherits the hook. Disabled
+	// (nil notifier) when TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are unset.
+	alerts := alerting.NewTelegram(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Env)
+	if alerts != nil {
+		log = log.Hook(alerts.Hook())
+		log.Info().Msg("alerting: telegram error alerts enabled")
+	} else {
+		log.Warn().Msg("alerting: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — telegram alerts disabled")
+	}
+
 	log.Info().Str("env", cfg.Env).Str("port", cfg.Port).Msg("ride-platform: starting")
+	alerts.Notify("🚀 Rides API starting (" + cfg.Env + ")")
 
 	// ── Production safety guards ──────────────────────────────────────────────
 	// Catch dev-only flags that must never be true in production.
@@ -475,6 +490,98 @@ func main() {
 			status = http.StatusServiceUnavailable
 		}
 		respond.JSON(w, status, health)
+	})
+
+	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+		total, routes := mw.GlobalMetrics.GetMetrics()
+		fmt.Fprintf(w, "# HELP http_requests_total Total number of HTTP requests\n")
+		fmt.Fprintf(w, "# TYPE http_requests_total counter\n")
+		fmt.Fprintf(w, "http_requests_total %d\n\n", total)
+
+		fmt.Fprintf(w, "# HELP http_request_duration_ms_total Total HTTP request duration in milliseconds\n")
+		fmt.Fprintf(w, "# TYPE http_request_duration_ms_total counter\n")
+		for route, data := range routes {
+			fmt.Fprintf(w, "http_request_duration_ms_total{route=%q} %d\n", route, data.Duration)
+			fmt.Fprintf(w, "http_request_count_total{route=%q} %d\n", route, data.Count)
+		}
+		fmt.Fprintf(w, "\n")
+
+		drivers, customers := hub.ActiveConnectionsCount()
+		fmt.Fprintf(w, "# HELP ws_active_connections Active WebSocket connections\n")
+		fmt.Fprintf(w, "# TYPE ws_active_connections gauge\n")
+		fmt.Fprintf(w, "ws_active_connections{role=\"driver\"} %d\n", drivers)
+		fmt.Fprintf(w, "ws_active_connections{role=\"customer\"} %d\n", customers)
+		fmt.Fprintf(w, "\n")
+
+		dbStat := db.Stat()
+		fmt.Fprintf(w, "# HELP db_pool_max_connections Maximum DB connections allowed in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_max_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_max_connections %d\n", dbStat.MaxConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_active_connections Current active DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_active_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_active_connections %d\n", dbStat.AcquiredConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_idle_connections Current idle DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_idle_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_idle_connections %d\n", dbStat.IdleConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_total_connections Total DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_total_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_total_connections %d\n", dbStat.TotalConns())
+		fmt.Fprintf(w, "\n")
+
+		dbReadStat := dbRead.Stat()
+		fmt.Fprintf(w, "# HELP db_replica_pool_max_connections Maximum DB connections allowed in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_max_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_max_connections %d\n", dbReadStat.MaxConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_active_connections Current active DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_active_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_active_connections %d\n", dbReadStat.AcquiredConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_idle_connections Current idle DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_idle_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_idle_connections %d\n", dbReadStat.IdleConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_total_connections Total DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_total_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_total_connections %d\n", dbReadStat.TotalConns())
+		fmt.Fprintf(w, "\n")
+
+		if client, ok := rdb.(*goredis.Client); ok {
+			redisPool := client.PoolStats()
+			if redisPool != nil {
+				fmt.Fprintf(w, "# HELP redis_pool_hits Total number of times a connection was acquired from the pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_hits counter\n")
+				fmt.Fprintf(w, "redis_pool_hits %d\n", redisPool.Hits)
+
+				fmt.Fprintf(w, "# HELP redis_pool_misses Total number of times a connection could not be acquired from the pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_misses counter\n")
+				fmt.Fprintf(w, "redis_pool_misses %d\n", redisPool.Misses)
+
+				fmt.Fprintf(w, "# HELP redis_pool_timeouts Total number of connection timeouts\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_timeouts counter\n")
+				fmt.Fprintf(w, "redis_pool_timeouts %d\n", redisPool.Timeouts)
+
+				fmt.Fprintf(w, "# HELP redis_pool_total_connections Total number of connections in the Redis pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_total_connections gauge\n")
+				fmt.Fprintf(w, "redis_pool_total_connections %d\n", redisPool.TotalConns)
+
+				fmt.Fprintf(w, "# HELP redis_pool_idle_connections Number of idle connections in the Redis pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_idle_connections gauge\n")
+				fmt.Fprintf(w, "redis_pool_idle_connections %d\n", redisPool.IdleConns)
+			}
+		}
+
+		// 5. MTN Reconcile queue depth metric
+		if depth, err := purchaseSvc.PendingMoMoQueueDepth(r.Context()); err == nil {
+			fmt.Fprintf(w, "# HELP mtn_reconcile_queue_depth Count of pending mobile money purchases awaiting reconciliation\n")
+			fmt.Fprintf(w, "# TYPE mtn_reconcile_queue_depth gauge\n")
+			fmt.Fprintf(w, "mtn_reconcile_queue_depth %d\n", depth)
+		}
 	})
 
 	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -1149,6 +1256,25 @@ func main() {
 			log.Fatal().Err(err).Msg("http: server error")
 		}
 	}()
+
+	// Telegram bot commands (/status /help) — long-poll getUpdates. Disabled
+	// when the notifier is nil. Uses local /health so the reply reflects what
+	// this process is actually serving.
+	alerts.StartCommands(bgCtx, func(ctx context.Context) string {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+cfg.Port+"/health", nil)
+		if err != nil {
+			return "⚠️ status check failed to build request: " + err.Error()
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Sprintf("🔴 Rides API (%s)\nhealth: unreachable\n%v", cfg.Env, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return fmt.Sprintf("✅ Rides API (%s)\nhealth: OK (HTTP %d)\nport: %s", cfg.Env, resp.StatusCode, cfg.Port)
+		}
+		return fmt.Sprintf("🔴 Rides API (%s)\nhealth: HTTP %d", cfg.Env, resp.StatusCode)
+	})
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
