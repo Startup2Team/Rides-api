@@ -211,6 +211,13 @@ func (s *Service) ListLiveRides(ctx context.Context, status, district, search st
 		args = append(args, "%"+search+"%")
 		n++
 	}
+	// District filter (previously accepted but ignored): scope to the assigned
+	// driver's district.
+	if district != "" && district != "all" {
+		wheres = append(wheres, fmt.Sprintf("dp.district ILIKE $%d", n))
+		args = append(args, district)
+		n++
+	}
 
 	base := `FROM rides r
 		JOIN users cu ON cu.id = r.customer_id
@@ -225,10 +232,10 @@ func (s *Service) ListLiveRides(ctx context.Context, status, district, search st
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT r.id, r.status, r.transport_type,
 		       r.customer_id, cu.phone_number, cu.full_name,
-		       r.driver_id, du.phone_number, du.full_name, dp.vehicle_plate,
+		       r.driver_id, du.phone_number, du.full_name, dp.vehicle_plate, dp.is_online,
 		       r.pickup_address, r.destination_address,
 		       r.agreed_fare, r.customer_initial_fare,
-		       r.estimated_distance_km, r.created_at
+		       r.estimated_distance_km, r.created_at, r.started_at
 		%s %s ORDER BY r.created_at DESC LIMIT $%d OFFSET $%d
 	`, base, where, n, n+1), args...)
 	if err != nil {
@@ -240,23 +247,25 @@ func (s *Service) ListLiveRides(ctx context.Context, status, district, search st
 	for rows.Next() {
 		var id, status2, tType, custID, custPhone, pickupAddr, destAddr string
 		var custName, driverID, driverPhone, driverName, plate *string
+		var driverOnline *bool
 		var agreedFare, initialFare, distKm *float64
 		var createdAt time.Time
+		var startedAt *time.Time
 		if err := rows.Scan(&id, &status2, &tType,
 			&custID, &custPhone, &custName,
-			&driverID, &driverPhone, &driverName, &plate,
+			&driverID, &driverPhone, &driverName, &plate, &driverOnline,
 			&pickupAddr, &destAddr,
 			&agreedFare, &initialFare, &distKm,
-			&createdAt); err != nil {
+			&createdAt, &startedAt); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, map[string]interface{}{
 			"id": id, "status": status2, "transport_type": tType,
 			"customer":       map[string]interface{}{"id": custID, "phone": custPhone, "name": custName},
-			"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate},
+			"driver":         map[string]interface{}{"id": driverID, "phone": driverPhone, "name": driverName, "plate": plate, "is_online": driverOnline},
 			"pickup_address": pickupAddr, "destination_address": destAddr,
 			"agreed_fare": agreedFare, "initial_fare": initialFare,
-			"distance_km": distKm, "created_at": createdAt,
+			"distance_km": distKm, "created_at": createdAt, "started_at": startedAt,
 		})
 	}
 	return result, total, nil
@@ -267,16 +276,35 @@ func (s *Service) GetLiveRide(ctx context.Context, rideID string) (map[string]in
 }
 
 func (s *Service) InterveneRide(ctx context.Context, rideID, action, reason string) error {
+	// Guard the transition so an admin can't, e.g., force-complete a ride that
+	// never had a driver. cancel is valid from any non-terminal live state;
+	// force-complete only from states where a trip is actually underway.
+	var newStatus, setClause, guard string
 	switch action {
 	case "cancel":
-		_, err := s.db.Exec(ctx,
-			`UPDATE rides SET status='CANCELLED', updated_at=NOW() WHERE id=$1`, rideID)
-		return err
+		newStatus = "CANCELLED"
+		setClause = "status='CANCELLED', updated_at=NOW()"
+		guard = "status IN ('SEARCHING','DRIVER_FOUND','NEGOTIATING','DRIVER_EN_ROUTE','DRIVER_ARRIVED','ON_TRIP','IN_PROGRESS')"
 	case "force-complete":
-		_, err := s.db.Exec(ctx,
-			`UPDATE rides SET status='COMPLETED', completed_at=NOW(), updated_at=NOW() WHERE id=$1`, rideID)
-		return err
+		newStatus = "COMPLETED"
+		setClause = "status='COMPLETED', completed_at=NOW(), updated_at=NOW()"
+		guard = "status IN ('DRIVER_ARRIVED','ON_TRIP','IN_PROGRESS')"
 	default:
 		return apperrors.New(http.StatusBadRequest, "INVALID_ACTION", "action must be cancel or force-complete")
 	}
+
+	tag, err := s.db.Exec(ctx, fmt.Sprintf(`UPDATE rides SET %s WHERE id=$1 AND %s`, setClause, guard), rideID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.New(http.StatusConflict, "INVALID_STATE", "ride is not in a state that allows this intervention")
+	}
+
+	// Record the intervention on the ride's event timeline for the audit trail.
+	_, _ = s.db.Exec(ctx, `
+		INSERT INTO ride_events (ride_id, event_type, actor_role, actor_id, payload)
+		VALUES ($1, $2, 'ADMIN', 'admin', $3)`,
+		rideID, "ride.admin_intervene", map[string]interface{}{"action": action, "reason": reason, "new_status": newStatus})
+	return nil
 }

@@ -20,6 +20,25 @@ import (
 // maxOffersPerSide matches the frontend: each party gets at most 3 offers.
 const maxOffersPerSide = 3
 
+// Fare-band tuning. The acceptable negotiation range is anchored on the trip's
+// fare estimate so heavy vehicles (Hilux/Fuso) on long hauls aren't capped
+// below their own metered fare. A flat min_fare×N ceiling breaks for these:
+// e.g. a ~40 km Fuso meters ~25,400 RWF but min_fare(2000)×10 caps at 20,000,
+// so the driver literally cannot accept the fair price. The estimate-scaled
+// band lifts with distance automatically, while the flat band remains the
+// floor/ceiling when no estimate is present.
+const (
+	// maxFareMultiplier caps a locked fare at 10× the minimum fare when there is
+	// no estimate to anchor on — prevents locking absurd amounts on a bare ride.
+	maxFareMultiplier = 10
+	// fareBandFloorPct: parties may bargain down to 60% of the estimate, but
+	// never below the vehicle's min_fare (whichever is higher wins).
+	fareBandFloorPct = 0.60
+	// fareBandCeilPct: and up to 180% of the estimate, or the flat min_fare×10
+	// ceiling, whichever is higher.
+	fareBandCeilPct = 1.80
+)
+
 // TimeoutManager resets/cancels the negotiation inactivity clock and charges
 // the ride credit at fare agreement. Implemented by ride.Service; injected via
 // SetTimeoutManager to avoid an import cycle (negotiation → ride is fine;
@@ -78,6 +97,58 @@ func (s *Service) findRideForActor(ctx context.Context, rideID, actorRole, actor
 	return s.rideRepo.FindByIDAndDriver(ctx, rideID, actorUserID)
 }
 
+// fareBounds returns the acceptable [min,max] fare band for a ride. The band is
+// anchored on the fare estimate when one exists (so long-distance heavy-vehicle
+// trips aren't capped below their metered fare) and falls back to the flat
+// min_fare … min_fare×10 band when no estimate is available. Both edges only
+// ever widen the flat band, never shrink it, so short trips keep the min_fare
+// floor.
+//
+// enforced is false only when no fare config is wired (unit tests). A config
+// lookup FAILURE returns an error so the money-committing callers fail closed
+// rather than silently skipping the guard.
+func (s *Service) fareBounds(ctx context.Context, r *ride.Ride) (minFare, maxFare float64, enforced bool, err error) {
+	if s.fareRepo == nil {
+		return 0, 0, false, nil
+	}
+	cfg, err := s.fareRepo.GetConfigByVehicleType(ctx, r.TransportType)
+	if err != nil {
+		return 0, 0, false, apperrors.New(503, "FARE_CONFIG_UNAVAILABLE", "cannot determine fare limits right now, please retry")
+	}
+	minFare = float64(cfg.MinFareRWF)
+	maxFare = float64(cfg.MinFareRWF) * maxFareMultiplier
+	if r.EstimatedFareRWF != nil && *r.EstimatedFareRWF > 0 {
+		est := *r.EstimatedFareRWF
+		if f := est * fareBandFloorPct; f > minFare {
+			minFare = f
+		}
+		if c := est * fareBandCeilPct; c > maxFare {
+			maxFare = c
+		}
+	}
+	return minFare, maxFare, true, nil
+}
+
+// checkFareInBand rejects an amount outside the ride's acceptable fare band. It
+// is a no-op when enforcement is disabled (no fare config wired) and propagates
+// the fail-closed error from fareBounds when the config cannot be read.
+func (s *Service) checkFareInBand(ctx context.Context, r *ride.Ride, amount float64) error {
+	minFare, maxFare, enforced, err := s.fareBounds(ctx, r)
+	if err != nil {
+		return err
+	}
+	if !enforced {
+		return nil
+	}
+	if amount < minFare {
+		return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below %d RWF for this trip", int(minFare)))
+	}
+	if amount > maxFare {
+		return apperrors.New(400, "ABOVE_MAX_FARE", fmt.Sprintf("fare cannot exceed %d RWF for this trip", int(maxFare)))
+	}
+	return nil
+}
+
 // Propose submits a fare counter-offer from a customer or driver.
 func (s *Service) Propose(ctx context.Context, rideID, actorRole, actorUserID string, amount float64) error {
 	r, err := s.findRideForActor(ctx, rideID, actorRole, actorUserID)
@@ -86,6 +157,12 @@ func (s *Service) Propose(ctx context.Context, rideID, actorRole, actorUserID st
 	}
 	if r.Status != ride.StatusNegotiating {
 		return apperrors.ErrInvalidTransition
+	}
+
+	// Reject out-of-band proposals up front so a party can't fill their offer
+	// rounds with amounts that could never be accepted.
+	if err := s.checkFareInBand(ctx, r, amount); err != nil {
+		return err
 	}
 
 	// Enforce per-side limit: count how many offers this role has already made.
@@ -170,17 +247,8 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 	if latest.ProposedBy == actorRole {
 		return apperrors.New(409, "CANNOT_ACCEPT_OWN_PROPOSAL", "cannot accept your own proposal")
 	}
-	if s.fareRepo != nil {
-		cfg, err := s.fareRepo.GetConfigByVehicleType(ctx, r.TransportType)
-		if err == nil {
-			if latest.ProposedAmount < float64(cfg.MinFareRWF) {
-				return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
-			}
-			maxFare := float64(cfg.MinFareRWF) * maxFareMultiplier
-			if latest.ProposedAmount > maxFare {
-				return apperrors.New(400, "ABOVE_MAX_FARE", fmt.Sprintf("fare cannot exceed %d RWF", int(maxFare)))
-			}
-		}
+	if err := s.checkFareInBand(ctx, r, latest.ProposedAmount); err != nil {
+		return err
 	}
 
 	if err := s.repo.SetResponse(ctx, latest.ID, "ACCEPTED"); err != nil {
@@ -226,10 +294,6 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 	return nil
 }
 
-// maxFareMultiplier caps a manually-locked fare at 10× the minimum fare to
-// prevent drivers from accidentally (or maliciously) locking absurd amounts.
-const maxFareMultiplier = 10
-
 // LockManualFare confirms a verbally agreed fare without consuming offer rounds.
 func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID string, amount float64) error {
 	// Only the assigned driver may lock a manual fare on this ride.
@@ -240,17 +304,8 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 	if r.Status != ride.StatusNegotiating {
 		return apperrors.ErrInvalidTransition
 	}
-	if s.fareRepo != nil {
-		cfg, err := s.fareRepo.GetConfigByVehicleType(ctx, r.TransportType)
-		if err == nil {
-			if amount < float64(cfg.MinFareRWF) {
-				return apperrors.New(400, "BELOW_MIN_FARE", fmt.Sprintf("fare cannot be below minimum of %d RWF", cfg.MinFareRWF))
-			}
-			maxFare := float64(cfg.MinFareRWF) * maxFareMultiplier
-			if amount > maxFare {
-				return apperrors.New(400, "ABOVE_MAX_FARE", fmt.Sprintf("fare cannot exceed %d RWF", int(maxFare)))
-			}
-		}
+	if err := s.checkFareInBand(ctx, r, amount); err != nil {
+		return err
 	}
 
 	if err := s.rideRepo.LockFare(ctx, rideID, amount); err != nil {

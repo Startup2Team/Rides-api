@@ -141,6 +141,9 @@ func (m *mockSvc) ChangePassword(ctx context.Context, id, current, newPw string)
 func (m *mockSvc) SetPassword(ctx context.Context, id, password string) error {
 	return m.setPasswordFn(ctx, id, password)
 }
+func (m *mockSvc) SendWelcomeEmail(ctx context.Context, id, tempPassword, loginURL string) error {
+	return nil
+}
 func (m *mockSvc) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]team.AuditEntry, int, error) {
 	if m.listAuditLogFn != nil {
 		return m.listAuditLogFn(ctx, actor, action, targetType, from, to, limit, offset)

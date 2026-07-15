@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/workspace/ride-platform/config"
+	"github.com/workspace/ride-platform/internal/email"
 	"github.com/workspace/ride-platform/pkg/adminrole"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
@@ -553,4 +554,14 @@ func (s *Service) GetMemberActivity(ctx context.Context, adminID string, limit i
 // Restricted to Super Admin at the route level.
 func (s *Service) ListAuditLog(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]AuditEntry, int, error) {
 	return s.repo.ListAuditLog(ctx, actor, action, targetType, from, to, limit, offset)
+}
+
+func (s *Service) SendWelcomeEmail(ctx context.Context, id, tempPassword, loginURL string) error {
+	a, _, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	htmlContent := email.BuildWelcomeEmail(a.Name, a.Email, a.RoleName, tempPassword, loginURL)
+	return email.SendEmail(ctx, a.Email, "Welcome to Rides", htmlContent)
 }

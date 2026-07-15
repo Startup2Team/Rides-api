@@ -112,6 +112,132 @@ func (r *Repository) GetPayments(ctx context.Context, start, end *time.Time) ([]
 	return payments, nil
 }
 
+// accountBalance is one account's net movement (Σ debit − Σ credit) up to a
+// point in time, tagged with its accounting type for balance-sheet classification.
+type accountBalance struct {
+	Name    string
+	Type    string
+	Balance int64 // sum(debit_rwf - credit_rwf)
+}
+
+// GetJournalEntries returns the general ledger — one row per posted journal line
+// — over an optional date window, ordered chronologically.
+func (r *Repository) GetJournalEntries(ctx context.Context, start, end *time.Time) ([]LedgerEntry, error) {
+	query := `
+		SELECT e.entry_date, e.id::text, a.name, e.description, l.debit_rwf, l.credit_rwf,
+		       COALESCE(e.source_id::text, '')
+		FROM journal_lines l
+		JOIN journal_entries e ON e.id = l.entry_id
+		JOIN ledger_accounts a ON a.code = l.account_code
+		WHERE 1=1`
+	var args []interface{}
+	n := 1
+	if start != nil {
+		query += ` AND e.entry_date >= $` + itoa(n)
+		args = append(args, *start)
+		n++
+	}
+	if end != nil {
+		query += ` AND e.entry_date <= $` + itoa(n)
+		args = append(args, *end)
+	}
+	query += ` ORDER BY e.entry_date ASC, e.id, l.id`
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []LedgerEntry
+	for rows.Next() {
+		var e LedgerEntry
+		if err := rows.Scan(&e.Date, &e.TransactionID, &e.Account, &e.Description, &e.Debit, &e.Credit, &e.Reference); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// GetTrialBalanceRows aggregates posted lines into per-account debit/credit
+// totals, plus the grand totals (which reconcile iff the journal is intact).
+func (r *Repository) GetTrialBalanceRows(ctx context.Context, start, end *time.Time) ([]TrialBalanceRow, int64, int64, error) {
+	query := `
+		SELECT a.name, COALESCE(SUM(l.debit_rwf),0), COALESCE(SUM(l.credit_rwf),0)
+		FROM journal_lines l
+		JOIN journal_entries e ON e.id = l.entry_id
+		JOIN ledger_accounts a ON a.code = l.account_code
+		WHERE 1=1`
+	var args []interface{}
+	n := 1
+	if start != nil {
+		query += ` AND e.entry_date >= $` + itoa(n)
+		args = append(args, *start)
+		n++
+	}
+	if end != nil {
+		query += ` AND e.entry_date <= $` + itoa(n)
+		args = append(args, *end)
+	}
+	query += ` GROUP BY a.name ORDER BY a.name`
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+
+	var out []TrialBalanceRow
+	var totalDebit, totalCredit int64
+	for rows.Next() {
+		var row TrialBalanceRow
+		if err := rows.Scan(&row.Account, &row.DebitTotal, &row.CreditTotal); err != nil {
+			return nil, 0, 0, err
+		}
+		totalDebit += row.DebitTotal
+		totalCredit += row.CreditTotal
+		out = append(out, row)
+	}
+	return out, totalDebit, totalCredit, rows.Err()
+}
+
+// GetAccountBalances returns each account's net balance as of a date (nil = all
+// time), excluding accounts with no net movement, tagged with accounting type.
+func (r *Repository) GetAccountBalances(ctx context.Context, asOf *time.Time) ([]accountBalance, error) {
+	query := `
+		SELECT a.name, a.type,
+		       COALESCE(SUM(
+		           CASE WHEN ($1::timestamptz IS NULL OR e.entry_date <= $1::timestamptz)
+		                THEN l.debit_rwf - l.credit_rwf ELSE 0 END
+		       ), 0) AS bal
+		FROM ledger_accounts a
+		LEFT JOIN journal_lines l   ON l.account_code = a.code
+		LEFT JOIN journal_entries e ON e.id = l.entry_id
+		GROUP BY a.name, a.type
+		HAVING COALESCE(SUM(
+		           CASE WHEN ($1::timestamptz IS NULL OR e.entry_date <= $1::timestamptz)
+		                THEN l.debit_rwf - l.credit_rwf ELSE 0 END
+		       ), 0) <> 0
+		ORDER BY a.name`
+
+	rows, err := r.db.Query(ctx, query, asOf)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []accountBalance
+	for rows.Next() {
+		var b accountBalance
+		if err := rows.Scan(&b.Name, &b.Type, &b.Balance); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) GetStaffActivity(ctx context.Context) ([]StaffActivity, error) {
 	query := `
 		SELECT a.id, a.name, a.email, r.name as role,

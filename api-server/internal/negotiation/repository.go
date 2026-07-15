@@ -94,12 +94,17 @@ func (r *Repository) SetResponse(ctx context.Context, roundID, response string) 
 }
 
 func (r *Repository) MarkCallInitiated(ctx context.Context, rideID string) error {
+	// Postgres does not allow ORDER BY / LIMIT on a bare UPDATE — target the
+	// latest round via a subquery instead.
 	_, err := r.db.Exec(ctx, `
 		UPDATE negotiation_rounds
 		SET call_initiated = TRUE, call_initiated_at = NOW()
-		WHERE ride_id = $1
-		ORDER BY round_number DESC
-		LIMIT 1
+		WHERE id = (
+			SELECT id FROM negotiation_rounds
+			WHERE ride_id = $1
+			ORDER BY round_number DESC
+			LIMIT 1
+		)
 	`, rideID)
 	return err
 }

@@ -3,7 +3,7 @@
 # the target arch. This avoids emulating the Go toolchain under QEMU (which
 # segfaults when building amd64 on an Apple-Silicon/arm64 host) and makes CI
 # builds faster. TARGETOS/TARGETARCH are provided automatically by buildx.
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
 ARG TARGETOS TARGETARCH
 
 WORKDIR /app

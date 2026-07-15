@@ -2,18 +2,28 @@ package reports
 
 import (
 	"context"
-	"fmt"
+	"net/http"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
+// ReportBuilder produces the actual bytes of a report for a given template,
+// format, and date range. Injected from main so this package doesn't import
+// finance/analytics directly. Returns the bytes, HTTP content type, and a
+// download filename.
+type ReportBuilder func(ctx context.Context, template, format string, dateRange *string) (data []byte, contentType, filename string, err error)
+
 type Service struct {
-	repo *Repository
+	repo  *Repository
+	build ReportBuilder
 }
 
 func NewService(repo *Repository) *Service {
 	return &Service{repo: repo}
 }
+
+// SetBuilder wires the concrete report-content generator.
+func (s *Service) SetBuilder(b ReportBuilder) { s.build = b }
 
 func (s *Service) List(ctx context.Context, status, format string, limit, offset int) ([]*Report, int, error) {
 	if limit <= 0 {
@@ -38,18 +48,28 @@ func (s *Service) Generate(ctx context.Context, template, format, dateRange stri
 	if err != nil {
 		return nil, err
 	}
-
-	// Simulate async report generation (in production, enqueue a background job).
-	go func() {
-		bgCtx := context.Background()
-		fakePath := fmt.Sprintf("/reports/%s_%s.%s", template, rep.ID[:8], format)
-		fakeSize := "1.2 MB"
-		if err := s.repo.MarkReady(bgCtx, rep.ID, fakePath, fakeSize); err != nil {
-			_ = s.repo.MarkFailed(bgCtx, rep.ID)
-		}
-	}()
-
+	// Content is generated on demand at download time from live data, so the
+	// report is immediately ready. (No fake path/size — the previous stub wrote
+	// a made-up file that never existed.)
+	if err := s.repo.MarkReady(ctx, rep.ID, "", ""); err != nil {
+		_ = s.repo.MarkFailed(ctx, rep.ID)
+		return nil, err
+	}
+	rep.Status = "READY"
 	return rep, nil
+}
+
+// Build generates the bytes for a report from live data using the injected
+// builder. Used by the download endpoint to stream a real file.
+func (s *Service) Build(ctx context.Context, id string) (data []byte, contentType, filename string, err error) {
+	rep, err := s.GetByID(ctx, id)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if s.build == nil {
+		return nil, "", "", apperrors.New(http.StatusNotImplemented, "NOT_IMPLEMENTED", "report generation is not configured")
+	}
+	return s.build(ctx, rep.Template, rep.Format, rep.DateRange)
 }
 
 func (s *Service) ListScheduled(ctx context.Context) ([]*ScheduledReport, error) {

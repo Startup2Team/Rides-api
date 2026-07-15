@@ -1,6 +1,7 @@
 package customer
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -12,10 +13,53 @@ import (
 // Handler exposes customer profile endpoints.
 type Handler struct {
 	svc *Service
+	// Session-bootstrap sources, injected from main to avoid import cycles.
+	activeRide func(ctx context.Context, customerID string) (any, error)
+	unread     func(ctx context.Context, userID string) (int, error)
 }
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+// SetSessionSources wires the active-ride and unread-count providers used by the
+// GET /customer/session bootstrap. Both are optional; nil sources are skipped.
+func (h *Handler) SetSessionSources(
+	activeRide func(ctx context.Context, customerID string) (any, error),
+	unread func(ctx context.Context, userID string) (int, error),
+) {
+	h.activeRide = activeRide
+	h.unread = unread
+}
+
+// GET /api/v1/customer/session
+// One-call bootstrap for the customer app: profile + active ride + unread count,
+// mirroring the driver /session endpoint so the client restores state in one hit.
+func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+
+	profile, err := h.svc.GetProfile(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	session := map[string]any{"profile": profile}
+
+	if h.activeRide != nil {
+		if ride, aErr := h.activeRide(r.Context(), claims.UserID); aErr == nil {
+			session["active_ride"] = ride // nil when none
+		} else {
+			session["active_ride"] = nil
+		}
+	}
+	if h.unread != nil {
+		if n, uErr := h.unread(r.Context(), claims.UserID); uErr == nil {
+			session["unread_notifications"] = n
+		}
+	}
+
+	respond.OK(w, session)
 }
 
 // GET /api/v1/customer/profile

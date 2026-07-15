@@ -30,10 +30,12 @@ import (
 	"github.com/workspace/ride-platform/internal/customer"
 	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
+	"github.com/workspace/ride-platform/internal/export"
 	"github.com/workspace/ride-platform/internal/fare"
 	"github.com/workspace/ride-platform/internal/finance"
 	"github.com/workspace/ride-platform/internal/inbox"
 	"github.com/workspace/ride-platform/internal/incidents"
+	"github.com/workspace/ride-platform/internal/ledger"
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
 	mw "github.com/workspace/ride-platform/internal/middleware"
@@ -246,12 +248,49 @@ func main() {
 	financeSvc := finance.NewService(financeRepo)
 	financeH := finance.NewHandler(financeSvc)
 
+	// Report generator: turns a report template into real bytes (CSV/XLSX/PDF)
+	// from live finance data, streamed on download. Unknown templates 501 rather
+	// than pretending to produce a file.
+	reportSvc.SetBuilder(func(ctx context.Context, template, format string, dateRange *string) ([]byte, string, string, error) {
+		f := export.Parse(format)
+		tmpl := strings.ToLower(template)
+		var table export.Table
+		var err error
+		switch {
+		case strings.Contains(tmpl, "trial"):
+			table, err = financeSvc.TrialBalanceTable(ctx, nil, nil)
+		case strings.Contains(tmpl, "balance"):
+			table, err = financeSvc.BalanceSheetTable(ctx, nil)
+		case strings.Contains(tmpl, "ledger"), strings.Contains(tmpl, "revenue"),
+			strings.Contains(tmpl, "financ"), strings.Contains(tmpl, "general"), strings.Contains(tmpl, "booking"):
+			table, err = financeSvc.LedgerTable(ctx, nil, nil)
+		default:
+			return nil, "", "", apperrors.New(http.StatusNotImplemented, "UNSUPPORTED_TEMPLATE", "no generator for report template: "+template)
+		}
+		if err != nil {
+			return nil, "", "", err
+		}
+		data, err := export.Encode(table, f)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, f.ContentType(), template + "." + f.Ext(), nil
+	})
+
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	custSvc := customer.NewService(custRepo, log)
 
 	authH := auth.NewHandler(authSvc, cfg.Env)
 	authH.SetDriverService(driverSvc) // force-offline driver on logout
 	custH := customer.NewHandler(custSvc)
+	// Wire the customer /session bootstrap sources (kept out of the customer
+	// package to avoid an import cycle with ride/notification).
+	custH.SetSessionSources(
+		func(ctx context.Context, customerID string) (any, error) {
+			return rideSvc.GetActiveRide(ctx, customerID)
+		},
+		notifRepo.UnreadCount,
+	)
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
 	negH := negotiation.NewHandler(negSvc)
@@ -270,6 +309,9 @@ func main() {
 	// exercised end-to-end before production. Never auto-confirms in prod.
 	devAutoConfirm := cfg.Env != "production" && !cfg.Payments.Enabled
 	purchaseSvc := packages.NewPurchaseService(pkgRepo, ledgerSvc, momoGateway{paymentSvc}, devAutoConfirm, log)
+	// Double-entry general ledger: paid package sales post a balanced accounting
+	// entry (Dr Cash / Cr Package Sales Revenue) that the finance reports read.
+	purchaseSvc.SetSaleLedger(ledger.NewService(db))
 	pkgH := packages.NewHandler(pkgSvc, auditLog, cfg)
 	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
 	pkgH.SetLedger(ledgerSvc)     // v4 entitlements
@@ -429,8 +471,117 @@ func main() {
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
 
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		respond.OK(w, map[string]string{"status": "ok"})
+	r.Get("/health", func(w http.ResponseWriter, req *http.Request) {
+		// Probe the critical dependencies so an uptime monitor / load balancer
+		// sees red when Postgres or Redis is down, instead of a static "ok".
+		hctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		defer cancel()
+
+		health := map[string]string{"status": "ok", "db": "ok", "redis": "ok"}
+		status := http.StatusOK
+		if err := db.Ping(hctx); err != nil {
+			health["db"] = "down"
+			health["status"] = "degraded"
+			status = http.StatusServiceUnavailable
+		}
+		if err := rdb.Ping(hctx).Err(); err != nil {
+			health["redis"] = "down"
+			health["status"] = "degraded"
+			status = http.StatusServiceUnavailable
+		}
+		respond.JSON(w, status, health)
+	})
+
+	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+		total, routes := mw.GlobalMetrics.GetMetrics()
+		fmt.Fprintf(w, "# HELP http_requests_total Total number of HTTP requests\n")
+		fmt.Fprintf(w, "# TYPE http_requests_total counter\n")
+		fmt.Fprintf(w, "http_requests_total %d\n\n", total)
+
+		fmt.Fprintf(w, "# HELP http_request_duration_ms_total Total HTTP request duration in milliseconds\n")
+		fmt.Fprintf(w, "# TYPE http_request_duration_ms_total counter\n")
+		for route, data := range routes {
+			fmt.Fprintf(w, "http_request_duration_ms_total{route=%q} %d\n", route, data.Duration)
+			fmt.Fprintf(w, "http_request_count_total{route=%q} %d\n", route, data.Count)
+		}
+		fmt.Fprintf(w, "\n")
+
+		drivers, customers := hub.ActiveConnectionsCount()
+		fmt.Fprintf(w, "# HELP ws_active_connections Active WebSocket connections\n")
+		fmt.Fprintf(w, "# TYPE ws_active_connections gauge\n")
+		fmt.Fprintf(w, "ws_active_connections{role=\"driver\"} %d\n", drivers)
+		fmt.Fprintf(w, "ws_active_connections{role=\"customer\"} %d\n", customers)
+		fmt.Fprintf(w, "\n")
+
+		dbStat := db.Stat()
+		fmt.Fprintf(w, "# HELP db_pool_max_connections Maximum DB connections allowed in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_max_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_max_connections %d\n", dbStat.MaxConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_active_connections Current active DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_active_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_active_connections %d\n", dbStat.AcquiredConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_idle_connections Current idle DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_idle_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_idle_connections %d\n", dbStat.IdleConns())
+
+		fmt.Fprintf(w, "# HELP db_pool_total_connections Total DB connections in write pool\n")
+		fmt.Fprintf(w, "# TYPE db_pool_total_connections gauge\n")
+		fmt.Fprintf(w, "db_pool_total_connections %d\n", dbStat.TotalConns())
+		fmt.Fprintf(w, "\n")
+
+		dbReadStat := dbRead.Stat()
+		fmt.Fprintf(w, "# HELP db_replica_pool_max_connections Maximum DB connections allowed in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_max_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_max_connections %d\n", dbReadStat.MaxConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_active_connections Current active DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_active_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_active_connections %d\n", dbReadStat.AcquiredConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_idle_connections Current idle DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_idle_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_idle_connections %d\n", dbReadStat.IdleConns())
+
+		fmt.Fprintf(w, "# HELP db_replica_pool_total_connections Total DB connections in replica pool\n")
+		fmt.Fprintf(w, "# TYPE db_replica_pool_total_connections gauge\n")
+		fmt.Fprintf(w, "db_replica_pool_total_connections %d\n", dbReadStat.TotalConns())
+		fmt.Fprintf(w, "\n")
+
+		if client, ok := rdb.(*goredis.Client); ok {
+			redisPool := client.PoolStats()
+			if redisPool != nil {
+				fmt.Fprintf(w, "# HELP redis_pool_hits Total number of times a connection was acquired from the pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_hits counter\n")
+				fmt.Fprintf(w, "redis_pool_hits %d\n", redisPool.Hits)
+
+				fmt.Fprintf(w, "# HELP redis_pool_misses Total number of times a connection could not be acquired from the pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_misses counter\n")
+				fmt.Fprintf(w, "redis_pool_misses %d\n", redisPool.Misses)
+
+				fmt.Fprintf(w, "# HELP redis_pool_timeouts Total number of connection timeouts\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_timeouts counter\n")
+				fmt.Fprintf(w, "redis_pool_timeouts %d\n", redisPool.Timeouts)
+
+				fmt.Fprintf(w, "# HELP redis_pool_total_connections Total number of connections in the Redis pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_total_connections gauge\n")
+				fmt.Fprintf(w, "redis_pool_total_connections %d\n", redisPool.TotalConns)
+
+				fmt.Fprintf(w, "# HELP redis_pool_idle_connections Number of idle connections in the Redis pool\n")
+				fmt.Fprintf(w, "# TYPE redis_pool_idle_connections gauge\n")
+				fmt.Fprintf(w, "redis_pool_idle_connections %d\n", redisPool.IdleConns)
+			}
+		}
+
+		// 5. MTN Reconcile queue depth metric
+		if depth, err := purchaseSvc.PendingMoMoQueueDepth(r.Context()); err == nil {
+			fmt.Fprintf(w, "# HELP mtn_reconcile_queue_depth Count of pending mobile money purchases awaiting reconciliation\n")
+			fmt.Fprintf(w, "# TYPE mtn_reconcile_queue_depth gauge\n")
+			fmt.Fprintf(w, "mtn_reconcile_queue_depth %d\n", depth)
+		}
 	})
 
 	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -582,7 +733,8 @@ func main() {
 
 		r.Get("/profile", custH.GetProfile)
 		r.Put("/profile", custH.UpdateProfile)
-		r.Get("/level", custH.GetLevel) // loyalty / gamification
+		r.Get("/session", custH.GetSession) // one-call bootstrap (profile + active ride + unread)
+		r.Get("/level", custH.GetLevel)     // loyalty / gamification
 		// Phone-number change (OTP-verified). Tight per-user limit on the request
 		// leg so it can't be abused to spam SMS to arbitrary numbers.
 		r.With(mw.UserRateLimit(rdb, "phone_change_req", 5, 10*time.Minute)).
@@ -722,6 +874,10 @@ func main() {
 		r.Get("/me/notifications/unread-count", notifH.UnreadCount)
 		r.Patch("/me/notifications/{id}/read", notifH.MarkRead)
 		r.Post("/me/notifications/mark-all-read", notifH.MarkAllRead)
+
+		// Multi-device FCM registration.
+		r.Post("/me/device-token", notifH.RegisterDeviceToken)
+		r.Delete("/me/device-token", notifH.UnregisterDeviceToken)
 	})
 
 	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────
@@ -1006,6 +1162,7 @@ func main() {
 			r.Post("/team/members/{id}/reset-2fa", teamH.ResetMember2FA)
 			r.Get("/team/members/{id}/activity", teamH.GetMemberActivity)
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
+			r.Post("/team/members/{id}/welcome-email", teamH.SendWelcomeEmail)
 			r.Post("/team/roles/{roleId}/permissions", teamH.UpdateRolePermissions)
 			// r.Post("/team/members/{id}/remove", teamH.Remove) REMOVED - suspend/reinstate only
 			r.Post("/team/members/{id}/set-password", teamH.SetPassword)
@@ -1208,28 +1365,42 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
 
-		_, valid := engine.ValidateAcceptTTL(r.Context(), rideID)
+		pendingDriverID, valid := engine.ValidateAcceptTTL(r.Context(), rideID)
 		if !valid {
 			respond.Error(w, apperrors.ErrAcceptExpired)
 			return
 		}
 
-		// Gate: driver must have credits for their vehicle type to accept rides.
+		// Identity check: this ride must currently be offered to THIS driver.
+		// Without it, any authenticated driver who learns a ride_id with a live
+		// offer could accept it (and be assigned the ride). We need the profile
+		// anyway for the credit gate, so a load failure is a hard reject here.
 		profile, err := driverSvc.GetProfile(r.Context(), claims.UserID)
-		if err == nil {
-			hasCredits, credErr := credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
-			if credErr == nil && !hasCredits && cfg.Env != "production" {
-				// Dev/local: auto-grant free trial (same as admin approval flow).
-				_ = credits.GrantFreeTrialIfEligible(r.Context(), claims.UserID, profile.TransportType)
-				hasCredits, _ = credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
-			}
-			if credErr == nil && !hasCredits {
-				respond.Error(w, apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding."))
-				return
-			}
+		if err != nil {
+			respond.Error(w, apperrors.ErrAcceptExpired)
+			return
+		}
+		if profile.ID != pendingDriverID {
+			respond.Error(w, apperrors.New(http.StatusForbidden, "NOT_YOUR_OFFER", "this ride is not currently offered to you"))
+			return
 		}
 
-		engine.AcceptRide(rideID)
+		// Gate: driver must have credits for their vehicle type to accept rides.
+		hasCredits, credErr := credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+		if credErr == nil && !hasCredits && cfg.Env != "production" {
+			// Dev/local: auto-grant free trial (same as admin approval flow).
+			_ = credits.GrantFreeTrialIfEligible(r.Context(), claims.UserID, profile.TransportType)
+			hasCredits, _ = credits.HasCredits(r.Context(), claims.UserID, profile.TransportType)
+		}
+		if credErr == nil && !hasCredits {
+			respond.Error(w, apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding."))
+			return
+		}
+
+		// Signal the matching loop with our identity; it only honors the accept
+		// if we are the candidate it is currently offering (closes the TOCTOU
+		// where the offer rotates between the check above and this signal).
+		engine.AcceptRide(rideID, profile.ID)
 		respond.NoContent(w)
 	}
 }
@@ -1238,7 +1409,11 @@ func driverDeclineHandler(engine *matching.Engine, driverSvc *driver.Service) ht
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
-		engine.DeclineRide(rideID)
+		// Only signal the decline with a verified identity, so one driver can't
+		// decline an offer that's currently extended to another driver.
+		if profile, err := driverSvc.GetProfile(r.Context(), claims.UserID); err == nil {
+			engine.DeclineRide(rideID, profile.ID)
+		}
 		_ = driverSvc.RecordDecline(r.Context(), claims.UserID)
 		respond.NoContent(w)
 	}

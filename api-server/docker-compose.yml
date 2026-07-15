@@ -56,7 +56,7 @@ services:
     container_name: ride_pgadmin
     restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@rides.local
+      PGADMIN_DEFAULT_EMAIL: admin@rides.rw
       PGADMIN_DEFAULT_PASSWORD: admin123
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
@@ -105,6 +105,29 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # ── Admin console (Next.js, from the Rides-web repo beside this one) ────────
+  # Mirrors the prod box setup but points at the LOCAL api. Browser calls go to
+  # localhost:8080 (baked at build time); server-side route handlers use the
+  # compose-internal api:8080. Rebuild after pulling Rides-web changes:
+  #   docker compose up -d --build admin
+  # For active frontend editing prefer the hot-reload dev server instead:
+  #   cd ../../Rides-web && pnpm dev   (with NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1)
+  admin:
+    build:
+      context: ../../Rides-web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080/api/v1
+    container_name: ride_admin
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      API_INTERNAL_URL: http://api:8080/api/v1
+    depends_on:
+      - api
+
 volumes:
   postgres_data:
   redis_data:
