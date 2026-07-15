@@ -140,7 +140,6 @@ func (r *Repository) GetJournalEntries(ctx context.Context, start, end *time.Tim
 	if end != nil {
 		query += ` AND e.entry_date <= $` + itoa(n)
 		args = append(args, *end)
-		n++
 	}
 	query += ` ORDER BY e.entry_date ASC, e.id, l.id`
 
@@ -180,7 +179,6 @@ func (r *Repository) GetTrialBalanceRows(ctx context.Context, start, end *time.T
 	if end != nil {
 		query += ` AND e.entry_date <= $` + itoa(n)
 		args = append(args, *end)
-		n++
 	}
 	query += ` GROUP BY a.name ORDER BY a.name`
 
