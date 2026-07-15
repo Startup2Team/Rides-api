@@ -142,9 +142,14 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 		respond.ErrorMsg(w, http.StatusConflict, "REPORT_NOT_READY", "report is not ready for download")
 		return
 	}
-	// In production this would redirect to a presigned S3 URL or stream the file.
-	// For now return the file path in JSON so the frontend can fetch it separately.
-	respond.OK(w, map[string]interface{}{"file_path": rep.FilePath, "format": rep.Format})
+	data, contentType, filename, err := h.svc.Build(r.Context(), id)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	_, _ = w.Write(data)
 }
 
 func parseIntDefault(s string, def int) int {
