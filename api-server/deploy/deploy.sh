@@ -16,15 +16,19 @@ ENV="${1:?usage: deploy.sh <staging|prod> <image_tag>}"
 TAG="${2:?usage: deploy.sh <staging|prod> <image_tag>}"
 
 REGISTRY="ghcr.io/startup2team/rides-api"
-DIR="/opt/rides/Rides-api/api-server"
+# Override with RIDES_DIR for local rehearsals / testing; defaults to the box path.
+DIR="${RIDES_DIR:-/opt/rides/Rides-api/api-server}"
 cd "$DIR"
 
 case "$ENV" in
   staging)
-    COMPOSE=(docker compose -p rides-staging -f docker-compose.staging.yml)
+    # --env-file is REQUIRED: compose interpolates ${POSTGRES_USER} etc. from the
+    # env file passed here (or the default .env), NOT from a service's env_file.
+    # Without it, the staging stack would interpolate prod values.
+    COMPOSE=(docker compose --env-file .env.staging -p rides-staging -f docker-compose.staging.yml)
     STATE="$DIR/.staging_current_tag" ;;
   prod)
-    COMPOSE=(docker compose -f docker-compose.prod.yml)
+    COMPOSE=(docker compose --env-file .env -f docker-compose.prod.yml)
     STATE="$DIR/.prod_current_tag" ;;
   *) echo "unknown env: $ENV (expected staging|prod)" >&2; exit 2 ;;
 esac
@@ -38,7 +42,16 @@ deploy_tag() {
   local tag="$1"
   export API_IMAGE_TAG="$tag"
   log "pulling $REGISTRY:$tag"
-  "${COMPOSE[@]}" pull api
+  if ! "${COMPOSE[@]}" pull api; then
+    # Fall back to a locally-present copy (e.g. transient registry blip, or a
+    # rollback to a tag already on the box). Abort only if it isn't available.
+    if docker image inspect "$REGISTRY:$tag" >/dev/null 2>&1; then
+      log "registry pull failed — using local image $REGISTRY:$tag"
+    else
+      log "ERROR: cannot pull $REGISTRY:$tag and no local copy exists"
+      return 1
+    fi
+  fi
   log "starting api (migrations run on boot)"
   "${COMPOSE[@]}" up -d --no-build api
 }

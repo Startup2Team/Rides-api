@@ -62,12 +62,15 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & push (linux/amd64 — matches the Vultr box)
+      - name: Build & push (multi-arch — amd64 for the box, arm64 for dev Macs)
         uses: docker/build-push-action@v6
         with:
           context: api-server
           file: api-server/Dockerfile
-          platforms: linux/amd64
+          # The Dockerfile cross-compiles (GOARCH=$TARGETARCH) so both arches
+          # build fast from the native-amd64 runner — no toolchain emulation.
+          # Result: the box pulls amd64, Apple-Silicon devs pull arm64, both native.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

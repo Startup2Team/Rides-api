@@ -43,7 +43,9 @@ services:
       retries: 5
 
   api:
-    # Deploy pulls this exact tag (sha-<gitsha>); never built on the box.
+    # Deploy pulls this exact tag (the git SHA); never built on the box.
+    # The image is multi-arch (amd64+arm64) so Docker auto-selects the host's
+    # architecture — native on the amd64 box AND on arm64 dev machines.
     image: ghcr.io/startup2team/rides-api:${API_IMAGE_TAG:-dev}
     container_name: rides-staging-api
     restart: always
