@@ -1,11 +1,11 @@
 package finance
 
 import (
-	"encoding/csv"
+	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
+	"github.com/workspace/ride-platform/internal/export"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
@@ -55,36 +55,42 @@ func (h *Handler) GetBalanceSheet(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, bs)
 }
 
-// GET /api/v1/admin/finance/export
+// GET /api/v1/admin/finance/export?report=ledger|trial-balance|balance-sheet&format=csv|xlsx|pdf
+// Streams the requested finance report in the requested format (default:
+// general ledger as CSV).
 func (h *Handler) ExportFinanceReport(w http.ResponseWriter, r *http.Request) {
 	start := parseDateQuery(r.URL.Query().Get("start"))
 	end := parseDateQuery(r.URL.Query().Get("end"))
+	format := export.Parse(r.URL.Query().Get("format"))
+	report := r.URL.Query().Get("report")
+	if report == "" {
+		report = "ledger"
+	}
 
-	entries, err := h.svc.GetGeneralLedger(r.Context(), start, end)
+	var table export.Table
+	var err error
+	switch report {
+	case "trial-balance":
+		table, err = h.svc.TrialBalanceTable(r.Context(), start, end)
+	case "balance-sheet":
+		table, err = h.svc.BalanceSheetTable(r.Context(), end)
+	default:
+		report = "general_ledger"
+		table, err = h.svc.LedgerTable(r.Context(), start, end)
+	}
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", `attachment; filename="general_ledger.csv"`)
-
-	writer := csv.NewWriter(w)
-	_ = writer.Write([]string{"Date", "Transaction ID", "Account", "Description", "Debit (RWF)", "Credit (RWF)", "Reference"})
-
-	for _, e := range entries {
-		row := []string{
-			e.Date.Format(time.RFC3339),
-			e.TransactionID,
-			e.Account,
-			e.Description,
-			strconv.FormatInt(e.Debit, 10),
-			strconv.FormatInt(e.Credit, 10),
-			e.Reference,
-		}
-		_ = writer.Write(row)
+	data, err := export.Encode(table, format)
+	if err != nil {
+		respond.Error(w, err)
+		return
 	}
-	writer.Flush()
+	w.Header().Set("Content-Type", format.ContentType())
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.%s"`, report, format.Ext()))
+	_, _ = w.Write(data)
 }
 
 // GET /api/v1/admin/finance/staff-analytics

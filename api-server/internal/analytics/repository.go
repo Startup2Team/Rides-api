@@ -2,13 +2,13 @@ package analytics
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Repository handles read-only analytics queries.
-// All queries run against the analytics_events table — NEVER against operational tables.
+// Repository handles read-only analytics queries over operational + event tables.
 type Repository struct {
 	db *pgxpool.Pool
 }
@@ -54,7 +54,7 @@ func (r *Repository) DailyRides(ctx context.Context, days int) ([]map[string]int
 		       COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed,
 		       COUNT(*) FILTER (WHERE status = 'CANCELLED') AS cancelled
 		FROM rides
-		WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
+		WHERE created_at >= NOW() - make_interval(days => $1)
 		GROUP BY day ORDER BY day DESC
 	`, days)
 	if err != nil {
@@ -77,9 +77,35 @@ func (r *Repository) DailyRides(ctx context.Context, days int) ([]map[string]int
 	return result, nil
 }
 
-// WeeklyRides returns per-week ride counts.
+// WeeklyRides returns per-week ride counts for the last 8 weeks, bucketed by
+// ISO week (Monday-start via date_trunc).
 func (r *Repository) WeeklyRides(ctx context.Context) ([]map[string]interface{}, error) {
-	return r.DailyRides(ctx, 56) // 8 weeks
+	rows, err := r.db.Query(ctx, `
+		SELECT date_trunc('week', created_at)::date AS week, COUNT(*) AS total,
+		       COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed,
+		       COUNT(*) FILTER (WHERE status = 'CANCELLED') AS cancelled
+		FROM rides
+		WHERE created_at >= NOW() - make_interval(weeks => 8)
+		GROUP BY week ORDER BY week DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var week time.Time
+		var total, completed, cancelled int
+		if err := rows.Scan(&week, &total, &completed, &cancelled); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{
+			"week": week.Format("2006-01-02"), "total": total,
+			"completed": completed, "cancelled": cancelled,
+		})
+	}
+	return result, nil
 }
 
 // RevenueBreakdown returns revenue by transport type for the last 30 days.
@@ -312,18 +338,50 @@ func (r *Repository) ActivityHeatmap(ctx context.Context) ([]map[string]interfac
 // Satisfaction returns a synthetic distribution (rides don't yet store ratings).
 // Returns completion-rate proxy as a satisfaction signal.
 func (r *Repository) Satisfaction(ctx context.Context) (map[string]interface{}, error) {
+	// Real CSAT from the ratings table (score 1–5) over the last 30 days, plus a
+	// star distribution. Completion rate is kept as a secondary operational metric.
+	var ratingCount int
+	var avgScore *float64
+	_ = r.db.QueryRow(ctx, `
+		SELECT COUNT(*), AVG(score)::float8
+		FROM ratings WHERE created_at >= NOW() - make_interval(days => 30)
+	`).Scan(&ratingCount, &avgScore)
+
+	distribution := map[string]int{"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+	rows, err := r.db.Query(ctx, `
+		SELECT score, COUNT(*) FROM ratings
+		WHERE created_at >= NOW() - make_interval(days => 30)
+		GROUP BY score
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var score, count int
+			if err := rows.Scan(&score, &count); err == nil {
+				distribution[strconv.Itoa(score)] = count
+			}
+		}
+	}
+
 	var total, completed int
 	_ = r.db.QueryRow(ctx, `
 		SELECT COUNT(*), COUNT(*) FILTER (WHERE status='COMPLETED')
-		FROM rides WHERE created_at >= NOW() - INTERVAL '30 days'
+		FROM rides WHERE created_at >= NOW() - make_interval(days => 30)
 	`).Scan(&total, &completed)
 
-	rate := 0.0
+	completionRate := 0.0
 	if total > 0 {
-		rate = float64(completed) / float64(total) * 100
+		completionRate = float64(completed) / float64(total) * 100
+	}
+	avg := 0.0
+	if avgScore != nil {
+		avg = *avgScore
 	}
 	return map[string]interface{}{
-		"completion_rate_pct": rate,
+		"avg_rating_30d":      avg,
+		"rating_count_30d":    ratingCount,
+		"rating_distribution": distribution,
+		"completion_rate_pct": completionRate,
 		"total_rides_30d":     total,
 		"completed_rides_30d": completed,
 	}, nil

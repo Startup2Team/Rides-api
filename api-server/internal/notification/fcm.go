@@ -50,6 +50,11 @@ func (f *firebaseClient) Send(ctx context.Context, token, title, body string, da
 
 	_, err := f.msg.Send(ctx, msg)
 	if err != nil {
+		// Classify dead tokens so the caller can prune them. Wrap with %w so
+		// errors.Is(err, ErrTokenUnregistered) works upstream.
+		if messaging.IsRegistrationTokenNotRegistered(err) || messaging.IsUnregistered(err) {
+			return fmt.Errorf("%w: %v", ErrTokenUnregistered, err)
+		}
 		return fmt.Errorf("fcm: send: %w", err)
 	}
 	return nil

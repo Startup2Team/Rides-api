@@ -89,11 +89,23 @@ func (e *Engine) StartSearch(rideID string, pickup geo.Point, transportType stri
 	go e.runLoop(context.Background(), rideID, pickup, transportType)
 }
 
-// NotifyAccept is called by the driver accept/decline handler.
-func (e *Engine) NotifyAccept(rideID string, accepted bool) bool {
+// acceptSignal carries the responding driver's identity so the matching loop
+// can verify it against the candidate currently being offered. Without this,
+// the channel is keyed only by ride_id and any driver's accept would be applied
+// to whichever candidate the loop happens to be offering (authZ + wrong-assign
+// hole).
+type acceptSignal struct {
+	driverID string // driver_profiles.id of the responder ("" = unchecked, legacy)
+	accepted bool
+}
+
+// NotifyAccept is called by the driver accept/decline handler. driverID is the
+// responding driver's profile id; the matching loop ignores signals whose
+// driverID doesn't match the driver currently being offered the ride.
+func (e *Engine) NotifyAccept(rideID, driverID string, accepted bool) bool {
 	if ch, ok := e.acceptChannels.Load(rideID); ok {
 		select {
-		case ch.(chan bool) <- accepted:
+		case ch.(chan acceptSignal) <- acceptSignal{driverID: driverID, accepted: accepted}:
 			return true
 		default:
 		}
@@ -331,19 +343,28 @@ func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate)
 		"acceptance_rate": c.acceptanceRate,
 	})
 
-	acceptCh := make(chan bool, 1)
+	acceptCh := make(chan acceptSignal, 1)
 	e.acceptChannels.Store(rideID, acceptCh)
 	defer e.acceptChannels.Delete(rideID)
 
 	timer := time.NewTimer(ttl)
 	defer timer.Stop()
 
-	select {
-	case accepted := <-acceptCh:
-		return accepted, true
-	case <-timer.C:
-		e.redis.Del(ctx, rkeys.K.RidePendingDriver(rideID))
-		return false, true
+	for {
+		select {
+		case sig := <-acceptCh:
+			// Only the driver currently being offered this ride may resolve it.
+			// A stale signal from a previously-offered driver (or any other
+			// driver probing the ride_id) is ignored so it can't hijack or
+			// prematurely decline the current offer.
+			if sig.driverID != "" && sig.driverID != c.profileID {
+				continue
+			}
+			return sig.accepted, true
+		case <-timer.C:
+			e.redis.Del(ctx, rkeys.K.RidePendingDriver(rideID))
+			return false, true
+		}
 	}
 }
 

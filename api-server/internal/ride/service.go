@@ -472,7 +472,7 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 			Payload: map[string]interface{}{"reason": "Customer cancelled the ride."},
 		})
 		if driverUserID, err := s.repo.FindDriverUserIDByProfileID(ctx, *r.DriverID); err == nil {
-			s.notify.PersistForUser(ctx, driverUserID, "Ride cancelled",
+			s.notify.SendToAllDevices(ctx, driverUserID, "Ride cancelled",
 				"The customer cancelled the ride.", "ride", map[string]string{"ride_id": rideID})
 		}
 	}
@@ -718,7 +718,7 @@ func (s *Service) CancelAfterPickupExpiry(ctx context.Context, rideID, driverUse
 		Type: "ride_cancelled", RideID: rideID,
 		Payload: map[string]interface{}{"reason": "Customer no-show after pickup wait window."},
 	})
-	s.notify.PersistForUser(ctx, r.CustomerID, "Ride cancelled",
+	s.notify.SendToAllDevices(ctx, r.CustomerID, "Ride cancelled",
 		"Your ride was cancelled — driver waited at pickup.", "ride", map[string]string{"ride_id": rideID})
 	return nil
 }
@@ -881,7 +881,7 @@ func (s *Service) CompleteRide(ctx context.Context, rideID, driverUserID string,
 	if finalFare != nil {
 		fareStr = fmt.Sprintf("%.0f RWF", *finalFare)
 	}
-	s.notify.PersistForUser(ctx, r.CustomerID, "Ride completed",
+	s.notify.SendToAllDevices(ctx, r.CustomerID, "Ride completed",
 		fmt.Sprintf("Your ride to %s was completed. Fare: %s", r.DestinationAddress, fareStr),
 		"ride", map[string]string{"ride_id": rideID})
 	return nil
@@ -970,7 +970,7 @@ func (s *Service) DriverCancelRide(ctx context.Context, rideID, driverUserID, re
 		RideID:  rideID,
 		Payload: map[string]interface{}{"reason": "Your driver has cancelled the ride."},
 	})
-	s.notify.PersistForUser(ctx, r.CustomerID, "Ride cancelled",
+	s.notify.SendToAllDevices(ctx, r.CustomerID, "Ride cancelled",
 		"Your driver has cancelled the ride.", "ride", map[string]string{"ride_id": rideID})
 	return nil
 }

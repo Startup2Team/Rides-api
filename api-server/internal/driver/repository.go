@@ -202,8 +202,6 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 			city, momo_pay_code, momo_provider,
 			province, district, sector, cell, village,
 			passenger_seats, load_capacity_kg,
-			license_expiry_date, insurance_expiry_date, authorization_expiry_date
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 			license_expiry_date, insurance_expiry_date, authorization_expiry_date,
 			gender
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
@@ -222,15 +220,16 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 	return r.FindProfileByUserID(ctx, in.UserID)
 }
 
-func (r *Repository) UpdateProfileFields(ctx context.Context, profileID string, city, momoPayCode, momoProvider, fcmToken *string) error {
+func (r *Repository) UpdateProfileFields(ctx context.Context, profileID string, city, momoPayCode, momoProvider, gender, fcmToken *string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE driver_profiles
 		SET city          = COALESCE($1, city),
 		    momo_pay_code = COALESCE($2, momo_pay_code),
 		    momo_provider = COALESCE($3, momo_provider),
+		    gender        = COALESCE($4, gender),
 		    updated_at    = NOW()
-		WHERE id = $4
-	`, city, momoPayCode, momoProvider, profileID)
+		WHERE id = $5
+	`, city, momoPayCode, momoProvider, gender, profileID)
 	if err != nil {
 		return err
 	}
@@ -327,7 +326,7 @@ func (r *Repository) DemandHeatmap(ctx context.Context, windowMin int, center *g
 		       COUNT(*) AS demand_count
 		FROM rides
 		WHERE pickup_point IS NOT NULL
-		  AND created_at >= NOW() - ($1 || ' minutes')::INTERVAL`
+		  AND created_at >= NOW() - make_interval(mins => $1)`
 	args := []interface{}{windowMin}
 	if center != nil {
 		q += `
@@ -429,9 +428,14 @@ func (r *Repository) SetPriorityTier(ctx context.Context, driverProfileID string
 func (r *Repository) SetApprovalStatus(ctx context.Context, profileID, status, approvedBy string, rejectionReason *string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE driver_profiles
-		SET approval_status = $1,
-		    approved_by = CASE WHEN $1 = 'APPROVED' AND $2 != '' THEN $2::UUID ELSE approved_by END,
-		    approved_at = CASE WHEN $1 = 'APPROVED' THEN NOW() ELSE approved_at END,
+		-- Every $1/$2 use is explicitly ::text so Postgres deduces ONE type per
+		-- parameter: mixing an untyped assignment with CASE comparisons made it
+		-- deduce inconsistent types and reject the statement at parse time. The
+		-- uuid cast runs only in the taken branch (NULLIF keeps '' out — the
+		-- dev-auto-approve caller passes no admin id).
+		SET approval_status = $1::text,
+		    approved_by = CASE WHEN $1::text = 'APPROVED' AND NULLIF($2::text, '') IS NOT NULL THEN NULLIF($2::text, '')::UUID ELSE approved_by END,
+		    approved_at = CASE WHEN $1::text = 'APPROVED' THEN NOW() ELSE approved_at END,
 		    rejection_reason = $3,
 		    updated_at = NOW()
 		WHERE id = $4
@@ -507,16 +511,18 @@ func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyI
 		    license_expiry_date = $15,
 		    insurance_expiry_date = $16,
 		    authorization_expiry_date = $17,
+		    gender = COALESCE(NULLIF($18, ''), gender),
 		    approval_status = 'PENDING_REVIEW',
 		    rejection_reason = NULL,
 		    updated_at = NOW()
-		WHERE user_id = $18
+		WHERE user_id = $19
 	`,
 		in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
 		in.City, in.MomoPayCode, in.MomoProvider,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
+		in.Gender,
 		in.UserID,
 	)
 	return err

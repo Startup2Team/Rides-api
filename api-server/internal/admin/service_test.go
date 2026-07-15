@@ -500,7 +500,8 @@ func TestDeleteDriver_DBError(t *testing.T) {
 func TestInterveneRide_Success(t *testing.T) {
 	svc := newTestService(&mockDB{
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-			return pgconn.CommandTag{}, nil
+			// A live ride was updated (RowsAffected=1) — passes the state guard.
+			return pgconn.NewCommandTag("UPDATE 1"), nil
 		},
 	})
 	assert.NoError(t, svc.InterveneRide(context.Background(), "ride-uuid", "cancel", "admin action"))
@@ -782,7 +783,7 @@ func TestGetNegotiation_DelegatesToGetRide_NotFound(t *testing.T) {
 func TestInterveneRide_ForceComplete(t *testing.T) {
 	svc := newTestService(&mockDB{
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-			return pgconn.CommandTag{}, nil
+			return pgconn.NewCommandTag("UPDATE 1"), nil
 		},
 	})
 	assert.NoError(t, svc.InterveneRide(context.Background(), "ride-id", "force-complete", "admin"))

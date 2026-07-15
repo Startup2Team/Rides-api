@@ -2,12 +2,17 @@ package notification
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/config"
 )
+
+// ErrTokenUnregistered is returned by the FCM client when a token is no longer
+// valid (app uninstalled / token rotated). Callers prune such tokens.
+var ErrTokenUnregistered = errors.New("fcm: token unregistered")
 
 // Message is a push notification payload.
 type Message struct {
@@ -76,6 +81,53 @@ func (s *Service) PersistForUser(ctx context.Context, userID, title, body, nType
 func (s *Service) send(ctx context.Context, userID, fcmToken, title, body, nType string, data map[string]string) error {
 	s.Persist(ctx, userID, title, body, nType, data)
 	return s.client.Send(ctx, fcmToken, title, body, data)
+}
+
+// SendToAllDevices persists one in-app notification for the user and pushes it
+// to every device they have registered. Dead tokens (FCM "unregistered") are
+// pruned as a side effect. Safe to call when the user has no tokens (in-app
+// only). This is the correct replacement for PersistForUser on events that
+// should wake a backgrounded app (e.g. ride cancelled/completed).
+func (s *Service) SendToAllDevices(ctx context.Context, userID, title, body, nType string, data map[string]string) {
+	s.Persist(ctx, userID, title, body, nType, data)
+	if s.repo == nil {
+		return
+	}
+	tokens, err := s.repo.ListDeviceTokens(ctx, userID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("user_id", userID).Msg("notification: list device tokens failed")
+		return
+	}
+	for _, tok := range tokens {
+		if tok == "" {
+			continue
+		}
+		if err := s.client.Send(ctx, tok, title, body, data); err != nil {
+			if errors.Is(err, ErrTokenUnregistered) {
+				if pErr := s.repo.PruneDeviceToken(ctx, tok); pErr != nil {
+					s.log.Warn().Err(pErr).Msg("notification: prune dead token failed")
+				}
+				continue
+			}
+			s.log.Warn().Err(err).Str("user_id", userID).Msg("notification: push to device failed")
+		}
+	}
+}
+
+// RegisterDevice upserts an FCM token for a user (multi-device).
+func (s *Service) RegisterDevice(ctx context.Context, userID, token, platform string) error {
+	if s.repo == nil {
+		return errors.New("notification: repository not configured")
+	}
+	return s.repo.UpsertDeviceToken(ctx, userID, token, platform)
+}
+
+// UnregisterDevice removes an FCM token for a user (e.g. logout on that device).
+func (s *Service) UnregisterDevice(ctx context.Context, userID, token string) error {
+	if s.repo == nil {
+		return errors.New("notification: repository not configured")
+	}
+	return s.repo.DeleteDeviceToken(ctx, userID, token)
 }
 
 // SendToUser sends a generic push to a user's device AND persists it for the

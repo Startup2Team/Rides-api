@@ -326,6 +326,13 @@ func (s *Service) UpdateVehicle(ctx context.Context, userID, vehicleID string, i
 	if err != nil {
 		return nil, err
 	}
+	// Editing the active vehicle's identity (plate/type/capacity) mid-ride would
+	// change the vehicle the customer agreed to — block it, same rule as switching.
+	if s.repo.HasActiveRide(ctx, userID) {
+		if v, gErr := s.repo.GetVehicle(ctx, profile.ID, vehicleID); gErr == nil && v.IsActive {
+			return nil, apperrors.New(409, "VEHICLE_LOCKED_ON_RIDE", "You cannot edit the active vehicle during an active ride.")
+		}
+	}
 	return s.repo.UpdateVehicle(ctx, profile.ID, vehicleID, in)
 }
 
@@ -333,6 +340,14 @@ func (s *Service) DeleteVehicle(ctx context.Context, userID, vehicleID string) e
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		return err
+	}
+	// Deleting the active vehicle auto-activates another one — that is a vehicle
+	// switch, which is forbidden during an active ride (bypasses ActivateVehicle's
+	// guard otherwise).
+	if s.repo.HasActiveRide(ctx, userID) {
+		if v, gErr := s.repo.GetVehicle(ctx, profile.ID, vehicleID); gErr == nil && v.IsActive {
+			return apperrors.New(409, "VEHICLE_LOCKED_ON_RIDE", "You cannot remove the active vehicle during an active ride.")
+		}
 	}
 	return s.repo.DeleteVehicle(ctx, profile.ID, vehicleID)
 }
