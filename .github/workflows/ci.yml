@@ -1,17 +1,23 @@
 name: CI
 
-# Runs on every PR targeting dev or main, and on direct pushes to dev/main
-# (push is path-filtered to avoid noise from docs-only changes).
+# The quality gate. Runs on every PR (into any branch) and on pushes to dev/main.
+# All three jobs must pass before a PR can merge (enforced by branch protection —
+# see scripts/setup-github-pipeline.sh). Nothing here touches a server.
 
 on:
   pull_request:
-    branches: [dev, main]
   push:
     branches: [dev, main]
     paths:
       - "api-server/**"
       - ".github/workflows/ci.yml"
   workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR so we don't waste minutes on
+# stale commits.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -24,59 +30,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: api-server/go.mod
           cache-dependency-path: api-server/go.sum
-
       - name: go vet
         run: go vet ./...
-
       - name: Check formatting
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
-            echo "These files need formatting (run make fmt):"
+            echo "::error::These files need formatting (run: make fmt)"
             echo "$unformatted"
             exit 1
           fi
 
-  # ── 2. Tests ──────────────────────────────────────────────────────────────
+  # ── 2. Tests (race detector + coverage) ───────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: api-server/go.mod
           cache-dependency-path: api-server/go.sum
-
       - name: Run tests
         run: go test -race -count=1 ./...
-
-      - name: Coverage
+      - name: Coverage summary
         run: |
           go test ./... -coverprofile=coverage.out
-          go tool cover -func=coverage.out | tail -n 1
+          echo "### Coverage" >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=coverage.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"
 
   # ── 3. Docker build check ─────────────────────────────────────────────────
+  # Builds the real production image (no push). This is the check that catches
+  # base-image / toolchain / dependency drift that `go build` on a dev machine
+  # can miss — it must run on every PR.
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Build image (verify it compiles, no push)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: api-server
           push: false
-          tags: backend-travels:ci
+          tags: rides-api:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -1,0 +1,57 @@
+name: Deploy Staging
+
+# Auto-deploys every merged `dev` commit to the STAGING stack on the Vultr box
+# (separate compose project, own DB/Redis, port 8090, stg-api.rides.rw). Runs
+# ONLY after the image for that commit has been built & pushed, so it always
+# deploys a real, CI-tested artifact — never a half-built one.
+#
+# Required secret: DEPLOY_SSH_KEY (private key trusted by root@139.84.251.242).
+
+on:
+  workflow_run:
+    workflows: ["Build Image"]
+    types: [completed]
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy (defaults to current dev tip)"
+        required: false
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false # let an in-flight deploy finish before the next
+
+jobs:
+  deploy:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    # Only proceed if the image build actually succeeded.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment:
+      name: staging
+      url: https://stg-api.rides.rw/health
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image SHA
+        id: sha
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.event.inputs.sha || github.sha }}"
+          echo "value=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Deploying sha-$SHA to staging"
+
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -H 139.84.251.242 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy + migrate + smoke test (rolls back on failure)
+        run: |
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          # Ship the current tree (compose files, migrations, deploy script) but
+          # deploy the pre-built image by SHA — no build on the box.
+          git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
+          $SSH "cd /opt/rides/Rides-api/api-server && ./deploy/deploy.sh staging sha-${{ steps.sha.outputs.value }}"

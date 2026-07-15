@@ -1,0 +1,66 @@
+name: Deploy Production
+
+# Deploys to PRODUCTION only when you publish a GitHub Release (tag vX.Y.Z on a
+# main commit). The `production` environment adds a MANUAL APPROVAL gate — the
+# job pauses until a reviewer approves it in the Actions UI. It then promotes the
+# SAME image that was built for that commit and verified on staging, runs a smoke
+# test, and auto-rolls-back to the previous release if the smoke test fails.
+#
+# Requires:
+#   - Secret DEPLOY_SSH_KEY (root@139.84.251.242)
+#   - Environment `production` with required reviewers (see setup script)
+#   - The image ghcr.io/.../rides-api:sha-<sha> must already exist (built when the
+#     commit landed on main). Cutting a release from an un-built commit will fail
+#     fast at the pull step — deliberately.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy to prod (must have a built image)"
+        required: true
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    environment:
+      name: production # ← manual-approval gate lives here
+      url: https://api.rides.rw/health
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image SHA
+        id: sha
+        run: |
+          # On a release event, github.sha is the tagged commit.
+          SHA="${{ github.event.inputs.sha || github.sha }}"
+          echo "value=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Promoting sha-$SHA to production"
+
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -H 139.84.251.242 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Promote image + migrate + smoke test (auto-rollback on failure)
+        run: |
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
+          $SSH "cd /opt/rides/Rides-api/api-server && ./deploy/deploy.sh prod sha-${{ steps.sha.outputs.value }}"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "### Production deploy" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release: \`${{ github.event.release.tag_name || github.event.inputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`sha-${{ steps.sha.outputs.value }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
