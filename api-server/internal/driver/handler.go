@@ -233,6 +233,7 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		City         *string `json:"city"`
 		MomoPayCode  *string `json:"momo_pay_code"`
 		MomoProvider *string `json:"momo_provider" validate:"omitempty,oneof=mtn airtel"`
+		Gender       *string `json:"gender" validate:"omitempty,oneof=male female other"`
 		FCMToken     *string `json:"fcm_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -244,7 +245,7 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.City, body.MomoPayCode, body.MomoProvider, body.FCMToken); err != nil {
+	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.City, body.MomoPayCode, body.MomoProvider, body.Gender, body.FCMToken); err != nil {
 		respond.Error(w, err)
 		return
 	}

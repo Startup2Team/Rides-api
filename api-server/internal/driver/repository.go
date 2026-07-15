@@ -220,15 +220,16 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 	return r.FindProfileByUserID(ctx, in.UserID)
 }
 
-func (r *Repository) UpdateProfileFields(ctx context.Context, profileID string, city, momoPayCode, momoProvider, fcmToken *string) error {
+func (r *Repository) UpdateProfileFields(ctx context.Context, profileID string, city, momoPayCode, momoProvider, gender, fcmToken *string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE driver_profiles
 		SET city          = COALESCE($1, city),
 		    momo_pay_code = COALESCE($2, momo_pay_code),
 		    momo_provider = COALESCE($3, momo_provider),
+		    gender        = COALESCE($4, gender),
 		    updated_at    = NOW()
-		WHERE id = $4
-	`, city, momoPayCode, momoProvider, profileID)
+		WHERE id = $5
+	`, city, momoPayCode, momoProvider, gender, profileID)
 	if err != nil {
 		return err
 	}
@@ -510,16 +511,18 @@ func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyI
 		    license_expiry_date = $15,
 		    insurance_expiry_date = $16,
 		    authorization_expiry_date = $17,
+		    gender = COALESCE(NULLIF($18, ''), gender),
 		    approval_status = 'PENDING_REVIEW',
 		    rejection_reason = NULL,
 		    updated_at = NOW()
-		WHERE user_id = $18
+		WHERE user_id = $19
 	`,
 		in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
 		in.City, in.MomoPayCode, in.MomoProvider,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
+		in.Gender,
 		in.UserID,
 	)
 	return err

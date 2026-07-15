@@ -184,12 +184,12 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 }
 
 // UpdateProfile updates mutable driver profile fields.
-func (s *Service) UpdateProfile(ctx context.Context, userID string, city, momoPayCode, momoProvider, fcmToken *string) error {
+func (s *Service) UpdateProfile(ctx context.Context, userID string, city, momoPayCode, momoProvider, gender, fcmToken *string) error {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		return err
 	}
-	return s.repo.UpdateProfileFields(ctx, profile.ID, city, momoPayCode, momoProvider, fcmToken)
+	return s.repo.UpdateProfileFields(ctx, profile.ID, city, momoPayCode, momoProvider, gender, fcmToken)
 }
 
 // AcceptPolicy marks the driver policy as accepted.

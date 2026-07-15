@@ -30,6 +30,7 @@ import (
 	"github.com/workspace/ride-platform/internal/customer"
 	"github.com/workspace/ride-platform/internal/dashboard"
 	"github.com/workspace/ride-platform/internal/driver"
+	"github.com/workspace/ride-platform/internal/export"
 	"github.com/workspace/ride-platform/internal/fare"
 	"github.com/workspace/ride-platform/internal/finance"
 	"github.com/workspace/ride-platform/internal/inbox"
@@ -232,12 +233,49 @@ func main() {
 	financeSvc := finance.NewService(financeRepo)
 	financeH := finance.NewHandler(financeSvc)
 
+	// Report generator: turns a report template into real bytes (CSV/XLSX/PDF)
+	// from live finance data, streamed on download. Unknown templates 501 rather
+	// than pretending to produce a file.
+	reportSvc.SetBuilder(func(ctx context.Context, template, format string, dateRange *string) ([]byte, string, string, error) {
+		f := export.Parse(format)
+		tmpl := strings.ToLower(template)
+		var table export.Table
+		var err error
+		switch {
+		case strings.Contains(tmpl, "trial"):
+			table, err = financeSvc.TrialBalanceTable(ctx, nil, nil)
+		case strings.Contains(tmpl, "balance"):
+			table, err = financeSvc.BalanceSheetTable(ctx, nil)
+		case strings.Contains(tmpl, "ledger"), strings.Contains(tmpl, "revenue"),
+			strings.Contains(tmpl, "financ"), strings.Contains(tmpl, "general"), strings.Contains(tmpl, "booking"):
+			table, err = financeSvc.LedgerTable(ctx, nil, nil)
+		default:
+			return nil, "", "", apperrors.New(http.StatusNotImplemented, "UNSUPPORTED_TEMPLATE", "no generator for report template: "+template)
+		}
+		if err != nil {
+			return nil, "", "", err
+		}
+		data, err := export.Encode(table, f)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, f.ContentType(), template + "." + f.Ext(), nil
+	})
+
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	custSvc := customer.NewService(custRepo, log)
 
 	authH := auth.NewHandler(authSvc, cfg.Env)
 	authH.SetDriverService(driverSvc) // force-offline driver on logout
 	custH := customer.NewHandler(custSvc)
+	// Wire the customer /session bootstrap sources (kept out of the customer
+	// package to avoid an import cycle with ride/notification).
+	custH.SetSessionSources(
+		func(ctx context.Context, customerID string) (any, error) {
+			return rideSvc.GetActiveRide(ctx, customerID)
+		},
+		notifRepo.UnreadCount,
+	)
 	driverH := driver.NewHandler(driverSvc)
 	rideH := ride.NewHandler(rideSvc)
 	negH := negotiation.NewHandler(negSvc)
@@ -418,8 +456,25 @@ func main() {
 	r.Use(mw.WithLogger(log))
 	r.Use(mw.HTTPLogger(log))
 
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		respond.OK(w, map[string]string{"status": "ok"})
+	r.Get("/health", func(w http.ResponseWriter, req *http.Request) {
+		// Probe the critical dependencies so an uptime monitor / load balancer
+		// sees red when Postgres or Redis is down, instead of a static "ok".
+		hctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		defer cancel()
+
+		health := map[string]string{"status": "ok", "db": "ok", "redis": "ok"}
+		status := http.StatusOK
+		if err := db.Ping(hctx); err != nil {
+			health["db"] = "down"
+			health["status"] = "degraded"
+			status = http.StatusServiceUnavailable
+		}
+		if err := rdb.Ping(hctx).Err(); err != nil {
+			health["redis"] = "down"
+			health["status"] = "degraded"
+			status = http.StatusServiceUnavailable
+		}
+		respond.JSON(w, status, health)
 	})
 
 	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -571,7 +626,8 @@ func main() {
 
 		r.Get("/profile", custH.GetProfile)
 		r.Put("/profile", custH.UpdateProfile)
-		r.Get("/level", custH.GetLevel) // loyalty / gamification
+		r.Get("/session", custH.GetSession) // one-call bootstrap (profile + active ride + unread)
+		r.Get("/level", custH.GetLevel)     // loyalty / gamification
 		// Phone-number change (OTP-verified). Tight per-user limit on the request
 		// leg so it can't be abused to spam SMS to arbitrary numbers.
 		r.With(mw.UserRateLimit(rdb, "phone_change_req", 5, 10*time.Minute)).
@@ -711,6 +767,10 @@ func main() {
 		r.Get("/me/notifications/unread-count", notifH.UnreadCount)
 		r.Patch("/me/notifications/{id}/read", notifH.MarkRead)
 		r.Post("/me/notifications/mark-all-read", notifH.MarkAllRead)
+
+		// Multi-device FCM registration.
+		r.Post("/me/device-token", notifH.RegisterDeviceToken)
+		r.Delete("/me/device-token", notifH.UnregisterDeviceToken)
 	})
 
 	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────

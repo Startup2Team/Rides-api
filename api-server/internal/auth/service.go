@@ -164,10 +164,19 @@ func (s *Service) verifyWithPindo(ctx context.Context, phone, code string) error
 // VerifyOTP validates the submitted OTP code and returns JWT tokens.
 func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID, platform, appVersion, ipAddr string) (*TokenPair, *User, error) {
 	if s.cfg.OTPMode == "pindo_verify" {
-		// Pindo owns the PIN check (and its own attempt limiting).
+		// Pindo owns the PIN check, but add a local attempt cap so the verify
+		// endpoint can't be hammered for one phone regardless of Pindo's limits.
+		attemptsKey := "otp:attempts:" + phone + ":" + purpose
+		if n, _ := s.redis.Get(ctx, attemptsKey).Int(); n >= maxOTPAttempts {
+			return nil, nil, apperrors.New(429, "OTP_LOCKED", "Too many incorrect attempts. Request a new code.")
+		}
 		if err := s.verifyWithPindo(ctx, phone, code); err != nil {
+			if c, e := s.redis.Incr(ctx, attemptsKey).Result(); e == nil && c == 1 {
+				s.redis.Expire(ctx, attemptsKey, otpExpiryMinutes*time.Minute)
+			}
 			return nil, nil, err
 		}
+		s.redis.Del(ctx, attemptsKey)
 	} else {
 		// Lock the code after too many wrong guesses in its window — caps brute force.
 		attemptsKey := "otp:attempts:" + phone + ":" + purpose
