@@ -172,7 +172,20 @@ screen already uses and works*. So you have two choices:
 
 ## Wire-up after you implement
 
-1. Reconcile casing (snake_case recommended) — ping me to adjust the mobile mappers.
-2. Payment methods: set the payments repository factory to the remote repo.
-3. Package claims (option B): set `packagePaymentRepositoryFactory` default `mode` to `'remote'`.
-4. I re-run the mobile test suite + a live round-trip against these endpoints.
+**The mobile side is already built to this exact snake_case contract** (services
+`paymentMethods.ts` and `packagePaymentClaims.ts`, both contract-tested). No
+mapper changes needed if you follow the shapes above. Integration is one
+build-time env flag per domain:
+
+1. **Payment methods (#1):** set `EXPO_PUBLIC_PAYMENT_METHODS_SOURCE=remote`.
+   The whole payments UI then reads/writes `/api/v1/payments/methods`.
+2. **Package claims (#3):** set `EXPO_PUBLIC_PACKAGE_PAYMENT_SOURCE=remote`.
+   The claim status UI then reads/writes `/api/v1/package-payments/manual-claims`.
+   (Leave unset / `local` and it uses the offline store, as today.)
+3. Ping me and I'll run a live round-trip against your deployed endpoints and
+   confirm each field maps. If you diverge from a field name here, that's the
+   only thing I'd need to adjust.
+
+> If you go purchase-centric for #3 instead (no claim endpoints), tell me and
+> I'll repoint the status display at `GET /driver/packages/history` instead —
+> the write path (`purchase` + `proof`) already works today.
