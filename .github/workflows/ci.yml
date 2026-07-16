@@ -82,3 +82,44 @@ jobs:
           tags: rides-api:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── 4. Integration tests (real Postgres + Redis) ──────────────────────────
+  # The tier the unit suite can't be: spins up real Postgres (PostGIS) + Redis
+  # service containers, applies the REAL migrations, and exercises the
+  # repository/service layer with a real *pgxpool.Pool. This is what catches a
+  # bad SQL query, a broken migration, or a violated DB constraint BEFORE it
+  # reaches staging/prod — the mock-based unit tests cannot. Tests live in
+  # api-server/test/dbit behind the `integration` build tag.
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: rides
+          POSTGRES_PASSWORD: rides
+          POSTGRES_DB: rides_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rides -d rides_test"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api-server/go.mod
+          cache-dependency-path: api-server/go.sum
+      - name: Run DB-backed integration tests
+        env:
+          TEST_DATABASE_URL: postgres://rides:rides@localhost:5432/rides_test?sslmode=disable
+          TEST_REDIS_URL: redis://localhost:6379
+        run: go test -tags=integration -count=1 ./test/dbit/...
