@@ -44,6 +44,21 @@ jobs:
           echo "value=$SHA" >> "$GITHUB_OUTPUT"
           echo "Promoting image tag $SHA to production"
 
+      - name: Notify Telegram — prod deploy approved & starting
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHA: ${{ steps.sha.outputs.value }}
+          REL: ${{ github.event.release.tag_name || github.event.inputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -z "$TELEGRAM_BOT_TOKEN" ] && { echo "no telegram secret — skipping"; exit 0; }
+          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '\r\n')
+          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '\r\n')
+          curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=🟢 PROD deploy APPROVED — release ${REL} (sha ${SHA:0:12}) → promoting to api.rides.rw (migrate + smoke test)"$'\n'"$RUN_URL" >/dev/null || true
+
       - name: Set up SSH
         run: |
           install -m 700 -d ~/.ssh
@@ -56,6 +71,28 @@ jobs:
           SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
           git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
           $SSH "cd /opt/rides/Rides-api/api-server && ./deploy/deploy.sh prod ${{ steps.sha.outputs.value }}"
+
+      - name: Notify Telegram — prod result
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHA: ${{ steps.sha.outputs.value }}
+          REL: ${{ github.event.release.tag_name || github.event.inputs.sha }}
+          STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -z "$TELEGRAM_BOT_TOKEN" ] && { echo "no telegram secret — skipping"; exit 0; }
+          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '\r\n')
+          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '\r\n')
+          if [ "$STATUS" = "success" ]; then
+            TEXT="✅ PROD LIVE — ${REL} (sha ${SHA:0:12}) healthy at https://api.rides.rw/health"
+          else
+            TEXT="🚨 PROD deploy FAILED ($STATUS) — auto-rolled back to previous release. Check now: ${RUN_URL}"
+          fi
+          curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=${TEXT}" >/dev/null || true
 
       - name: Deployment summary
         if: always()
