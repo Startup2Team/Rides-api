@@ -1040,6 +1040,11 @@ func main() {
 			r.Get("/negotiations", adminH.ListNegotiations)
 			r.Get("/negotiations/{id}", adminH.GetNegotiation)
 
+			// Push Notifications Campaigns
+			r.Post("/notifications", adminH.CreateNotificationCampaign)
+			r.Get("/notifications", adminH.ListNotificationCampaigns)
+			r.Delete("/notifications/{id}", adminH.DeleteNotificationCampaign)
+
 			// Safety incidents
 			r.Get("/incidents/stats", incidentH.Stats)
 			r.Get("/incidents", incidentH.List)

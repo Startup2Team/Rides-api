@@ -1162,3 +1162,93 @@ func TestListRides_WithOneRow(t *testing.T) {
 	assert.Equal(t, 1, total)
 	assert.Len(t, rides, 1)
 }
+
+// ── Push Notification Campaigns ──────────────────────────────────────────
+
+type customMockTx struct {
+	pgx.Tx
+	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
+	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func (t *customMockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if t.queryRowFn != nil {
+		return t.queryRowFn(ctx, sql, args...)
+	}
+	return errRow(pgx.ErrNoRows)
+}
+
+func (t *customMockTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if t.execFn != nil {
+		return t.execFn(ctx, sql, args...)
+	}
+	return pgconn.CommandTag{}, nil
+}
+
+func (t *customMockTx) Commit(ctx context.Context) error   { return nil }
+func (t *customMockTx) Rollback(ctx context.Context) error { return nil }
+
+func TestCreateNotificationCampaign_Success(t *testing.T) {
+	now := time.Now()
+	svc := newTestService(&mockDB{
+		beginFn: func(_ context.Context) (pgx.Tx, error) {
+			return &customMockTx{
+				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+					return scanRow("campaign-id", "SENT", now, now)
+				},
+				execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+					return pgconn.NewCommandTag("INSERT 10"), nil
+				},
+			}, nil
+		},
+	})
+
+	campaign, err := svc.CreateNotificationCampaign(context.Background(), "Promo Title", "Promo Body", "ALL", "admin-id")
+	require.NoError(t, err)
+	assert.Equal(t, "campaign-id", campaign["id"])
+	assert.Equal(t, "Promo Title", campaign["title"])
+	assert.Equal(t, "Promo Body", campaign["body"])
+	assert.Equal(t, "ALL", campaign["audience"])
+	assert.Equal(t, "SENT", campaign["status"])
+}
+
+func TestListNotificationCampaigns_Success(t *testing.T) {
+	now := time.Now()
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow(1) // total count
+		},
+		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+			return &funcRows{scanFns: []func(...any) error{
+				func(dest ...any) error {
+					*dest[0].(*string) = "campaign-id"
+					*dest[1].(*string) = "Promo Title"
+					*dest[2].(*string) = "Promo Body"
+					*dest[3].(*string) = "DRIVERS"
+					*dest[4].(*string) = "SENT"
+					*dest[5].(*time.Time) = now
+					*dest[6].(*string) = "admin-id"
+					*dest[7].(*time.Time) = now
+					return nil
+				},
+			}}, nil
+		},
+	})
+
+	campaigns, total, err := svc.ListNotificationCampaigns(context.Background(), 20, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, campaigns, 1)
+	assert.Equal(t, "campaign-id", campaigns[0]["id"])
+}
+
+func TestDeleteNotificationCampaign_Success(t *testing.T) {
+	svc := newTestService(&mockDB{
+		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("DELETE 1"), nil
+		},
+	})
+
+	err := svc.DeleteNotificationCampaign(context.Background(), "campaign-id")
+	assert.NoError(t, err)
+}
