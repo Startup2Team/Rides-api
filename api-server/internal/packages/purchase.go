@@ -576,7 +576,6 @@ func (s *PurchaseService) ReconcileSingle(ctx context.Context, purchaseID string
 	return s.repo.getPurchaseByID(ctx, purchaseID)
 }
 
-
 // providerCode maps the stored payment_provider ("mtn"/"airtel") to the gateway
 // provider constant.
 func providerCode(stored string) string {

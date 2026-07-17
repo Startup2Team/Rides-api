@@ -754,4 +754,3 @@ func (h *Handler) AdminReconcilePurchase(w http.ResponseWriter, r *http.Request)
 	h.audit.Record(r.Context(), adminID, role, "package_purchase.reconcile", "package_purchases", id, fmt.Sprintf("Admin manually reconciled purchase %s → %s", id, p.Status), map[string]any{"status": p.Status})
 	respond.OK(w, p)
 }
-

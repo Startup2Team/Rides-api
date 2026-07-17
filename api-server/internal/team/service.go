@@ -676,4 +676,3 @@ func secureRandomNumber(min, max int) int {
 	}
 	return min + val%(max-min+1)
 }
-

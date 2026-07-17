@@ -938,7 +938,6 @@ func main() {
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_verify_reset_otp", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/verify-reset-otp", teamH.VerifyResetOTP)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_reset_password", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/reset-password", teamH.ResetPassword)
 
-
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
 		r.Use(mw.AuthenticateAdmin(cfg, rdb))
@@ -1213,7 +1212,6 @@ func main() {
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
 			r.Patch("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
-
 
 			// Entitlements admin (ledger-backed)
 			r.Get("/entitlements", pkgH.AdminListEntitlements)

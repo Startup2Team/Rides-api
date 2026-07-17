@@ -52,7 +52,6 @@ type mockSvc struct {
 	resetPasswordFn    func(ctx context.Context, resetToken, newPassword string) error
 }
 
-
 func (m *mockSvc) Login(ctx context.Context, email, password string) (*team.LoginResult, error) {
 	return m.loginFn(ctx, email, password)
 }
@@ -172,7 +171,6 @@ func (m *mockSvc) ResetPassword(ctx context.Context, resetToken, newPassword str
 	}
 	return nil
 }
-
 
 type dummyDB struct{}
 
