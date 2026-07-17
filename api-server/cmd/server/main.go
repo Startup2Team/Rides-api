@@ -39,9 +39,9 @@ import (
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
 	mw "github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/internal/monetization"
 	"github.com/workspace/ride-platform/internal/negotiation"
 	"github.com/workspace/ride-platform/internal/notification"
-	"github.com/workspace/ride-platform/internal/monetization"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
 	"github.com/workspace/ride-platform/internal/rating"
@@ -207,7 +207,6 @@ func main() {
 	teamRepo := team.NewRepository(db)
 	monetizationRepo := monetization.NewRepository(db)
 
-
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
 	// Redis-backed so WebSocket delivery works across multiple API instances.
 	hub := tracking.NewHub(rdb, log) // starts its Redis pub/sub subscriber internally
@@ -343,7 +342,6 @@ func main() {
 	teamH := team.NewHandler(teamSvc, auditLog)
 	dashH := dashboard.NewHandler(dashSvc)
 	monetizationH := monetization.NewHandler(monetizationSvc, auditLog)
-
 
 	// ── Background goroutines ─────────────────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -948,7 +946,6 @@ func main() {
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_verify_reset_otp", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/verify-reset-otp", teamH.VerifyResetOTP)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_reset_password", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/reset-password", teamH.ResetPassword)
 
-
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
 		r.Use(mw.AuthenticateAdmin(cfg, rdb))
@@ -1237,8 +1234,6 @@ func main() {
 			r.Post("/adverts", monetizationH.CreateAdvert)
 			r.Patch("/adverts/{id}", monetizationH.UpdateAdvert)
 			r.Delete("/adverts/{id}", monetizationH.DeleteAdvert)
-
-
 
 			// Entitlements admin (ledger-backed)
 			r.Get("/entitlements", pkgH.AdminListEntitlements)
