@@ -1,0 +1,3 @@
+ALTER TABLE reports DROP COLUMN IF EXISTS file_data;
+ALTER TABLE reports DROP COLUMN IF EXISTS content_type;
+ALTER TABLE reports DROP COLUMN IF EXISTS file_name;

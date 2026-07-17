@@ -499,6 +499,10 @@ func TestDeleteDriver_DBError(t *testing.T) {
 
 func TestInterveneRide_Success(t *testing.T) {
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			driverID := "driver-uuid"
+			return scanRow("customer-uuid", &driverID)
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			// A live ride was updated (RowsAffected=1) — passes the state guard.
 			return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -510,6 +514,10 @@ func TestInterveneRide_Success(t *testing.T) {
 func TestInterveneRide_DBError(t *testing.T) {
 	dbErr := errors.New("exec failed")
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			driverID := "driver-uuid"
+			return scanRow("customer-uuid", &driverID)
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			return pgconn.CommandTag{}, dbErr
 		},
@@ -782,6 +790,10 @@ func TestGetNegotiation_DelegatesToGetRide_NotFound(t *testing.T) {
 
 func TestInterveneRide_ForceComplete(t *testing.T) {
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			driverID := "driver-uuid"
+			return scanRow("customer-uuid", &driverID)
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			return pgconn.NewCommandTag("UPDATE 1"), nil
 		},

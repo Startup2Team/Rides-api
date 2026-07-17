@@ -44,7 +44,7 @@ func (r *Repository) List(ctx context.Context, status, format string, limit, off
 
 	args = append(args, limit, offset)
 	rows, err := r.db.Query(ctx,
-		`SELECT id, template, status, format, date_range, file_size, file_path, generated_at, created_by, created_at `+
+		`SELECT id, template, status, format, date_range, file_size, file_path, COALESCE(content_type, ''), COALESCE(file_name, ''), generated_at, created_by, created_at `+
 			base+where+` ORDER BY created_at DESC LIMIT $`+itoa(n)+` OFFSET $`+itoa(n+1),
 		args...)
 	if err != nil {
@@ -56,7 +56,7 @@ func (r *Repository) List(ctx context.Context, status, format string, limit, off
 	for rows.Next() {
 		rep := &Report{}
 		if err := rows.Scan(&rep.ID, &rep.Template, &rep.Status, &rep.Format,
-			&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt); err != nil {
+			&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.ContentType, &rep.FileName, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, rep)
@@ -67,10 +67,10 @@ func (r *Repository) List(ctx context.Context, status, format string, limit, off
 func (r *Repository) FindByID(ctx context.Context, id string) (*Report, error) {
 	rep := &Report{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, template, status, format, date_range, file_size, file_path, generated_at, created_by, created_at
+		SELECT id, template, status, format, date_range, file_size, file_path, COALESCE(content_type, ''), COALESCE(file_name, ''), file_data, generated_at, created_by, created_at
 		FROM reports WHERE id = $1
 	`, id).Scan(&rep.ID, &rep.Template, &rep.Status, &rep.Format,
-		&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
+		&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.ContentType, &rep.FileName, &rep.FileData, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
 	return rep, err
 }
 
@@ -79,18 +79,18 @@ func (r *Repository) Create(ctx context.Context, template, format, dateRange str
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO reports (template, format, date_range, created_by)
 		VALUES ($1,$2,$3,$4)
-		RETURNING id, template, status, format, date_range, file_size, file_path, generated_at, created_by, created_at
+		RETURNING id, template, status, format, date_range, file_size, file_path, COALESCE(content_type, ''), COALESCE(file_name, ''), generated_at, created_by, created_at
 	`, template, format, dateRange, createdBy).Scan(
 		&rep.ID, &rep.Template, &rep.Status, &rep.Format,
-		&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
+		&rep.DateRange, &rep.FileSize, &rep.FilePath, &rep.ContentType, &rep.FileName, &rep.GeneratedAt, &rep.CreatedBy, &rep.CreatedAt)
 	return rep, err
 }
 
-func (r *Repository) MarkReady(ctx context.Context, id, filePath, fileSize string) error {
+func (r *Repository) MarkReady(ctx context.Context, id, filePath, fileSize string, fileData []byte, contentType, fileName string) error {
 	now := time.Now()
 	_, err := r.db.Exec(ctx,
-		`UPDATE reports SET status='READY', file_path=$1, file_size=$2, generated_at=$3 WHERE id=$4`,
-		filePath, fileSize, now, id)
+		`UPDATE reports SET status='READY', file_path=$1, file_size=$2, file_data=$3, content_type=$4, file_name=$5, generated_at=$6 WHERE id=$7`,
+		filePath, fileSize, fileData, contentType, fileName, now, id)
 	return err
 }
 

@@ -10,6 +10,9 @@ type Report struct {
 	DateRange   *string    `json:"date_range"`
 	FileSize    *string    `json:"file_size"`
 	FilePath    *string    `json:"file_path"`
+	FileData    []byte     `json:"-"`
+	ContentType string     `json:"content_type,omitempty"`
+	FileName    string     `json:"file_name,omitempty"`
 	GeneratedAt *time.Time `json:"generated_at"`
 	CreatedBy   *string    `json:"created_by"`
 	CreatedAt   time.Time  `json:"created_at"`

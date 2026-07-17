@@ -2,6 +2,7 @@ package reports
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -43,19 +44,45 @@ func (s *Service) GetByID(ctx context.Context, id string) (*Report, error) {
 	return rep, nil
 }
 
+func formatFileSize(size int) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	return fmt.Sprintf("%.1f KB", float64(size)/1024.0)
+}
+
 func (s *Service) Generate(ctx context.Context, template, format, dateRange string, createdBy *string) (*Report, error) {
 	rep, err := s.repo.Create(ctx, template, format, dateRange, createdBy)
 	if err != nil {
 		return nil, err
 	}
-	// Content is generated on demand at download time from live data, so the
-	// report is immediately ready. (No fake path/size — the previous stub wrote
-	// a made-up file that never existed.)
-	if err := s.repo.MarkReady(ctx, rep.ID, "", ""); err != nil {
+
+	var data []byte
+	var contentType, filename string
+	if s.build != nil {
+		var buildErr error
+		data, contentType, filename, buildErr = s.build(ctx, template, format, &dateRange)
+		if buildErr != nil {
+			_ = s.repo.MarkFailed(ctx, rep.ID)
+			return nil, buildErr
+		}
+	} else {
+		contentType = "text/csv"
+		filename = template + ".csv"
+	}
+
+	sizeStr := formatFileSize(len(data))
+	if err := s.repo.MarkReady(ctx, rep.ID, filename, sizeStr, data, contentType, filename); err != nil {
 		_ = s.repo.MarkFailed(ctx, rep.ID)
 		return nil, err
 	}
+
 	rep.Status = "READY"
+	rep.FilePath = &filename
+	rep.FileSize = &sizeStr
+	rep.ContentType = contentType
+	rep.FileName = filename
+	rep.FileData = data
 	return rep, nil
 }
 
@@ -65,6 +92,9 @@ func (s *Service) Build(ctx context.Context, id string) (data []byte, contentTyp
 	rep, err := s.GetByID(ctx, id)
 	if err != nil {
 		return nil, "", "", err
+	}
+	if len(rep.FileData) > 0 {
+		return rep.FileData, rep.ContentType, rep.FileName, nil
 	}
 	if s.build == nil {
 		return nil, "", "", apperrors.New(http.StatusNotImplemented, "NOT_IMPLEMENTED", "report generation is not configured")
