@@ -41,6 +41,7 @@ import (
 	mw "github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/internal/negotiation"
 	"github.com/workspace/ride-platform/internal/notification"
+	"github.com/workspace/ride-platform/internal/monetization"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
 	"github.com/workspace/ride-platform/internal/rating"
@@ -204,6 +205,8 @@ func main() {
 	reportRepo := reports.NewRepository(db)
 	settingsRepo := settings.NewRepository(db)
 	teamRepo := team.NewRepository(db)
+	monetizationRepo := monetization.NewRepository(db)
+
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
 	// Redis-backed so WebSocket delivery works across multiple API instances.
@@ -216,6 +219,8 @@ func main() {
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
+	monetizationSvc := monetization.NewService(monetizationRepo)
+
 	// Note: the go-online credit gate is wired to the v4 ledger (ledgerSvc) below,
 	// once it is constructed — NOT to pkgSvc, whose HasCredits reads the legacy
 	// driver_ride_credits table that the v4 cutover no longer populates.
@@ -337,6 +342,8 @@ func main() {
 	settingsH := settings.NewHandler(settingsSvc)
 	teamH := team.NewHandler(teamSvc, auditLog)
 	dashH := dashboard.NewHandler(dashSvc)
+	monetizationH := monetization.NewHandler(monetizationSvc, auditLog)
+
 
 	// ── Background goroutines ─────────────────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -920,6 +927,9 @@ func main() {
 		})
 	})
 
+	// Public active ads banner endpoint for mobile clients
+	r.Get(apiV1Prefix+"/adverts/active", monetizationH.ListActiveAdverts)
+
 	// ── Active ride (reconnect recovery) ─────────────────────────────────────
 	r.With(mw.Authenticate(cfg, rdb)).Get(apiV1Prefix+"/rides/active", locH.GetActiveRide)
 
@@ -1213,6 +1223,21 @@ func main() {
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
 			r.Patch("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
+
+			// Partners admin CRUD
+			r.Get("/partners", monetizationH.ListPartners)
+			r.Get("/partners/{id}", monetizationH.GetPartner)
+			r.Post("/partners", monetizationH.CreatePartner)
+			r.Patch("/partners/{id}", monetizationH.UpdatePartner)
+			r.Delete("/partners/{id}", monetizationH.DeletePartner)
+
+			// Adverts admin CRUD
+			r.Get("/adverts", monetizationH.ListAdverts)
+			r.Get("/adverts/{id}", monetizationH.GetAdvert)
+			r.Post("/adverts", monetizationH.CreateAdvert)
+			r.Patch("/adverts/{id}", monetizationH.UpdateAdvert)
+			r.Delete("/adverts/{id}", monetizationH.DeleteAdvert)
+
 
 
 			// Entitlements admin (ledger-backed)
