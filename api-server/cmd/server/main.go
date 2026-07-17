@@ -41,8 +41,10 @@ import (
 	mw "github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/internal/negotiation"
 	"github.com/workspace/ride-platform/internal/notification"
+	"github.com/workspace/ride-platform/internal/packagepayments"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
+	"github.com/workspace/ride-platform/internal/paymentmethods"
 	"github.com/workspace/ride-platform/internal/rating"
 	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
@@ -328,6 +330,14 @@ func main() {
 	ratingRepo := rating.NewRepository(db)
 	ratingH := rating.NewHandler(ratingRepo, log)
 	notifH := notification.NewHandler(notifRepo)
+
+	// Customer-managed payment methods (Flow F) + driver manual package-payment
+	// claims (Flow J) — the two mobile payment contracts.
+	payMethodsH := paymentmethods.NewHandler(paymentmethods.NewService(paymentmethods.NewRepository(db)))
+	pkgPaymentsH := packagepayments.NewHandler(packagepayments.NewService(
+		packagepayments.NewRepository(db),
+		packagepayments.Config{MTNMerchantCode: cfg.Payments.ManualMomoCode},
+	))
 
 	// New module handlers
 	incidentH := incidents.NewHandler(incidentSvc)
@@ -878,6 +888,39 @@ func main() {
 		// Multi-device FCM registration.
 		r.Post("/me/device-token", notifH.RegisterDeviceToken)
 		r.Delete("/me/device-token", notifH.UnregisterDeviceToken)
+	})
+
+	// ── Payment methods (Flow F — customer-managed MoMo/cash methods) ────────
+	r.Route(apiV1Prefix+"/payments", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.UserRateLimit429(rdb, "payments_group", 300, time.Minute))
+		r.Use(mw.RequireNotSuspended())
+		// A driver account is also a customer, so allow the driver role states too.
+		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
+
+		r.Get("/methods", payMethodsH.List)
+		r.Get("/methods/default", payMethodsH.Default)
+		r.Get("/billing-profile", payMethodsH.BillingProfile)
+		r.Post("/methods", payMethodsH.Add)
+		r.Patch("/methods/{id}", payMethodsH.Update)
+		r.Delete("/methods/{id}", payMethodsH.Delete)
+		r.Patch("/methods/{id}/default", payMethodsH.SetDefault)
+	})
+
+	// ── Package payments (Flow J — driver manual-payment claim lifecycle) ────
+	r.Route(apiV1Prefix+"/package-payments", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.UserRateLimit429(rdb, "package_payments_group", 300, time.Minute))
+		r.Use(mw.RequireNotSuspended())
+		r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending))
+
+		r.Get("/configuration", pkgPaymentsH.Configuration)
+		r.Get("/manual-claims", pkgPaymentsH.List)
+		r.Post("/manual-claims", pkgPaymentsH.Create)
+		r.Get("/manual-claims/{id}", pkgPaymentsH.Get)
+		r.Post("/manual-claims/{id}/submit", pkgPaymentsH.Submit)
+		r.Post("/manual-claims/{id}/resubmit", pkgPaymentsH.Resubmit)
+		r.Post("/manual-claims/{id}/cancel", pkgPaymentsH.Cancel)
 	})
 
 	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────
