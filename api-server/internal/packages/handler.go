@@ -694,3 +694,64 @@ func (h *Handler) AdminListPackageSubscribers(w http.ResponseWriter, r *http.Req
 	}
 	respond.OK(w, subs)
 }
+
+// PATCH /api/v1/admin/campaigns/{id}/status
+func (h *Handler) AdminSetCampaignStatus(w http.ResponseWriter, r *http.Request) {
+	adminID, role := adminCtx(r)
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "campaign id is required")
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Status == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "status is required")
+		return
+	}
+
+	err := h.svc.AdminSetCampaignStatus(r.Context(), id, body.Status)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	campaign, err := h.svc.GetCampaignByID(r.Context(), id)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	action := "campaign.update_status"
+	if body.Status == "active" {
+		action = "campaign.activate"
+	} else if body.Status == "expired" {
+		action = "campaign.expire"
+	} else if body.Status == "archived" {
+		action = "campaign.archive"
+	}
+
+	h.audit.Record(r.Context(), adminID, role, action, "campaigns", id, fmt.Sprintf("Set campaign %s status to %s", campaign.Name, body.Status), map[string]any{"status": body.Status})
+	respond.OK(w, campaign)
+}
+
+// POST /api/v1/admin/packages-purchases/{id}/reconcile
+func (h *Handler) AdminReconcilePurchase(w http.ResponseWriter, r *http.Request) {
+	adminID, role := adminCtx(r)
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "purchase id is required")
+		return
+	}
+
+	p, err := h.purchase.ReconcileSingle(r.Context(), id)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	h.audit.Record(r.Context(), adminID, role, "package_purchase.reconcile", "package_purchases", id, fmt.Sprintf("Admin manually reconciled purchase %s → %s", id, p.Status), map[string]any{"status": p.Status})
+	respond.OK(w, p)
+}
+

@@ -35,4 +35,7 @@ type TeamService interface {
 	UpdateProfile(ctx context.Context, id, name, phone, photoURL string) error
 	ChangePassword(ctx context.Context, id, currentPassword, newPassword string) error
 	SetPassword(ctx context.Context, id, password string) error
+	ForgotPassword(ctx context.Context, email string) error
+	VerifyResetOTP(ctx context.Context, email, otp string) (string, error)
+	ResetPassword(ctx context.Context, resetToken, newPassword string) error
 }

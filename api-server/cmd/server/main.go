@@ -934,6 +934,11 @@ func main() {
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
 
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_forgot_password", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/forgot-password", teamH.ForgotPassword)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_verify_reset_otp", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/verify-reset-otp", teamH.VerifyResetOTP)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_reset_password", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/reset-password", teamH.ResetPassword)
+
+
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
 		r.Use(mw.AuthenticateAdmin(cfg, rdb))
@@ -1197,12 +1202,18 @@ func main() {
 				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
 				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
 			).Post("/packages-purchases/{id}/confirm", pkgH.AdminConfirmPurchase)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/packages-purchases/{id}/reconcile", pkgH.AdminReconcilePurchase)
 
 			// Campaigns admin CRUD
 			r.Get("/campaigns", pkgH.AdminListCampaigns)
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
+			r.Patch("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
+
 
 			// Entitlements admin (ledger-backed)
 			r.Get("/entitlements", pkgH.AdminListEntitlements)

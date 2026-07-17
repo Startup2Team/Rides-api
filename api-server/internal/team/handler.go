@@ -661,3 +661,59 @@ func (h *Handler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 	respond.OK(w, map[string]interface{}{"entries": entries, "total": total, "limit": limit, "offset": offset})
 }
+
+// POST /api/v1/admin/auth/forgot-password
+func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Email == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+	err := h.svc.ForgotPassword(r.Context(), body.Email)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"status": "sent"})
+}
+
+// POST /api/v1/admin/auth/verify-reset-otp
+func (h *Handler) VerifyResetOTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email   string `json:"email"`
+		OtpCode string `json:"otp_code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Email == "" || body.OtpCode == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "email and otp_code are required")
+		return
+	}
+	token, err := h.svc.VerifyResetOTP(r.Context(), body.Email, body.OtpCode)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{
+		"reset_token": token,
+	})
+}
+
+// POST /api/v1/admin/auth/reset-password
+func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ResetToken  string `json:"reset_token"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ResetToken == "" || len(body.NewPassword) < 8 {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "reset_token and 8+ character new_password are required")
+		return
+	}
+	err := h.svc.ResetPassword(r.Context(), body.ResetToken, body.NewPassword)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]string{"status": "success"})
+}
+
