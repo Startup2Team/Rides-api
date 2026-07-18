@@ -74,6 +74,31 @@ services:
       - default
       - rides-edge # shared with prod nginx so it can proxy stg-api.rides.rw
 
+  # Staging admin/landing (Rides-web). Built from source on the box like prod
+  # (../../Rides-web is shipped there by Rides-web's deploy), but with the
+  # STAGING api URL baked into the browser bundle at build time. Reached by prod
+  # nginx over rides-edge as `rides-staging-admin` for stg-admin.rides.rw.
+  admin:
+    build:
+      context: ../../Rides-web
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_API_URL is baked at build → must point at the staging API.
+        NEXT_PUBLIC_API_URL: https://stg-api.rides.rw/api/v1
+    container_name: rides-staging-admin
+    restart: always
+    environment:
+      # Server-side (Next route handlers) → staging api on the internal network.
+      # Origin only; the app appends /api/v1 itself.
+      BACKEND_ORIGIN: http://api:8080
+    ports:
+      - "127.0.0.1:3100:3000" # loopback for direct/testing; nginx uses rides-edge
+    depends_on:
+      - api
+    networks:
+      - default
+      - rides-edge # prod nginx proxies stg-admin.rides.rw → rides-staging-admin:3000
+
 volumes:
   postgres_data_staging:
   redis_data_staging:
