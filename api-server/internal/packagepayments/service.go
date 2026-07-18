@@ -30,15 +30,14 @@ const (
 // floor(amount / pricePerRideRwf[code]) rides on approval. The mobile reads the
 // same map from GET /configuration and never hardcodes these numbers.
 //
-// Owner-provided values: MOTO_BIKE=30, CAB_TAXI=200, HEAVY_FUSO=100,
-// TUK_TUK=700 (the "rifani"/"lifani" vehicle — mobile 'rifani' maps to backend
-// TUK_TUK). LIGHT_HILUX ('hilux') was left to us to pick a sensible value; 150
-// sits between HEAVY_FUSO (100) and CAB_TAXI (200) — CONFIRM with the owner.
+// Owner-confirmed values: MOTO_BIKE=30, CAB_TAXI=200, HEAVY_FUSO=1000,
+// LIGHT_HILUX=1000, TUK_TUK=700 (the "rifani"/"lifani" vehicle — mobile 'rifani'
+// maps to backend TUK_TUK).
 var pricePerRideRwf = map[string]int64{
 	"MOTO_BIKE":   30,
 	"CAB_TAXI":    200,
-	"HEAVY_FUSO":  100,
-	"LIGHT_HILUX": 150, // chosen by us — pending owner confirmation
+	"HEAVY_FUSO":  1000,
+	"LIGHT_HILUX": 1000,
 	"TUK_TUK":     700, // rifani / "lifani"
 }
 
