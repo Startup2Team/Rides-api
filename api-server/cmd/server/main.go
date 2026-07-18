@@ -334,10 +334,16 @@ func main() {
 	// Customer-managed payment methods (Flow F) + driver manual package-payment
 	// claims (Flow J) — the two mobile payment contracts.
 	payMethodsH := paymentmethods.NewHandler(paymentmethods.NewService(paymentmethods.NewRepository(db)))
-	pkgPaymentsH := packagepayments.NewHandler(packagepayments.NewService(
+	pkgPaymentsSvc := packagepayments.NewService(
 		packagepayments.NewRepository(db),
 		packagepayments.Config{MTNMerchantCode: cfg.Payments.ManualMomoCode},
-	))
+	)
+	// On approval, grant the claim's package rides via the SAME entitlement
+	// ledger path as a real MoMo settlement, and persist the driver's in-app
+	// review notification (FCM delivery is owned by the notification service).
+	pkgPaymentsSvc.SetGranter(purchaseSvc)
+	pkgPaymentsSvc.SetNotifier(notifySvc)
+	pkgPaymentsH := packagepayments.NewHandler(pkgPaymentsSvc)
 
 	// New module handlers
 	incidentH := incidents.NewHandler(incidentSvc)
@@ -1241,6 +1247,20 @@ func main() {
 				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
 			).Post("/packages-purchases/{id}/confirm", pkgH.AdminConfirmPurchase)
 
+			// Manual package-payment claims (v2 flow): review queue + approve/reject.
+			// Approval grants the claim's package rides via the entitlement ledger
+			// (same path as AdminConfirmPurchase), so it is finance-gated,
+			// rate-limited per admin, and audited on the claim's log.
+			r.Get("/package-payments/manual-claims", pkgPaymentsH.AdminList)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/package-payments/manual-claims/{id}/approve", pkgPaymentsH.AdminApprove)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/package-payments/manual-claims/{id}/reject", pkgPaymentsH.AdminReject)
+
 			// Campaigns admin CRUD
 			r.Get("/campaigns", pkgH.AdminListCampaigns)
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
@@ -1281,6 +1301,7 @@ func main() {
 	rideSvc.SetPackagesService(ledgerSvc)  // v4: charge/refund via the ledger
 	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
+	adminSvc.SetNotifier(notifySvc) // push driver approve/reject decisions to the driver's devices
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// WriteTimeout must be 0 when serving WebSockets — a global write timeout

@@ -42,11 +42,14 @@ func expiryMessage(a DocumentAlert) (title, body string) {
 	}
 }
 
-// expiryNotifier is the piece of the notification service the job needs —
-// an interface so tests can fake it and to keep the driver→notification
-// coupling minimal.
+// expiryNotifier is the piece of the notification service the driver domain
+// needs — an interface so tests can fake it and to keep the driver→notification
+// coupling minimal. It covers both the document-expiry job (SendToUser) and the
+// application-lifecycle / low-credit pushes (SendToAllDevices, which persists an
+// in-app record and pushes to every registered device, pruning dead tokens).
 type expiryNotifier interface {
 	SendToUser(ctx context.Context, userID, fcmToken, title, body, nType string, data map[string]string) error
+	SendToAllDevices(ctx context.Context, userID, title, body, nType string, data map[string]string)
 }
 
 // SetExpiryNotifier wires the notification service (called from main after

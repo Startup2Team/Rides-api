@@ -29,6 +29,14 @@ type PackagesService interface {
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
 }
 
+// Notifier persists an in-app notification and pushes it to every device the
+// user has registered (dead tokens pruned). Satisfied by *notification.Service.
+// Wired via SetNotifier so admin approve/reject decisions reach the driver's
+// phone as a push, not only a status change they must poll for.
+type Notifier interface {
+	SendToAllDevices(ctx context.Context, userID, title, body, nType string, data map[string]string)
+}
+
 // Service handles admin business logic.
 type Service struct {
 	db       DBTX
@@ -36,6 +44,7 @@ type Service struct {
 	packages PackagesService
 	rdb      goredis.UniversalClient
 	bonus    BonusService
+	notifier Notifier
 }
 
 func NewService(db DBTX, log zerolog.Logger) *Service {
@@ -44,6 +53,7 @@ func NewService(db DBTX, log zerolog.Logger) *Service {
 
 func (s *Service) SetPackagesService(svc PackagesService) { s.packages = svc }
 func (s *Service) SetBonusService(svc BonusService)       { s.bonus = svc }
+func (s *Service) SetNotifier(n Notifier)                 { s.notifier = n }
 
 // SetRedis wires the Redis client used by account-assist operations
 // (clearing OTP lockouts, GPS anomaly counters).
