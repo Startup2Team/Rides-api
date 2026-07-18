@@ -178,6 +178,13 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_PENDING"); err != nil {
 			return nil, fmt.Errorf("update role state: %w", err)
 		}
+		// Confirm receipt so the applicant knows their submission landed and is in
+		// the review queue (in-app + push to every registered device).
+		if s.expiryNotifier != nil {
+			s.expiryNotifier.SendToAllDevices(ctx, in.UserID, "Application received",
+				"We've received your driver application. We'll review your documents and let you know as soon as it's approved.",
+				"driver", map[string]string{"type": "driver_application_received"})
+		}
 	}
 
 	return profile, nil
@@ -278,6 +285,13 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 				return err
 			}
 			if !hasCredits {
+				// Surface the block as an in-app + push notification so the driver
+				// sees it even after they navigate away from the go-online error.
+				if s.expiryNotifier != nil {
+					s.expiryNotifier.SendToAllDevices(ctx, userID, "Buy a package to keep riding",
+						"You're out of ride credits. Purchase a package to go online and accept rides.",
+						"driver", map[string]string{"type": "credits_low"})
+				}
 				return apperrors.New(http.StatusPaymentRequired, "NO_CREDITS", "Buy a package to keep riding.")
 			}
 		}

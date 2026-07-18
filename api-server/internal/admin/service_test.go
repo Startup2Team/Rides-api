@@ -263,6 +263,10 @@ func TestApproveDriver_DBError(t *testing.T) {
 func TestRejectDriver_Success(t *testing.T) {
 	called := false
 	svc := newTestService(&mockDB{
+		// RejectDriver first looks up the driver's user_id (to notify them).
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("driver-user-uuid")
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			called = true
 			return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -276,6 +280,10 @@ func TestRejectDriver_Success(t *testing.T) {
 func TestRejectDriver_DBError(t *testing.T) {
 	dbErr := errors.New("exec failed")
 	svc := newTestService(&mockDB{
+		// user_id lookup succeeds; the UPDATE is what fails here.
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("driver-user-uuid")
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			return pgconn.CommandTag{}, dbErr
 		},
