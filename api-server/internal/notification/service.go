@@ -35,6 +35,19 @@ type fcmClient interface {
 	Send(ctx context.Context, token, title, body string, data map[string]string) error
 }
 
+// defaultService is a process-wide handle to the notification Service so
+// packages that cannot take it as a constructor dependency (e.g. internal/auth,
+// which is wired before the service's repository is attached) can still emit
+// notifications. It is set the moment New() constructs the service; the same
+// pointer later has its repository attached via SetRepository, so callers see a
+// fully-wired service. Callers MUST nil-check via Default().
+var defaultService *Service
+
+// Default returns the process-wide notification service, or nil if none has been
+// constructed yet. Used by packages (e.g. auth) that emit notifications but are
+// wired without a direct reference to the service.
+func Default() *Service { return defaultService }
+
 func New(cfg *config.Config, log zerolog.Logger) *Service {
 	var client fcmClient
 
@@ -51,7 +64,9 @@ func New(cfg *config.Config, log zerolog.Logger) *Service {
 		client = &noopClient{log: log}
 	}
 
-	return &Service{cfg: cfg, log: log, client: client}
+	s := &Service{cfg: cfg, log: log, client: client}
+	defaultService = s
+	return s
 }
 
 // SetRepository wires the DB persistence layer (optional — set after construction
