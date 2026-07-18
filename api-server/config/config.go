@@ -164,6 +164,10 @@ type StorageConfig struct {
 	// Endpoint overrides the S3 API host for S3-compatible stores (MinIO in dev,
 	// or any self-hosted gateway). Empty = real AWS S3 (default endpoints).
 	Endpoint string
+	// AccountID is the Cloudflare ACCOUNT ID used to build the R2 API host
+	// (https://<AccountID>.r2.cloudflarestorage.com) when Provider=r2 and no
+	// explicit Endpoint is set. R2's host uses the account id, NOT the key id.
+	AccountID string
 }
 
 type MatchingConfig struct {
@@ -293,6 +297,7 @@ func Load() (*Config, error) {
 	cfg.Storage.Secret = getEnv("STORAGE_SECRET", "")
 	cfg.Storage.CDNURL = getEnv("STORAGE_CDN_URL", "")
 	cfg.Storage.Endpoint = getEnv("STORAGE_ENDPOINT", "")
+	cfg.Storage.AccountID = getEnv("STORAGE_ACCOUNT_ID", "")
 
 	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 5000)
 	cfg.Matching.ExpandedRadiusM = getEnvInt("MATCH_RADIUS_EXPANDED_M", 10000)
