@@ -21,8 +21,69 @@ type Config struct {
 
 const (
 	claimExpiresAfterMinutes = 120
-	configVersion            = "v1"
+	configVersion            = "v2"
 )
+
+// pricePerRideRwf is the owner-set price (RWF) of one ride credit per backend
+// vehicle-type code. It is the SINGLE SOURCE OF TRUTH for the custom-amount
+// top-up feature: a driver enters an amount and is granted
+// floor(amount / pricePerRideRwf[code]) rides on approval. The mobile reads the
+// same map from GET /configuration and never hardcodes these numbers.
+//
+// Owner-provided values: MOTO_BIKE=30, CAB_TAXI=200, HEAVY_FUSO=100,
+// TUK_TUK=700 (the "rifani"/"lifani" vehicle — mobile 'rifani' maps to backend
+// TUK_TUK). LIGHT_HILUX ('hilux') was left to us to pick a sensible value; 150
+// sits between HEAVY_FUSO (100) and CAB_TAXI (200) — CONFIRM with the owner.
+var pricePerRideRwf = map[string]int64{
+	"MOTO_BIKE":   30,
+	"CAB_TAXI":    200,
+	"HEAVY_FUSO":  100,
+	"LIGHT_HILUX": 150, // chosen by us — pending owner confirmation
+	"TUK_TUK":     700, // rifani / "lifani"
+}
+
+// vehicleDomainToCode maps the mobile's short vehicle names to backend codes so
+// the grant path accepts a claim's vehicle_type in either form.
+var vehicleDomainToCode = map[string]string{
+	"moto":   "MOTO_BIKE",
+	"cab":    "CAB_TAXI",
+	"fuso":   "HEAVY_FUSO",
+	"hilux":  "LIGHT_HILUX",
+	"rifani": "TUK_TUK",
+}
+
+// normalizeVehicleCode resolves a claim's vehicle_type (a backend code like
+// "MOTO_BIKE" or a mobile domain value like "moto") to the canonical backend
+// code used to look up price-per-ride and to grant on the ledger.
+func normalizeVehicleCode(v string) string {
+	up := strings.ToUpper(strings.TrimSpace(v))
+	if _, ok := pricePerRideRwf[up]; ok {
+		return up
+	}
+	if code, ok := vehicleDomainToCode[strings.ToLower(strings.TrimSpace(v))]; ok {
+		return code
+	}
+	return up
+}
+
+// isCustomClaim reports whether a claim is a custom-amount top-up (no package).
+// Custom claims carry an empty package_id; the ride count is derived from the
+// amount and the per-vehicle price-per-ride instead of a fixed package.
+func isCustomClaim(c *Claim) bool {
+	return strings.TrimSpace(c.PackageID) == ""
+}
+
+// ridesForCustomClaim computes floor(expected_amount / pricePerRide[vehicle])
+// for a custom-amount claim. Returns false if the vehicle type has no known
+// price or the amount buys no rides.
+func ridesForCustomClaim(c *Claim) (code string, rides int, ok bool) {
+	code = normalizeVehicleCode(c.VehicleType)
+	ppr, known := pricePerRideRwf[code]
+	if !known || ppr <= 0 || c.ExpectedAmountRwf < ppr {
+		return code, 0, false
+	}
+	return code, int(c.ExpectedAmountRwf / ppr), true
+}
 
 type Service struct {
 	repo *Repository
@@ -87,8 +148,9 @@ func (s *Service) Configuration() *Configuration {
 			ProofImageEnabled:            true,
 			ProofImageRequired:           false,
 		},
-		Version:   configVersion,
-		UpdatedAt: s.configuredAt,
+		PricePerRideRwf: pricePerRideRwf,
+		Version:         configVersion,
+		UpdatedAt:       s.configuredAt,
 	}
 }
 
@@ -110,7 +172,22 @@ func (s *Service) Create(ctx context.Context, userID string, in CreateInput) (*C
 	if in.IdempotencyKey == "" {
 		return nil, apperrors.New(http.StatusUnprocessableEntity, "INVALID_CLAIM", "idempotency_key is required")
 	}
-	if in.VehicleID == "" || in.OfferID == "" || in.PackageID == "" || in.PayerPhoneNumber == "" || in.ExpectedAmountRwf <= 0 {
+	if in.VehicleID == "" || in.PayerPhoneNumber == "" || in.ExpectedAmountRwf <= 0 {
+		return nil, apperrors.New(http.StatusUnprocessableEntity, "INVALID_CLAIM", "missing required claim fields")
+	}
+	// A claim is either a fixed package (package_id set, offer_id set) or a
+	// custom-amount top-up (package_id omitted). Custom claims must name a
+	// vehicle type with a known price-per-ride so the grant can compute rides.
+	custom := strings.TrimSpace(in.PackageID) == ""
+	if custom {
+		code := normalizeVehicleCode(in.VehicleType)
+		if _, ok := pricePerRideRwf[code]; !ok {
+			return nil, apperrors.New(http.StatusUnprocessableEntity, "INVALID_VEHICLE_TYPE", "custom top-up requires a known vehicle type")
+		}
+		if in.ExpectedAmountRwf < pricePerRideRwf[code] {
+			return nil, apperrors.New(http.StatusUnprocessableEntity, "INVALID_CLAIM", "amount is below the price of one ride")
+		}
+	} else if in.OfferID == "" {
 		return nil, apperrors.New(http.StatusUnprocessableEntity, "INVALID_CLAIM", "missing required claim fields")
 	}
 	merchantCode, ok := s.merchantCodeFor(in.Provider)

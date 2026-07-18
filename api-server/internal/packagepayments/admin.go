@@ -23,6 +23,11 @@ import (
 // resulting purchase id so the claim can reference it.
 type PackageGranter interface {
 	GrantForManualClaim(ctx context.Context, userID, packageID, adminID string) (purchaseID string, err error)
+	// GrantCustomForManualClaim grants a custom-amount top-up: `rides` credits for
+	// the given backend vehicle-type code, posted to the entitlement ledger via
+	// the same admin-grant path used for support grants. Returns a reference id
+	// the claim can record in place of a package purchase id.
+	GrantCustomForManualClaim(ctx context.Context, userID, vehicleTypeCode string, rides int, adminID string) (referenceID string, err error)
 }
 
 // Notifier creates an in-app notification for the driver. Implemented by the
@@ -157,7 +162,19 @@ func (s *Service) Approve(ctx context.Context, id, adminID string) (*Claim, erro
 		return nil, apperrors.New(http.StatusServiceUnavailable, "GRANTER_UNAVAILABLE", "package granting is not configured")
 	}
 
-	purchaseID, err := s.granter.GrantForManualClaim(ctx, ownerUserID, current.PackageID, adminID)
+	// A custom-amount top-up (no package_id) grants floor(amount / price-per-ride)
+	// rides for the claim's vehicle type; a package claim grants the package's
+	// fixed rides. Both post to the same entitlement ledger.
+	var purchaseID string
+	if isCustomClaim(current) {
+		code, rides, ok := ridesForCustomClaim(current)
+		if !ok {
+			return nil, apperrors.New(http.StatusUnprocessableEntity, "INVALID_CUSTOM_CLAIM", "cannot resolve rides for this custom amount / vehicle type")
+		}
+		purchaseID, err = s.granter.GrantCustomForManualClaim(ctx, ownerUserID, code, rides, adminID)
+	} else {
+		purchaseID, err = s.granter.GrantForManualClaim(ctx, ownerUserID, current.PackageID, adminID)
+	}
 	if err != nil {
 		return nil, err
 	}

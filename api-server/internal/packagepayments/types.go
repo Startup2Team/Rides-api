@@ -90,8 +90,13 @@ type ManualConfig struct {
 
 // Configuration is the GET /configuration response.
 type Configuration struct {
-	Mode      string        `json:"mode"` // manual | automatic | disabled
-	Manual    *ManualConfig `json:"manual"`
-	Version   string        `json:"version"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	Mode   string        `json:"mode"` // manual | automatic | disabled
+	Manual *ManualConfig `json:"manual"`
+	// PricePerRideRwf is the owner-set price of one ride credit, keyed by backend
+	// vehicle-type code (MOTO_BIKE, CAB_TAXI, HEAVY_FUSO, LIGHT_HILUX, TUK_TUK).
+	// It is the single source of truth the mobile reads to preview how many rides
+	// a custom top-up amount buys: rides = floor(amount / price_per_ride_rwf[code]).
+	PricePerRideRwf map[string]int64 `json:"price_per_ride_rwf"`
+	Version         string           `json:"version"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }

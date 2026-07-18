@@ -505,6 +505,27 @@ func (s *PurchaseService) GrantForManualClaim(ctx context.Context, userID, packa
 	return p.ID, nil
 }
 
+// GrantCustomForManualClaim settles an APPROVED custom-amount top-up claim: it
+// resolves the driver profile from their auth user id and grants `rides` ride
+// credits for the given vehicle-type code straight to the entitlement ledger
+// (ADMIN_GRANT), the same path support agents use to add credits. There is no
+// package, so it returns a synthetic reference the claim records in place of a
+// purchase id. Implements packagepayments.PackageGranter.
+func (s *PurchaseService) GrantCustomForManualClaim(ctx context.Context, userID, vehicleTypeCode string, rides int, adminID string) (string, error) {
+	if rides <= 0 {
+		return "", fmt.Errorf("custom claim grant: non-positive ride count")
+	}
+	profileID, _, err := s.repo.driverProfileAndActiveVehicle(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	ref := "manual-custom-" + uuid.NewString()
+	if err := s.ledger.AdminGrantByCode(ctx, profileID, vehicleTypeCode, adminID, rides, 0, "manual custom top-up ("+ref+")"); err != nil {
+		return "", fmt.Errorf("custom claim grant: %w", err)
+	}
+	return ref, nil
+}
+
 // ── MoMo reconciliation (Option A) ───────────────────────────────────────────
 
 // ReconcilePending is the authoritative settlement path for live MoMo: it polls
