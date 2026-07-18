@@ -846,6 +846,7 @@ func main() {
 			r.Get("/bonuses", bonusH.DriverGrants)
 			r.Get("/bonuses/tiers", bonusH.ListActiveTiers)
 
+			r.Get("/rides", rideH.ListDriverRides)
 			r.Get("/rides/active", rideH.GetActiveRideForDriver)
 			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, ledgerSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
