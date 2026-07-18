@@ -482,6 +482,29 @@ func (s *PurchaseService) AdminCreateOnBehalf(ctx context.Context, adminID strin
 	return s.repo.getPurchaseByID(ctx, id)
 }
 
+// GrantForManualClaim settles an APPROVED manual-payment claim (v2 flow): it
+// resolves the claim's driver profile from their auth user id, snapshots the
+// current offer for the claim's package, records a PAID purchase (provider
+// MANUAL), and grants the package's rides/bonus to the entitlement ledger via
+// the SAME path as a real MoMo settlement (AdminCreateOnBehalf with mark-paid).
+// Returns the purchase id so the claim can reference it. Implements
+// packagepayments.PackageGranter.
+func (s *PurchaseService) GrantForManualClaim(ctx context.Context, userID, packageID, adminID string) (string, error) {
+	profileID, _, err := s.repo.driverProfileAndActiveVehicle(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	p, err := s.AdminCreateOnBehalf(ctx, adminID, AdminCreateInput{
+		DriverID:  profileID,
+		PackageID: packageID,
+		MarkPaid:  true,
+	})
+	if err != nil {
+		return "", err
+	}
+	return p.ID, nil
+}
+
 // ── MoMo reconciliation (Option A) ───────────────────────────────────────────
 
 // ReconcilePending is the authoritative settlement path for live MoMo: it polls

@@ -30,6 +30,11 @@ type Service struct {
 	// configuredAt is a stable timestamp so the configuration payload's
 	// updated_at doesn't churn on every poll.
 	configuredAt time.Time
+	// granter grants an approved claim's package rides via the entitlement
+	// ledger; notifier persists the driver's in-app review notification. Both
+	// are wired in main (SetGranter/SetNotifier) and may be nil in tests.
+	granter  PackageGranter
+	notifier Notifier
 }
 
 func NewService(repo *Repository, cfg Config) *Service {
