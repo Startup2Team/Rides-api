@@ -223,7 +223,9 @@ func (s *Service) notifyDriver(ctx context.Context, userID string, c *Claim, dec
 	default:
 		return
 	}
-	s.notifier.PersistForUser(ctx, userID, title, body, "package_payment_review", data)
+	// NOTE: notifications.type is VARCHAR(20); keep this classifier ≤20 chars.
+	// The review outcome (approved/rejected) is carried in data["type"].
+	s.notifier.PersistForUser(ctx, userID, title, body, "pkg_payment_review", data)
 }
 
 // ── Handler (admin) ───────────────────────────────────────────────────────────
