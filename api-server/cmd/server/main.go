@@ -42,8 +42,10 @@ import (
 	"github.com/workspace/ride-platform/internal/monetization"
 	"github.com/workspace/ride-platform/internal/negotiation"
 	"github.com/workspace/ride-platform/internal/notification"
+	"github.com/workspace/ride-platform/internal/packagepayments"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
+	"github.com/workspace/ride-platform/internal/paymentmethods"
 	"github.com/workspace/ride-platform/internal/rating"
 	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
@@ -332,6 +334,20 @@ func main() {
 	ratingRepo := rating.NewRepository(db)
 	ratingH := rating.NewHandler(ratingRepo, log)
 	notifH := notification.NewHandler(notifRepo)
+
+	// Customer-managed payment methods (Flow F) + driver manual package-payment
+	// claims (Flow J) — the two mobile payment contracts.
+	payMethodsH := paymentmethods.NewHandler(paymentmethods.NewService(paymentmethods.NewRepository(db)))
+	pkgPaymentsSvc := packagepayments.NewService(
+		packagepayments.NewRepository(db),
+		packagepayments.Config{MTNMerchantCode: cfg.Payments.ManualMomoCode},
+	)
+	// On approval, grant the claim's package rides via the SAME entitlement
+	// ledger path as a real MoMo settlement, and persist the driver's in-app
+	// review notification (FCM delivery is owned by the notification service).
+	pkgPaymentsSvc.SetGranter(purchaseSvc)
+	pkgPaymentsSvc.SetNotifier(notifySvc)
+	pkgPaymentsH := packagepayments.NewHandler(pkgPaymentsSvc)
 
 	// New module handlers
 	incidentH := incidents.NewHandler(incidentSvc)
@@ -835,6 +851,7 @@ func main() {
 			r.Get("/bonuses", bonusH.DriverGrants)
 			r.Get("/bonuses/tiers", bonusH.ListActiveTiers)
 
+			r.Get("/rides", rideH.ListDriverRides)
 			r.Get("/rides/active", rideH.GetActiveRideForDriver)
 			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, ledgerSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
@@ -883,6 +900,39 @@ func main() {
 		// Multi-device FCM registration.
 		r.Post("/me/device-token", notifH.RegisterDeviceToken)
 		r.Delete("/me/device-token", notifH.UnregisterDeviceToken)
+	})
+
+	// ── Payment methods (Flow F — customer-managed MoMo/cash methods) ────────
+	r.Route(apiV1Prefix+"/payments", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.UserRateLimit429(rdb, "payments_group", 300, time.Minute))
+		r.Use(mw.RequireNotSuspended())
+		// A driver account is also a customer, so allow the driver role states too.
+		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
+
+		r.Get("/methods", payMethodsH.List)
+		r.Get("/methods/default", payMethodsH.Default)
+		r.Get("/billing-profile", payMethodsH.BillingProfile)
+		r.Post("/methods", payMethodsH.Add)
+		r.Patch("/methods/{id}", payMethodsH.Update)
+		r.Delete("/methods/{id}", payMethodsH.Delete)
+		r.Patch("/methods/{id}/default", payMethodsH.SetDefault)
+	})
+
+	// ── Package payments (Flow J — driver manual-payment claim lifecycle) ────
+	r.Route(apiV1Prefix+"/package-payments", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.UserRateLimit429(rdb, "package_payments_group", 300, time.Minute))
+		r.Use(mw.RequireNotSuspended())
+		r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending))
+
+		r.Get("/configuration", pkgPaymentsH.Configuration)
+		r.Get("/manual-claims", pkgPaymentsH.List)
+		r.Post("/manual-claims", pkgPaymentsH.Create)
+		r.Get("/manual-claims/{id}", pkgPaymentsH.Get)
+		r.Post("/manual-claims/{id}/submit", pkgPaymentsH.Submit)
+		r.Post("/manual-claims/{id}/resubmit", pkgPaymentsH.Resubmit)
+		r.Post("/manual-claims/{id}/cancel", pkgPaymentsH.Cancel)
 	})
 
 	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────
@@ -1219,6 +1269,20 @@ func main() {
 				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
 			).Post("/packages-purchases/{id}/reconcile", pkgH.AdminReconcilePurchase)
 
+			// Manual package-payment claims (v2 flow): review queue + approve/reject.
+			// Approval grants the claim's package rides via the entitlement ledger
+			// (same path as AdminConfirmPurchase), so it is finance-gated,
+			// rate-limited per admin, and audited on the claim's log.
+			r.Get("/package-payments/manual-claims", pkgPaymentsH.AdminList)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/package-payments/manual-claims/{id}/approve", pkgPaymentsH.AdminApprove)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/package-payments/manual-claims/{id}/reject", pkgPaymentsH.AdminReject)
+
 			// Campaigns admin CRUD
 			r.Get("/campaigns", pkgH.AdminListCampaigns)
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
@@ -1274,6 +1338,7 @@ func main() {
 	rideSvc.SetPackagesService(ledgerSvc)  // v4: charge/refund via the ledger
 	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
+	adminSvc.SetNotifier(notifySvc) // push driver approve/reject decisions to the driver's devices
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// WriteTimeout must be 0 when serving WebSockets — a global write timeout

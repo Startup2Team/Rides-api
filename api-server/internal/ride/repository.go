@@ -593,6 +593,25 @@ func (repo *Repository) ListByCustomer(ctx context.Context, customerID string, l
 	return scanRidesWithDriver(rows)
 }
 
+// ListByDriver returns rides handled by the driver whose profile belongs to
+// userID. rides.driver_id references driver_profiles.id, so we scope through the
+// driver_profiles → users join (the JWT carries the user id, not the profile id).
+func (repo *Repository) ListByDriver(ctx context.Context, userID string, limit, offset int) ([]*Ride, error) {
+	rows, err := repo.db.Query(ctx,
+		`SELECT `+rideSelectColsWithDriver+`
+		 FROM rides r
+		 LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
+		 LEFT JOIN users du ON du.id = dp.user_id
+		 WHERE dp.user_id = $1 ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
+		userID, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRidesWithDriver(rows)
+}
+
 func scanRides(rows pgx.Rows) ([]*Ride, error) {
 	var rides []*Ride
 	for rows.Next() {

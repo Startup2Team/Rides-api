@@ -482,6 +482,50 @@ func (s *PurchaseService) AdminCreateOnBehalf(ctx context.Context, adminID strin
 	return s.repo.getPurchaseByID(ctx, id)
 }
 
+// GrantForManualClaim settles an APPROVED manual-payment claim (v2 flow): it
+// resolves the claim's driver profile from their auth user id, snapshots the
+// current offer for the claim's package, records a PAID purchase (provider
+// MANUAL), and grants the package's rides/bonus to the entitlement ledger via
+// the SAME path as a real MoMo settlement (AdminCreateOnBehalf with mark-paid).
+// Returns the purchase id so the claim can reference it. Implements
+// packagepayments.PackageGranter.
+func (s *PurchaseService) GrantForManualClaim(ctx context.Context, userID, packageID, adminID string) (string, error) {
+	profileID, _, err := s.repo.driverProfileAndActiveVehicle(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	p, err := s.AdminCreateOnBehalf(ctx, adminID, AdminCreateInput{
+		DriverID:  profileID,
+		PackageID: packageID,
+		MarkPaid:  true,
+	})
+	if err != nil {
+		return "", err
+	}
+	return p.ID, nil
+}
+
+// GrantCustomForManualClaim settles an APPROVED custom-amount top-up claim: it
+// resolves the driver profile from their auth user id and grants `rides` ride
+// credits for the given vehicle-type code straight to the entitlement ledger
+// (ADMIN_GRANT), the same path support agents use to add credits. There is no
+// package, so it returns a synthetic reference the claim records in place of a
+// purchase id. Implements packagepayments.PackageGranter.
+func (s *PurchaseService) GrantCustomForManualClaim(ctx context.Context, userID, vehicleTypeCode string, rides int, adminID string) (string, error) {
+	if rides <= 0 {
+		return "", fmt.Errorf("custom claim grant: non-positive ride count")
+	}
+	profileID, _, err := s.repo.driverProfileAndActiveVehicle(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	ref := "manual-custom-" + uuid.NewString()
+	if err := s.ledger.AdminGrantByCode(ctx, profileID, vehicleTypeCode, adminID, rides, 0, "manual custom top-up ("+ref+")"); err != nil {
+		return "", fmt.Errorf("custom claim grant: %w", err)
+	}
+	return ref, nil
+}
+
 // ── MoMo reconciliation (Option A) ───────────────────────────────────────────
 
 // ReconcilePending is the authoritative settlement path for live MoMo: it polls

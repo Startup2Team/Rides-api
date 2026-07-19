@@ -100,6 +100,10 @@ services:
       DATABASE_URL: postgres://ride:ride_secret@postgres:5432/rideplatform?sslmode=disable
       REDIS_URL: redis://redis:6379
       PORT: "8080"
+    volumes:
+      # Mount the real Firebase service account (gitignored) over the baked
+      # placeholder so the FCM client initializes without a rebuild.
+      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
     depends_on:
       postgres:
         condition: service_healthy
