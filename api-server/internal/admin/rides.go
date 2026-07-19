@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -293,6 +294,14 @@ func (s *Service) InterveneRide(ctx context.Context, rideID, action, reason stri
 		return apperrors.New(http.StatusBadRequest, "INVALID_ACTION", "action must be cancel or force-complete")
 	}
 
+	// Fetch customer and driver IDs to notify them via WebSockets
+	var customerID string
+	var driverID *string
+	err := s.db.QueryRow(ctx, `SELECT customer_id, driver_id FROM rides WHERE id = $1`, rideID).Scan(&customerID, &driverID)
+	if err != nil {
+		return err
+	}
+
 	tag, err := s.db.Exec(ctx, fmt.Sprintf(`UPDATE rides SET %s WHERE id=$1 AND %s`, setClause, guard), rideID)
 	if err != nil {
 		return err
@@ -306,5 +315,29 @@ func (s *Service) InterveneRide(ctx context.Context, rideID, action, reason stri
 		INSERT INTO ride_events (ride_id, event_type, actor_role, actor_id, payload)
 		VALUES ($1, $2, 'ADMIN', 'admin', $3)`,
 		rideID, "ride.admin_intervene", map[string]interface{}{"action": action, "reason": reason, "new_status": newStatus})
+
+	// Publish real-time events over Redis Pub/Sub so websocket clients update immediately
+	if s.rdb != nil {
+		msg := map[string]interface{}{
+			"type":    "ride.updated",
+			"ride_id": rideID,
+			"payload": map[string]interface{}{
+				"ride_id":    rideID,
+				"status":     newStatus,
+				"reason":     reason,
+				"intervened": true,
+			},
+		}
+		payload, _ := json.Marshal(msg)
+
+		// Notify customer
+		_ = s.rdb.Publish(ctx, "ws:ride:"+rideID, string(payload)).Err()
+
+		// Notify driver if assigned
+		if driverID != nil && *driverID != "" {
+			_ = s.rdb.Publish(ctx, "ws:driver:"+*driverID, string(payload)).Err()
+		}
+	}
+
 	return nil
 }

@@ -575,6 +575,58 @@ func (s *PurchaseService) ReconcilePending(ctx context.Context) (int, error) {
 	return settled, nil
 }
 
+// ReconcileSingle settles a single package purchase by querying the MoMo gateway.
+func (s *PurchaseService) ReconcileSingle(ctx context.Context, purchaseID string) (*Purchase, error) {
+	p, err := s.repo.getPurchaseByID(ctx, purchaseID)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, apperrors.ErrNotFound
+	}
+
+	if p.Status != "pending" {
+		return p, nil
+	}
+
+	if s.momo == nil {
+		// No live gateway. ONLY simulate a successful settlement when the dev
+		// auto-confirm flag is set (non-prod + payments disabled). In every
+		// other case we must NOT grant credits without a real payment — that
+		// would be free money in production if the gateway were misconfigured.
+		if !s.devAutoConfirm {
+			return nil, apperrors.New(http.StatusServiceUnavailable, "GATEWAY_UNAVAILABLE",
+				"payment gateway is not configured; cannot reconcile this purchase")
+		}
+		if err := s.confirm(ctx, p.PaymentRef, "MOMO-DEV-"+p.PaymentRef, true); err != nil {
+			return nil, err
+		}
+		return s.repo.getPurchaseByID(ctx, purchaseID)
+	}
+
+	provider := "mtn"
+	if p.PaymentProvider != nil {
+		provider = *p.PaymentProvider
+	}
+	status, err := s.momo.QueryStatus(ctx, providerCode(provider), p.PaymentRef)
+	if err != nil {
+		return nil, err
+	}
+
+	switch status {
+	case "SUCCESS":
+		if err := s.confirm(ctx, p.PaymentRef, "MOMO-"+p.PaymentRef, true); err != nil {
+			return nil, err
+		}
+	case "FAILED":
+		if err := s.confirm(ctx, p.PaymentRef, "", false); err != nil {
+			return nil, err
+		}
+	}
+
+	return s.repo.getPurchaseByID(ctx, purchaseID)
+}
+
 // providerCode maps the stored payment_provider ("mtn"/"airtel") to the gateway
 // provider constant.
 func providerCode(stored string) string {

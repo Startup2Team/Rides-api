@@ -9,6 +9,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
@@ -546,7 +547,7 @@ func TestPreAuthToken_Invalid(t *testing.T) {
 
 func TestNewService_Constructor(t *testing.T) {
 	rdb := newTestRedis(t)
-	svc := NewService(&mockRepo{}, testCfg(), rdb)
+	svc := NewService(&mockRepo{}, testCfg(), rdb, zerolog.Nop())
 	require.NotNil(t, svc)
 }
 

@@ -1,0 +1,3 @@
+ALTER TABLE reports ADD COLUMN file_data BYTEA;
+ALTER TABLE reports ADD COLUMN content_type VARCHAR(100);
+ALTER TABLE reports ADD COLUMN file_name VARCHAR(255);

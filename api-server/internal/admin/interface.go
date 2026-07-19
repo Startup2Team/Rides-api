@@ -47,4 +47,7 @@ type AdminService interface {
 	InterveneRide(ctx context.Context, rideID, action, reason string) error
 	UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error
 	LaunchReadiness(ctx context.Context) (map[string]interface{}, error)
+	CreateNotificationCampaign(ctx context.Context, title, body, audience, createdBy string) (map[string]interface{}, error)
+	ListNotificationCampaigns(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error)
+	DeleteNotificationCampaign(ctx context.Context, id string) error
 }
