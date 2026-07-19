@@ -1198,16 +1198,14 @@ func (t *customMockTx) Rollback(ctx context.Context) error { return nil }
 
 func TestCreateNotificationCampaign_Success(t *testing.T) {
 	now := time.Now()
+	// No notifier wired → campaign is recorded (QueryRow) then delivered
+	// feed-only via a set-based insert (Exec).
 	svc := newTestService(&mockDB{
-		beginFn: func(_ context.Context) (pgx.Tx, error) {
-			return &customMockTx{
-				queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
-					return scanRow("campaign-id", "SENT", now, now)
-				},
-				execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-					return pgconn.NewCommandTag("INSERT 10"), nil
-				},
-			}, nil
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("campaign-id", "SENT", now, now)
+		},
+		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("INSERT 10"), nil
 		},
 	})
 

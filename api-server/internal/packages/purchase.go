@@ -590,7 +590,14 @@ func (s *PurchaseService) ReconcileSingle(ctx context.Context, purchaseID string
 	}
 
 	if s.momo == nil {
-		// In dev/test without a live gateway, auto-confirm it
+		// No live gateway. ONLY simulate a successful settlement when the dev
+		// auto-confirm flag is set (non-prod + payments disabled). In every
+		// other case we must NOT grant credits without a real payment — that
+		// would be free money in production if the gateway were misconfigured.
+		if !s.devAutoConfirm {
+			return nil, apperrors.New(http.StatusServiceUnavailable, "GATEWAY_UNAVAILABLE",
+				"payment gateway is not configured; cannot reconcile this purchase")
+		}
 		if err := s.confirm(ctx, p.PaymentRef, "MOMO-DEV-"+p.PaymentRef, true); err != nil {
 			return nil, err
 		}

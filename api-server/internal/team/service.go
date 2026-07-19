@@ -14,6 +14,7 @@ import (
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/workspace/ride-platform/config"
@@ -43,10 +44,11 @@ type Service struct {
 	repo TeamRepo
 	cfg  *config.Config
 	rdb  goredis.UniversalClient
+	log  zerolog.Logger
 }
 
-func NewService(repo TeamRepo, cfg *config.Config, rdb goredis.UniversalClient) *Service {
-	return &Service{repo: repo, cfg: cfg, rdb: rdb}
+func NewService(repo TeamRepo, cfg *config.Config, rdb goredis.UniversalClient, log zerolog.Logger) *Service {
+	return &Service{repo: repo, cfg: cfg, rdb: rdb, log: log}
 }
 
 // ── Admin management ──────────────────────────────────────────────────────
@@ -592,9 +594,12 @@ func (s *Service) ForgotPassword(ctx context.Context, emailAddress string) error
 		<p>This code expires in 10 minutes. If you did not request this, please ignore this email.</p>
 	`, admin.Name, otpCode)
 
-	fmt.Printf("[RESET PASSWORD OTP] Email: %s, Code: %s\n", emailAddress, otpCode)
-
-	_ = email.SendEmail(ctx, emailAddress, "Your Password Reset OTP", htmlContent)
+	// Deliver via email only. Never log the OTP. If delivery fails we log
+	// server-side (so ops can act) but still return success — surfacing the
+	// error to the caller would leak which emails are registered.
+	if err := email.SendEmail(ctx, emailAddress, "Your Password Reset OTP", htmlContent); err != nil {
+		s.log.Error().Err(err).Str("email", emailAddress).Msg("admin reset: failed to send OTP email")
+	}
 	return nil
 }
 
@@ -661,10 +666,37 @@ func (s *Service) ResetPassword(ctx context.Context, resetToken, newPassword str
 		return err
 	}
 
+	// A password reset must not leave old sessions valid — revoke them all so a
+	// leaked/stolen session can't outlive the reset. Best-effort.
+	s.revokeAllAdminSessions(ctx, admin.ID)
+
 	// Log audit action
 	s.LogAction(ctx, admin.ID, "account.password_reset", "admin_accounts", admin.ID, "Password reset successfully via email recovery flow", "")
 
 	return nil
+}
+
+// revokeAllAdminSessions deletes every active Redis session for an admin
+// (`session:<adminID>:*`). Best-effort: failures are logged, not fatal.
+func (s *Service) revokeAllAdminSessions(ctx context.Context, adminID string) {
+	pattern := fmt.Sprintf("session:%s:*", adminID)
+	var cursor uint64
+	for {
+		keys, cur, err := s.rdb.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			s.log.Warn().Err(err).Str("admin_id", adminID).Msg("admin reset: scan sessions failed")
+			return
+		}
+		if len(keys) > 0 {
+			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+				s.log.Warn().Err(err).Str("admin_id", adminID).Msg("admin reset: delete sessions failed")
+			}
+		}
+		cursor = cur
+		if cursor == 0 {
+			return
+		}
+	}
 }
 
 func secureRandomNumber(min, max int) int {

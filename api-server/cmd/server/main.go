@@ -247,7 +247,7 @@ func main() {
 	inboxSvc := inbox.NewService(inboxRepo)
 	reportSvc := reports.NewService(reportRepo)
 	settingsSvc := settings.NewService(settingsRepo)
-	teamSvc := team.NewService(teamRepo, cfg, rdb)
+	teamSvc := team.NewService(teamRepo, cfg, rdb, log)
 	dashSvc := dashboard.NewService(dbRead, rdb, log)
 
 	financeRepo := finance.NewRepository(db)

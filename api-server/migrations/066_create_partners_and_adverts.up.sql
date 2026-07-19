@@ -1,5 +1,5 @@
 CREATE TABLE partners (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
     logo_url TEXT,
     contact_name VARCHAR(255) NOT NULL,
@@ -10,7 +10,7 @@ CREATE TABLE partners (
 );
 
 CREATE TABLE adverts (
-    id UUID PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     partner_id UUID NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
     image_url TEXT,
     headline VARCHAR(255) NOT NULL,
