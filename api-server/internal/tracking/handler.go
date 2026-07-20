@@ -193,8 +193,18 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				h.log.Error().Err(err).Str("user_id", claims.UserID).Msg("ws: driver unexpected close")
+			// A mobile client disconnecting is NORMAL, not an error worth paging on:
+			// app reload/background/network blips close with 1000/1001/1005/1006.
+			// Only genuinely unexpected close codes (e.g. protocol errors) are worth
+			// noting, and at WARN — not ERROR — so they don't fire alerts.
+			if websocket.IsUnexpectedCloseError(
+				err,
+				websocket.CloseNormalClosure,
+				websocket.CloseGoingAway,
+				websocket.CloseNoStatusReceived,
+				websocket.CloseAbnormalClosure,
+			) {
+				h.log.Warn().Err(err).Str("user_id", claims.UserID).Msg("ws: driver closed with unexpected code")
 			}
 			break
 		}

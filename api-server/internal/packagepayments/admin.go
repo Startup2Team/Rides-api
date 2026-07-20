@@ -30,11 +30,14 @@ type PackageGranter interface {
 	GrantCustomForManualClaim(ctx context.Context, userID, vehicleTypeCode string, rides int, adminID string) (referenceID string, err error)
 }
 
-// Notifier creates an in-app notification for the driver. Implemented by the
-// notification service (PersistForUser). FCM delivery is owned elsewhere — we
-// only persist the in-app record here.
+// Notifier delivers the driver's review-decision notification. Implemented by
+// the notification service. SendToAllDevices both persists the in-app record
+// AND pushes an FCM notification to every device the driver has registered, so
+// a backgrounded app wakes on an approve/reject decision. PersistForUser is
+// kept for the in-app-only fallback path.
 type Notifier interface {
 	PersistForUser(ctx context.Context, userID, title, body, nType string, data map[string]string)
+	SendToAllDevices(ctx context.Context, userID, title, body, nType string, data map[string]string)
 }
 
 // SetGranter wires the entitlement grant path used on approval.
@@ -213,9 +216,10 @@ func (s *Service) Reject(ctx context.Context, id, adminID, reason, clarification
 	return s.hydrate(ctx, updated)
 }
 
-// notifyDriver persists an in-app notification for the driver on a review
-// decision. Best-effort; a nil notifier (or persist failure) never blocks the
-// review. FCM delivery is handled by the notification service / push agent.
+// notifyDriver delivers the driver's review-decision notification. It calls
+// SendToAllDevices, which persists the in-app record AND pushes an FCM
+// notification to every registered device so a backgrounded app wakes.
+// Best-effort; a nil notifier (or delivery failure) never blocks the review.
 func (s *Service) notifyDriver(ctx context.Context, userID string, c *Claim, decision, clarification string) {
 	if s.notifier == nil || userID == "" {
 		return
@@ -242,7 +246,9 @@ func (s *Service) notifyDriver(ctx context.Context, userID string, c *Claim, dec
 	}
 	// NOTE: notifications.type is VARCHAR(20); keep this classifier ≤20 chars.
 	// The review outcome (approved/rejected) is carried in data["type"].
-	s.notifier.PersistForUser(ctx, userID, title, body, "pkg_payment_review", data)
+	// SendToAllDevices persists the in-app record AND fires the FCM push, so we
+	// call it alone — a separate PersistForUser would create a duplicate row.
+	s.notifier.SendToAllDevices(ctx, userID, title, body, "pkg_payment_review", data)
 }
 
 // ── Handler (admin) ───────────────────────────────────────────────────────────
