@@ -47,6 +47,9 @@ type mockSvc struct {
 	changePasswordFn   func(ctx context.Context, id, current, newPw string) error
 	setPasswordFn      func(ctx context.Context, id, password string) error
 	listAuditLogFn     func(ctx context.Context, actor, action, targetType, from, to string, limit, offset int) ([]team.AuditEntry, int, error)
+	forgotPasswordFn   func(ctx context.Context, email string) error
+	verifyResetOTPFn   func(ctx context.Context, email, otp string) (string, error)
+	resetPasswordFn    func(ctx context.Context, resetToken, newPassword string) error
 }
 
 func (m *mockSvc) Login(ctx context.Context, email, password string) (*team.LoginResult, error) {
@@ -149,6 +152,24 @@ func (m *mockSvc) ListAuditLog(ctx context.Context, actor, action, targetType, f
 		return m.listAuditLogFn(ctx, actor, action, targetType, from, to, limit, offset)
 	}
 	return nil, 0, nil
+}
+func (m *mockSvc) ForgotPassword(ctx context.Context, email string) error {
+	if m.forgotPasswordFn != nil {
+		return m.forgotPasswordFn(ctx, email)
+	}
+	return nil
+}
+func (m *mockSvc) VerifyResetOTP(ctx context.Context, email, otp string) (string, error) {
+	if m.verifyResetOTPFn != nil {
+		return m.verifyResetOTPFn(ctx, email, otp)
+	}
+	return "test-reset-token", nil
+}
+func (m *mockSvc) ResetPassword(ctx context.Context, resetToken, newPassword string) error {
+	if m.resetPasswordFn != nil {
+		return m.resetPasswordFn(ctx, resetToken, newPassword)
+	}
+	return nil
 }
 
 type dummyDB struct{}

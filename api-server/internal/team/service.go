@@ -14,6 +14,7 @@ import (
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/workspace/ride-platform/config"
@@ -43,10 +44,11 @@ type Service struct {
 	repo TeamRepo
 	cfg  *config.Config
 	rdb  goredis.UniversalClient
+	log  zerolog.Logger
 }
 
-func NewService(repo TeamRepo, cfg *config.Config, rdb goredis.UniversalClient) *Service {
-	return &Service{repo: repo, cfg: cfg, rdb: rdb}
+func NewService(repo TeamRepo, cfg *config.Config, rdb goredis.UniversalClient, log zerolog.Logger) *Service {
+	return &Service{repo: repo, cfg: cfg, rdb: rdb, log: log}
 }
 
 // ── Admin management ──────────────────────────────────────────────────────
@@ -564,4 +566,145 @@ func (s *Service) SendWelcomeEmail(ctx context.Context, id, tempPassword, loginU
 
 	htmlContent := email.BuildWelcomeEmail(a.Name, a.Email, a.RoleName, tempPassword, loginURL)
 	return email.SendEmail(ctx, a.Email, "Welcome to Rides", htmlContent)
+}
+
+func (s *Service) ForgotPassword(ctx context.Context, emailAddress string) error {
+	admin, _, err := s.repo.FindByEmail(ctx, emailAddress)
+	if err != nil || admin == nil {
+		// Silently succeed to prevent account enumeration
+		return nil
+	}
+
+	// Generate a 6-digit numeric OTP code
+	otpCode := fmt.Sprintf("%06d", secureRandomNumber(100000, 999999))
+
+	// Save OTP in Redis (expires in 10 minutes)
+	redisKey := fmt.Sprintf("admin:reset_otp:%s", emailAddress)
+	err = s.rdb.Set(ctx, redisKey, otpCode, 10*time.Minute).Err()
+	if err != nil {
+		return err
+	}
+
+	// Send the OTP code via email
+	htmlContent := fmt.Sprintf(`
+		<h3>Rides Admin Password Reset</h3>
+		<p>Hello %s,</p>
+		<p>You requested to reset your password. Use the following 6-digit one-time password (OTP) code to verify your identity:</p>
+		<h2 style="letter-spacing: 2px;">%s</h2>
+		<p>This code expires in 10 minutes. If you did not request this, please ignore this email.</p>
+	`, admin.Name, otpCode)
+
+	// Deliver via email only. Never log the OTP. If delivery fails we log
+	// server-side (so ops can act) but still return success — surfacing the
+	// error to the caller would leak which emails are registered.
+	if err := email.SendEmail(ctx, emailAddress, "Your Password Reset OTP", htmlContent); err != nil {
+		s.log.Error().Err(err).Str("email", emailAddress).Msg("admin reset: failed to send OTP email")
+	}
+	return nil
+}
+
+func (s *Service) VerifyResetOTP(ctx context.Context, emailAddress, otp string) (string, error) {
+	redisKey := fmt.Sprintf("admin:reset_otp:%s", emailAddress)
+	storedOtp, err := s.rdb.Get(ctx, redisKey).Result()
+	if err == goredis.Nil {
+		return "", apperrors.ErrInvalidOTP
+	} else if err != nil {
+		return "", err
+	}
+
+	if storedOtp != otp {
+		return "", apperrors.ErrInvalidOTP
+	}
+
+	// OTP is verified, delete it
+	_ = s.rdb.Del(ctx, redisKey).Err()
+
+	// Generate a secure reset token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", err
+	}
+	resetToken := hex.EncodeToString(tokenBytes)
+
+	// Save token in Redis mapped to email (expires in 10 minutes)
+	tokenKey := fmt.Sprintf("admin:reset_token:%s", resetToken)
+	err = s.rdb.Set(ctx, tokenKey, emailAddress, 10*time.Minute).Err()
+	if err != nil {
+		return "", err
+	}
+
+	return resetToken, nil
+}
+
+func (s *Service) ResetPassword(ctx context.Context, resetToken, newPassword string) error {
+	tokenKey := fmt.Sprintf("admin:reset_token:%s", resetToken)
+	emailAddress, err := s.rdb.Get(ctx, tokenKey).Result()
+	if err == goredis.Nil {
+		return apperrors.New(http.StatusUnauthorized, "INVALID_RESET_TOKEN", "invalid or expired reset token")
+	} else if err != nil {
+		return err
+	}
+
+	// Delete token so it can only be used once
+	_ = s.rdb.Del(ctx, tokenKey).Err()
+
+	// Find the user to get their ID
+	admin, _, err := s.repo.FindByEmail(ctx, emailAddress)
+	if err != nil || admin == nil {
+		return apperrors.ErrNotFound
+	}
+
+	// Hash new password using bcrypt
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	// Update password in DB
+	err = s.repo.SetPassword(ctx, admin.ID, string(hash))
+	if err != nil {
+		return err
+	}
+
+	// A password reset must not leave old sessions valid — revoke them all so a
+	// leaked/stolen session can't outlive the reset. Best-effort.
+	s.revokeAllAdminSessions(ctx, admin.ID)
+
+	// Log audit action
+	s.LogAction(ctx, admin.ID, "account.password_reset", "admin_accounts", admin.ID, "Password reset successfully via email recovery flow", "")
+
+	return nil
+}
+
+// revokeAllAdminSessions deletes every active Redis session for an admin
+// (`session:<adminID>:*`). Best-effort: failures are logged, not fatal.
+func (s *Service) revokeAllAdminSessions(ctx context.Context, adminID string) {
+	pattern := fmt.Sprintf("session:%s:*", adminID)
+	var cursor uint64
+	for {
+		keys, cur, err := s.rdb.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			s.log.Warn().Err(err).Str("admin_id", adminID).Msg("admin reset: scan sessions failed")
+			return
+		}
+		if len(keys) > 0 {
+			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+				s.log.Warn().Err(err).Str("admin_id", adminID).Msg("admin reset: delete sessions failed")
+			}
+		}
+		cursor = cur
+		if cursor == 0 {
+			return
+		}
+	}
+}
+
+func secureRandomNumber(min, max int) int {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	val := int(b[0]) | int(b[1])<<8 | int(b[2])<<16 | int(b[3])<<24
+	if val < 0 {
+		val = -val
+	}
+	return min + val%(max-min+1)
 }

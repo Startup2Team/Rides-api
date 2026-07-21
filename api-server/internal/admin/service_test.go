@@ -263,6 +263,10 @@ func TestApproveDriver_DBError(t *testing.T) {
 func TestRejectDriver_Success(t *testing.T) {
 	called := false
 	svc := newTestService(&mockDB{
+		// RejectDriver first looks up the driver's user_id (to notify them).
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("driver-user-uuid")
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			called = true
 			return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -276,6 +280,10 @@ func TestRejectDriver_Success(t *testing.T) {
 func TestRejectDriver_DBError(t *testing.T) {
 	dbErr := errors.New("exec failed")
 	svc := newTestService(&mockDB{
+		// user_id lookup succeeds; the UPDATE is what fails here.
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("driver-user-uuid")
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			return pgconn.CommandTag{}, dbErr
 		},
@@ -499,6 +507,10 @@ func TestDeleteDriver_DBError(t *testing.T) {
 
 func TestInterveneRide_Success(t *testing.T) {
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			driverID := "driver-uuid"
+			return scanRow("customer-uuid", &driverID)
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			// A live ride was updated (RowsAffected=1) — passes the state guard.
 			return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -510,6 +522,10 @@ func TestInterveneRide_Success(t *testing.T) {
 func TestInterveneRide_DBError(t *testing.T) {
 	dbErr := errors.New("exec failed")
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			driverID := "driver-uuid"
+			return scanRow("customer-uuid", &driverID)
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			return pgconn.CommandTag{}, dbErr
 		},
@@ -782,6 +798,10 @@ func TestGetNegotiation_DelegatesToGetRide_NotFound(t *testing.T) {
 
 func TestInterveneRide_ForceComplete(t *testing.T) {
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			driverID := "driver-uuid"
+			return scanRow("customer-uuid", &driverID)
+		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			return pgconn.NewCommandTag("UPDATE 1"), nil
 		},
@@ -1149,4 +1169,92 @@ func TestListRides_WithOneRow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, total)
 	assert.Len(t, rides, 1)
+}
+
+// ── Push Notification Campaigns ──────────────────────────────────────────
+
+type customMockTx struct {
+	pgx.Tx
+	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
+	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func (t *customMockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if t.queryRowFn != nil {
+		return t.queryRowFn(ctx, sql, args...)
+	}
+	return errRow(pgx.ErrNoRows)
+}
+
+func (t *customMockTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if t.execFn != nil {
+		return t.execFn(ctx, sql, args...)
+	}
+	return pgconn.CommandTag{}, nil
+}
+
+func (t *customMockTx) Commit(ctx context.Context) error   { return nil }
+func (t *customMockTx) Rollback(ctx context.Context) error { return nil }
+
+func TestCreateNotificationCampaign_Success(t *testing.T) {
+	now := time.Now()
+	// No notifier wired → campaign is recorded (QueryRow) then delivered
+	// feed-only via a set-based insert (Exec).
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("campaign-id", "SENT", now, now)
+		},
+		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("INSERT 10"), nil
+		},
+	})
+
+	campaign, err := svc.CreateNotificationCampaign(context.Background(), "Promo Title", "Promo Body", "ALL", "admin-id")
+	require.NoError(t, err)
+	assert.Equal(t, "campaign-id", campaign["id"])
+	assert.Equal(t, "Promo Title", campaign["title"])
+	assert.Equal(t, "Promo Body", campaign["body"])
+	assert.Equal(t, "ALL", campaign["audience"])
+	assert.Equal(t, "SENT", campaign["status"])
+}
+
+func TestListNotificationCampaigns_Success(t *testing.T) {
+	now := time.Now()
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow(1) // total count
+		},
+		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+			return &funcRows{scanFns: []func(...any) error{
+				func(dest ...any) error {
+					*dest[0].(*string) = "campaign-id"
+					*dest[1].(*string) = "Promo Title"
+					*dest[2].(*string) = "Promo Body"
+					*dest[3].(*string) = "DRIVERS"
+					*dest[4].(*string) = "SENT"
+					*dest[5].(*time.Time) = now
+					*dest[6].(*string) = "admin-id"
+					*dest[7].(*time.Time) = now
+					return nil
+				},
+			}}, nil
+		},
+	})
+
+	campaigns, total, err := svc.ListNotificationCampaigns(context.Background(), 20, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, campaigns, 1)
+	assert.Equal(t, "campaign-id", campaigns[0]["id"])
+}
+
+func TestDeleteNotificationCampaign_Success(t *testing.T) {
+	svc := newTestService(&mockDB{
+		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			return pgconn.NewCommandTag("DELETE 1"), nil
+		},
+	})
+
+	err := svc.DeleteNotificationCampaign(context.Background(), "campaign-id")
+	assert.NoError(t, err)
 }

@@ -116,6 +116,41 @@ func (h *Handler) ListRides(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/v1/driver/rides — the signed-in driver's ride history (paginated).
+func (h *Handler) ListDriverRides(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+
+	limit := 20
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	rides, err := h.svc.repo.ListByDriver(r.Context(), claims.UserID, limit, offset)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	responses := make([]*RideResponse, len(rides))
+	for i, ride := range rides {
+		responses[i] = ride.ToResponse()
+	}
+
+	respond.OK(w, map[string]interface{}{
+		"rides":  responses,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
 // DELETE /api/v1/customer/rides/:ride_id
 func (h *Handler) CancelRide(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)

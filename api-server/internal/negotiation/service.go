@@ -49,6 +49,12 @@ type TimeoutManager interface {
 	// ChargeForAgreedFare deducts the driver's ride credit the moment a fare is
 	// agreed (NEGOTIATING → CONFIRMED). Idempotent per ride.
 	ChargeForAgreedFare(ctx context.Context, rideID string)
+	// NotifyFareConfirmed pushes an in-app + FCM "ride confirmed" notification to
+	// the customer and the assigned driver on fare agreement.
+	NotifyFareConfirmed(ctx context.Context, customerID string, driverProfileID *string, amount float64)
+	// NotifyNegotiationOffer pushes a counter-offer notification to the party that
+	// did not propose it.
+	NotifyNegotiationOffer(ctx context.Context, rideID, customerID string, driverProfileID *string, proposerRole string, amount float64)
 }
 
 // Service handles fare negotiation business logic.
@@ -221,8 +227,11 @@ func (s *Service) Propose(ctx context.Context, rideID, actorRole, actorUserID st
 
 	// Each counter-offer is activity — reset the inactivity clock so the 5-minute
 	// window only triggers after a true silence, not while parties are bargaining.
+	// Also push an in-app + FCM notification to the recipient so a backgrounded
+	// app surfaces the new offer, not just the live WebSocket.
 	if s.timeoutMgr != nil {
 		s.timeoutMgr.ResetNegotiationTimeout(rideID)
+		s.timeoutMgr.NotifyNegotiationOffer(ctx, rideID, r.CustomerID, r.DriverID, actorRole, amount)
 	}
 
 	return nil
@@ -286,9 +295,11 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 	// Fare is agreed — disarm the inactivity timer cleanly.
 	if s.timeoutMgr != nil {
 		// Fare agreed → charge the driver's credit now (closes the complete-dodge
-		// loophole), and disarm the inactivity timer.
+		// loophole), disarm the inactivity timer, and push "ride confirmed" to both
+		// parties so a backgrounded app wakes.
 		s.timeoutMgr.ChargeForAgreedFare(ctx, rideID)
 		s.timeoutMgr.CancelNegotiationTimeout(rideID)
+		s.timeoutMgr.NotifyFareConfirmed(ctx, r.CustomerID, r.DriverID, latest.ProposedAmount)
 	}
 
 	return nil
@@ -336,9 +347,10 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 
 	if s.timeoutMgr != nil {
 		// Fare agreed → charge the driver's credit now (closes the complete-dodge
-		// loophole), and disarm the inactivity timer.
+		// loophole), disarm the inactivity timer, and push "ride confirmed".
 		s.timeoutMgr.ChargeForAgreedFare(ctx, rideID)
 		s.timeoutMgr.CancelNegotiationTimeout(rideID)
+		s.timeoutMgr.NotifyFareConfirmed(ctx, r.CustomerID, r.DriverID, amount)
 	}
 
 	return nil

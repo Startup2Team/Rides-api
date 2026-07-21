@@ -19,6 +19,7 @@ import (
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 
 	"github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/telephony"
 	"github.com/workspace/ride-platform/pkg/logger"
 )
@@ -223,6 +224,21 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 			user, err = s.repo.CreateUser(ctx, phone, deviceID, platform, fullName, email)
 			if err != nil {
 				return nil, nil, fmt.Errorf("create user: %w", err)
+			}
+
+			// Welcome notification — emitted ONLY here, in the first-registration
+			// branch (CreateUser), so returning/logging-in users never trigger it.
+			// This makes it idempotent by construction. Best-effort: persists to the
+			// in-app feed now and pushes once a device token is registered (a brand
+			// new account usually has none yet, so this is a single in-app insert).
+			if notifSvc := notification.Default(); notifSvc != nil {
+				notifSvc.SendToAllDevices(ctx,
+					user.ID,
+					"Welcome to Rides",
+					"Your account is ready. Request your first ride whenever you're set to go.",
+					"welcome",
+					map[string]string{"type": "welcome"},
+				)
 			}
 		} else {
 			return nil, nil, err

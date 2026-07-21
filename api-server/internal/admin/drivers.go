@@ -75,10 +75,25 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 		}
 	}
 	s.revokeUserSessions(ctx, driverUserID)
+	// Tell the driver they're approved (in-app + push to every device).
+	if s.notifier != nil {
+		s.notifier.SendToAllDevices(ctx, driverUserID, "You're approved!",
+			"Your driver application has been approved. You can now go online and start accepting rides.",
+			"driver", map[string]string{"type": "driver_application_approved"})
+	}
 	return nil
 }
 
 func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reason string) error {
+	var driverUserID string
+	if err := s.db.QueryRow(ctx,
+		`SELECT user_id FROM driver_profiles WHERE id = $1`, profileID,
+	).Scan(&driverUserID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperrors.ErrNotFound
+		}
+		return err
+	}
 	tag, err := s.db.Exec(ctx, `
 		UPDATE driver_profiles
 		SET approval_status = 'REJECTED',
@@ -93,6 +108,15 @@ func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reas
 	if tag.RowsAffected() == 0 {
 		return apperrors.Newf(http.StatusConflict, "INVALID_STATE",
 			"driver is not pending review or does not exist")
+	}
+	// Tell the driver the outcome + reason (in-app + push to every device).
+	if s.notifier != nil {
+		body := "Your driver application was not approved."
+		if reason != "" {
+			body = fmt.Sprintf("Your driver application was not approved. Reason: %s", reason)
+		}
+		s.notifier.SendToAllDevices(ctx, driverUserID, "Application update", body,
+			"driver", map[string]string{"type": "driver_application_rejected", "reason": reason})
 	}
 	return nil
 }

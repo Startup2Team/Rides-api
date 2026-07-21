@@ -2,6 +2,7 @@ package matching
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strconv"
 	"sync"
@@ -309,9 +310,12 @@ func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate)
 
 	e.redis.Set(ctx, rkeys.K.RidePendingDriver(rideID), c.profileID, ttl)
 
-	if c.fcmToken != nil {
-		_ = e.notify.SendRideRequest(ctx, *c.fcmToken, rideID, "", "", c.distanceM)
-	}
+	// Persist an in-app notification AND push to every device the driver has
+	// registered (best-effort, dead tokens pruned) so a backgrounded driver app
+	// wakes for the offer — not only the live WebSocket path below.
+	e.notify.SendToAllDevices(ctx, c.userID, "New ride request",
+		fmt.Sprintf("A rider is %.0fm away. Tap to view the request.", c.distanceM),
+		"ride", map[string]string{"type": "ride_request", "ride_id": rideID})
 
 	payload := map[string]interface{}{
 		"ride_id":    rideID,
@@ -412,6 +416,12 @@ func (e *Engine) notifyCustomerDriverMatched(ctx context.Context, rideID string,
 		RideID:  rideID,
 		Payload: payload,
 	})
+	// Wake a backgrounded customer app: a driver accepted, fare negotiation is next.
+	if r, err := e.rideRepo.FindByID(ctx, rideID); err == nil {
+		e.notify.SendToAllDevices(ctx, r.CustomerID, "Driver found",
+			"A driver accepted your ride. Agree on a fare to confirm.", "ride",
+			map[string]string{"type": "driver_matched", "ride_id": rideID})
+	}
 }
 
 func (e *Engine) onDeclined(ctx context.Context, rideID string, c *candidate) {

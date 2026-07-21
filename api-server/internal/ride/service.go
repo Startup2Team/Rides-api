@@ -563,6 +563,9 @@ func (s *Service) SetEnRoute(ctx context.Context, rideID, driverUserID string) e
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.driver_en_route", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.driver_en_route", "DRIVER", driverUserID, &rideID, map[string]interface{}{"ride_id": rideID})
 	s.hub.SendToCustomer(rideID, tracking.Message{Type: "driver_en_route", RideID: rideID})
+	s.notify.SendToAllDevices(ctx, r.CustomerID, "Driver on the way",
+		"Your driver is heading to the pickup point.", "ride",
+		map[string]string{"type": "driver_en_route", "ride_id": rideID})
 	return nil
 }
 
@@ -578,6 +581,12 @@ func (s *Service) MarkDriverArrived(ctx context.Context, rideID, driverProfileID
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.driver_arrived", "SYSTEM", rideID, nil)
 	s.analytics.Publish(ctx, "ride.driver_arrived", "SYSTEM", rideID, &rideID, nil)
 	s.hub.SendToCustomer(rideID, tracking.Message{Type: "driver_arrived", RideID: rideID})
+	// Wake a backgrounded customer app: the driver is waiting at the pickup.
+	if r, ferr := s.repo.FindByID(ctx, rideID); ferr == nil {
+		s.notify.SendToAllDevices(ctx, r.CustomerID, "Driver arrived",
+			"Your driver is at the pickup point.", "ride",
+			map[string]string{"type": "driver_arrived", "ride_id": rideID})
+	}
 	s.startPickupExpiryTimer(rideID)
 	return nil
 }
@@ -600,6 +609,9 @@ func (s *Service) SetDriverArrived(ctx context.Context, rideID, driverUserID str
 		s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusDriverEnRoute), 0)
 		_ = s.repo.AppendEvent(ctx, rideID, "ride.driver_en_route", "DRIVER", driverUserID, nil)
 		s.hub.SendToCustomer(rideID, tracking.Message{Type: "driver_en_route", RideID: rideID})
+		s.notify.SendToAllDevices(ctx, r.CustomerID, "Driver on the way",
+			"Your driver is heading to the pickup point.", "ride",
+			map[string]string{"type": "driver_en_route", "ride_id": rideID})
 		r.Status = StatusDriverEnRoute
 	}
 
@@ -623,6 +635,9 @@ func (s *Service) SetDriverArrived(ctx context.Context, rideID, driverUserID str
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.driver_arrived", "DRIVER", driverUserID, nil)
 	s.analytics.Publish(ctx, "ride.driver_arrived", "DRIVER", driverUserID, &rideID, map[string]interface{}{"ride_id": rideID})
 	s.hub.SendToCustomer(rideID, tracking.Message{Type: "driver_arrived", RideID: rideID})
+	s.notify.SendToAllDevices(ctx, r.CustomerID, "Driver arrived",
+		"Your driver is at the pickup point.", "ride",
+		map[string]string{"type": "driver_arrived", "ride_id": rideID})
 	s.startPickupExpiryTimer(rideID)
 	return nil
 }
@@ -757,6 +772,9 @@ func (s *Service) StartRide(ctx context.Context, rideID, driverUserID string) er
 	// in_progress immediately — without this the customer is stuck on the
 	// "arrived" screen until the 30-second polling fallback fires.
 	s.hub.SendToCustomer(rideID, tracking.Message{Type: "ride_started", RideID: rideID})
+	s.notify.SendToAllDevices(ctx, r.CustomerID, "Ride started",
+		"Your trip has started. Enjoy the ride!", "ride",
+		map[string]string{"type": "ride_started", "ride_id": rideID})
 	return nil
 }
 
@@ -973,6 +991,38 @@ func (s *Service) DriverCancelRide(ctx context.Context, rideID, driverUserID, re
 	s.notify.SendToAllDevices(ctx, r.CustomerID, "Ride cancelled",
 		"Your driver has cancelled the ride.", "ride", map[string]string{"ride_id": rideID})
 	return nil
+}
+
+// NotifyFareConfirmed pushes an in-app + FCM "ride confirmed" notification to
+// both the customer and the assigned driver. Called by negotiation.Service when
+// a fare is accepted or manually locked (NEGOTIATING → CONFIRMED). Best-effort;
+// wired via SetTimeoutManager so no extra construction dependency is needed.
+func (s *Service) NotifyFareConfirmed(ctx context.Context, customerID string, driverProfileID *string, amount float64) {
+	body := fmt.Sprintf("Fare agreed: RWF %.0f. Your ride is confirmed.", amount)
+	data := map[string]string{"type": "ride_confirmed"}
+	s.notify.SendToAllDevices(ctx, customerID, "Ride confirmed", body, "ride", data)
+	if driverProfileID != nil {
+		if uid, err := s.repo.FindDriverUserIDByProfileID(ctx, *driverProfileID); err == nil {
+			s.notify.SendToAllDevices(ctx, uid, "Ride confirmed", body, "ride", data)
+		}
+	}
+}
+
+// NotifyNegotiationOffer pushes a counter-offer notification to the party that
+// did NOT propose it (the customer proposes → driver is notified, and vice
+// versa). Called by negotiation.Service on every Propose. Best-effort.
+func (s *Service) NotifyNegotiationOffer(ctx context.Context, rideID, customerID string, driverProfileID *string, proposerRole string, amount float64) {
+	body := fmt.Sprintf("New fare offer: RWF %.0f", amount)
+	data := map[string]string{"type": "negotiation_message", "ride_id": rideID}
+	if proposerRole == "CUSTOMER" {
+		if driverProfileID != nil {
+			if uid, err := s.repo.FindDriverUserIDByProfileID(ctx, *driverProfileID); err == nil {
+				s.notify.SendToAllDevices(ctx, uid, "New fare offer", body, "ride", data)
+			}
+		}
+		return
+	}
+	s.notify.SendToAllDevices(ctx, customerID, "New fare offer", body, "ride", data)
 }
 
 func endOfDay() time.Time { return timeutil.EndOfDay() }

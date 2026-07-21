@@ -39,10 +39,13 @@ import (
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
 	mw "github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/internal/monetization"
 	"github.com/workspace/ride-platform/internal/negotiation"
 	"github.com/workspace/ride-platform/internal/notification"
+	"github.com/workspace/ride-platform/internal/packagepayments"
 	"github.com/workspace/ride-platform/internal/packages"
 	"github.com/workspace/ride-platform/internal/payment"
+	"github.com/workspace/ride-platform/internal/paymentmethods"
 	"github.com/workspace/ride-platform/internal/rating"
 	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
@@ -204,6 +207,7 @@ func main() {
 	reportRepo := reports.NewRepository(db)
 	settingsRepo := settings.NewRepository(db)
 	teamRepo := team.NewRepository(db)
+	monetizationRepo := monetization.NewRepository(db)
 
 	// ── WebSocket hub ─────────────────────────────────────────────────────────
 	// Redis-backed so WebSocket delivery works across multiple API instances.
@@ -216,6 +220,8 @@ func main() {
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
 	pkgSvc.SetWallet(walletSvc) // wallet deduction on package purchase
+	monetizationSvc := monetization.NewService(monetizationRepo)
+
 	// Note: the go-online credit gate is wired to the v4 ledger (ledgerSvc) below,
 	// once it is constructed — NOT to pkgSvc, whose HasCredits reads the legacy
 	// driver_ride_credits table that the v4 cutover no longer populates.
@@ -241,7 +247,7 @@ func main() {
 	inboxSvc := inbox.NewService(inboxRepo)
 	reportSvc := reports.NewService(reportRepo)
 	settingsSvc := settings.NewService(settingsRepo)
-	teamSvc := team.NewService(teamRepo, cfg, rdb)
+	teamSvc := team.NewService(teamRepo, cfg, rdb, log)
 	dashSvc := dashboard.NewService(dbRead, rdb, log)
 
 	financeRepo := finance.NewRepository(db)
@@ -329,6 +335,20 @@ func main() {
 	ratingH := rating.NewHandler(ratingRepo, log)
 	notifH := notification.NewHandler(notifRepo)
 
+	// Customer-managed payment methods (Flow F) + driver manual package-payment
+	// claims (Flow J) — the two mobile payment contracts.
+	payMethodsH := paymentmethods.NewHandler(paymentmethods.NewService(paymentmethods.NewRepository(db)))
+	pkgPaymentsSvc := packagepayments.NewService(
+		packagepayments.NewRepository(db),
+		packagepayments.Config{MTNMerchantCode: cfg.Payments.ManualMomoCode},
+	)
+	// On approval, grant the claim's package rides via the SAME entitlement
+	// ledger path as a real MoMo settlement, and persist the driver's in-app
+	// review notification (FCM delivery is owned by the notification service).
+	pkgPaymentsSvc.SetGranter(purchaseSvc)
+	pkgPaymentsSvc.SetNotifier(notifySvc)
+	pkgPaymentsH := packagepayments.NewHandler(pkgPaymentsSvc)
+
 	// New module handlers
 	incidentH := incidents.NewHandler(incidentSvc)
 	ticketH := tickets.NewHandler(ticketSvc)
@@ -337,6 +357,7 @@ func main() {
 	settingsH := settings.NewHandler(settingsSvc)
 	teamH := team.NewHandler(teamSvc, auditLog)
 	dashH := dashboard.NewHandler(dashSvc)
+	monetizationH := monetization.NewHandler(monetizationSvc, auditLog)
 
 	// ── Background goroutines ─────────────────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -830,6 +851,7 @@ func main() {
 			r.Get("/bonuses", bonusH.DriverGrants)
 			r.Get("/bonuses/tiers", bonusH.ListActiveTiers)
 
+			r.Get("/rides", rideH.ListDriverRides)
 			r.Get("/rides/active", rideH.GetActiveRideForDriver)
 			r.Post("/rides/{ride_id}/accept", driverAcceptHandler(engine, rideRepo, driverSvc, ledgerSvc, cfg))
 			r.Post("/rides/{ride_id}/decline", driverDeclineHandler(engine, driverSvc))
@@ -880,6 +902,39 @@ func main() {
 		r.Delete("/me/device-token", notifH.UnregisterDeviceToken)
 	})
 
+	// ── Payment methods (Flow F — customer-managed MoMo/cash methods) ────────
+	r.Route(apiV1Prefix+"/payments", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.UserRateLimit429(rdb, "payments_group", 300, time.Minute))
+		r.Use(mw.RequireNotSuspended())
+		// A driver account is also a customer, so allow the driver role states too.
+		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
+
+		r.Get("/methods", payMethodsH.List)
+		r.Get("/methods/default", payMethodsH.Default)
+		r.Get("/billing-profile", payMethodsH.BillingProfile)
+		r.Post("/methods", payMethodsH.Add)
+		r.Patch("/methods/{id}", payMethodsH.Update)
+		r.Delete("/methods/{id}", payMethodsH.Delete)
+		r.Patch("/methods/{id}/default", payMethodsH.SetDefault)
+	})
+
+	// ── Package payments (Flow J — driver manual-payment claim lifecycle) ────
+	r.Route(apiV1Prefix+"/package-payments", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.UserRateLimit429(rdb, "package_payments_group", 300, time.Minute))
+		r.Use(mw.RequireNotSuspended())
+		r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending))
+
+		r.Get("/configuration", pkgPaymentsH.Configuration)
+		r.Get("/manual-claims", pkgPaymentsH.List)
+		r.Post("/manual-claims", pkgPaymentsH.Create)
+		r.Get("/manual-claims/{id}", pkgPaymentsH.Get)
+		r.Post("/manual-claims/{id}/submit", pkgPaymentsH.Submit)
+		r.Post("/manual-claims/{id}/resubmit", pkgPaymentsH.Resubmit)
+		r.Post("/manual-claims/{id}/cancel", pkgPaymentsH.Cancel)
+	})
+
 	// ── Wallet (customer + driver — same wallet per user_id) ─────────────────
 	r.Route(apiV1Prefix+"/wallet", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
@@ -920,6 +975,9 @@ func main() {
 		})
 	})
 
+	// Public active ads banner endpoint for mobile clients
+	r.Get(apiV1Prefix+"/adverts/active", monetizationH.ListActiveAdverts)
+
 	// ── Active ride (reconnect recovery) ─────────────────────────────────────
 	r.With(mw.Authenticate(cfg, rdb)).Get(apiV1Prefix+"/rides/active", locH.GetActiveRide)
 
@@ -933,6 +991,10 @@ func main() {
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
+
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_forgot_password", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/forgot-password", teamH.ForgotPassword)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_verify_reset_otp", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/verify-reset-otp", teamH.VerifyResetOTP)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_reset_password", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/reset-password", teamH.ResetPassword)
 
 	// ── Admin (protected) ─────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/admin", func(r chi.Router) {
@@ -991,6 +1053,7 @@ func main() {
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 			r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)
+			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/uploads/file", adminH.UploadDriverFile)
 			if uploadH != nil {
 				r.Post("/uploads/presigned-url", uploadH.PresignedURL)
@@ -1027,6 +1090,11 @@ func main() {
 			r.Get("/negotiations/stats", adminH.NegotiationsStats)
 			r.Get("/negotiations", adminH.ListNegotiations)
 			r.Get("/negotiations/{id}", adminH.GetNegotiation)
+
+			// Push Notifications Campaigns
+			r.Post("/notifications", adminH.CreateNotificationCampaign)
+			r.Get("/notifications", adminH.ListNotificationCampaigns)
+			r.Delete("/notifications/{id}", adminH.DeleteNotificationCampaign)
 
 			// Safety incidents
 			r.Get("/incidents/stats", incidentH.Stats)
@@ -1197,12 +1265,45 @@ func main() {
 				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
 				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
 			).Post("/packages-purchases/{id}/confirm", pkgH.AdminConfirmPurchase)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/packages-purchases/{id}/reconcile", pkgH.AdminReconcilePurchase)
+
+			// Manual package-payment claims (v2 flow): review queue + approve/reject.
+			// Approval grants the claim's package rides via the entitlement ledger
+			// (same path as AdminConfirmPurchase), so it is finance-gated,
+			// rate-limited per admin, and audited on the claim's log.
+			r.Get("/package-payments/manual-claims", pkgPaymentsH.AdminList)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/package-payments/manual-claims/{id}/approve", pkgPaymentsH.AdminApprove)
+			r.With(
+				mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager),
+				mw.UserRateLimit(rdb, "admin_pkg_money", 30, time.Minute),
+			).Post("/package-payments/manual-claims/{id}/reject", pkgPaymentsH.AdminReject)
 
 			// Campaigns admin CRUD
 			r.Get("/campaigns", pkgH.AdminListCampaigns)
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
+			r.Patch("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
+
+			// Partners admin CRUD
+			r.Get("/partners", monetizationH.ListPartners)
+			r.Get("/partners/{id}", monetizationH.GetPartner)
+			r.Post("/partners", monetizationH.CreatePartner)
+			r.Patch("/partners/{id}", monetizationH.UpdatePartner)
+			r.Delete("/partners/{id}", monetizationH.DeletePartner)
+
+			// Adverts admin CRUD
+			r.Get("/adverts", monetizationH.ListAdverts)
+			r.Get("/adverts/{id}", monetizationH.GetAdvert)
+			r.Post("/adverts", monetizationH.CreateAdvert)
+			r.Patch("/adverts/{id}", monetizationH.UpdateAdvert)
+			r.Delete("/adverts/{id}", monetizationH.DeleteAdvert)
 
 			// Entitlements admin (ledger-backed)
 			r.Get("/entitlements", pkgH.AdminListEntitlements)
@@ -1238,6 +1339,7 @@ func main() {
 	rideSvc.SetPackagesService(ledgerSvc)  // v4: charge/refund via the ledger
 	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
+	adminSvc.SetNotifier(notifySvc) // push driver approve/reject decisions to the driver's devices
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// WriteTimeout must be 0 when serving WebSockets — a global write timeout

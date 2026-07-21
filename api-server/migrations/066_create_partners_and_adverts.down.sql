@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS adverts;
+DROP TABLE IF EXISTS partners;

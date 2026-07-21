@@ -53,16 +53,28 @@ func NewHandler(cfg *appcfg.Config) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Resolve the R2 API host up front so a misconfiguration fails fast at
+	// startup instead of surfacing as broken presigned URLs at runtime.
+	r2Endpoint := ""
+	if strings.EqualFold(cfg.Storage.Provider, "r2") && cfg.Storage.Endpoint == "" {
+		if cfg.Storage.AccountID == "" {
+			return nil, fmt.Errorf("storage provider=r2 requires STORAGE_ACCOUNT_ID (the Cloudflare account id) or an explicit STORAGE_ENDPOINT")
+		}
+		// R2's host is https://<ACCOUNT_ID>.r2.cloudflarestorage.com — it uses the
+		// Cloudflare ACCOUNT id, not the access-key id.
+		r2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.Storage.AccountID)
+	}
 	s3Client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		switch {
 		case cfg.Storage.Endpoint != "":
 			// S3-compatible store with an explicit endpoint (MinIO in dev,
 			// self-hosted gateways). Path-style avoids vhost DNS per bucket.
+			// An explicit endpoint always takes precedence.
 			o.UsePathStyle = true
 			o.BaseEndpoint = aws.String(cfg.Storage.Endpoint)
-		case strings.EqualFold(cfg.Storage.Provider, "r2"):
+		case r2Endpoint != "":
 			o.UsePathStyle = true
-			o.BaseEndpoint = aws.String(fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.Storage.KeyID))
+			o.BaseEndpoint = aws.String(r2Endpoint)
 		}
 	})
 	h := &Handler{
@@ -365,6 +377,9 @@ func purposePrefix(p string) string {
 		return "documents/"
 	case "profile_image":
 		return "avatars/"
+	case "payment_proof":
+		// Manual package-payment proof screenshots (proof_image_id on a claim).
+		return "payment-proofs/"
 	default:
 		return ""
 	}
@@ -377,7 +392,7 @@ func safeObjectKey(raw string) (string, bool) {
 	if strings.Contains(raw, "..") {
 		return "", false
 	}
-	if strings.HasPrefix(raw, "documents/") || strings.HasPrefix(raw, "avatars/") {
+	if strings.HasPrefix(raw, "documents/") || strings.HasPrefix(raw, "avatars/") || strings.HasPrefix(raw, "payment-proofs/") {
 		return raw, true
 	}
 	return "", false
