@@ -1053,6 +1053,7 @@ func main() {
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 			r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)
+			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/uploads/file", adminH.UploadDriverFile)
 			if uploadH != nil {
 				r.Post("/uploads/presigned-url", uploadH.PresignedURL)

@@ -224,11 +224,15 @@ func (m *mockSvc) GetDriverReferrals(ctx context.Context, profileID string) ([]m
 	return nil, nil
 }
 
-func (m *mockSvc) CreateNotificationCampaign(ctx context.Context, title, body, audience, createdBy string) (map[string]interface{}, error) {
+func (m *mockSvc) CreateNotificationCampaign(ctx context.Context, title, body, audience, createdBy string, targetDriverID ...string) (map[string]interface{}, error) {
 	if m.createNotificationCampaignFn != nil {
 		return m.createNotificationCampaignFn(ctx, title, body, audience, createdBy)
 	}
 	return map[string]interface{}{}, nil
+}
+
+func (m *mockSvc) NotifyDriver(ctx context.Context, driverIDOrUserID, title, body, reason, createdBy string) (map[string]interface{}, error) {
+	return map[string]interface{}{"status": "SENT"}, nil
 }
 
 func (m *mockSvc) ListNotificationCampaigns(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error) {
