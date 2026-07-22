@@ -134,12 +134,12 @@ func (r *Repository) deductOne(ctx context.Context, profileID, vehicleTypeID, ri
 	}
 
 	ridesDelta, bonusDelta := 0, 0
-	if curBonus > 0 {
-		bonusDelta = -1 // spend bonus first
-		curBonus--
-	} else {
-		ridesDelta = -1
+	if curRides > 0 {
+		ridesDelta = -1 // spend paid rides first; bonus is only touched once paid rides are exhausted
 		curRides--
+	} else {
+		bonusDelta = -1
+		curBonus--
 	}
 
 	if _, err = tx.Exec(ctx, `
