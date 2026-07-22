@@ -48,7 +48,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		FullName    string  `json:"full_name"    validate:"omitempty,min=2"`
 		Email       *string `json:"email"`
 		DeviceID    string  `json:"device_id"    validate:"required"`
-		Platform    string  `json:"platform"     validate:"required,oneof=ios android"`
+		Platform    string  `json:"platform"     validate:"required,oneof=ios android web desktop"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

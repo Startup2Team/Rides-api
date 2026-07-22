@@ -38,7 +38,7 @@ type mockSvc struct {
 	deleteDriverFn               func(ctx context.Context, profileID string) error
 	listCustomersFn              func(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
 	getCustomerFn                func(ctx context.Context, userID string) (map[string]interface{}, error)
-	suspendUserFn                func(ctx context.Context, userID string, durationHours int) error
+	suspendUserFn                func(ctx context.Context, userID, reason string, durationHours int) error
 	reinstateUserFn              func(ctx context.Context, userID string) error
 	updateCustomerFn             func(ctx context.Context, userID, status, notes string) error
 	banCustomerFn                func(ctx context.Context, userID, reason string) error
@@ -132,8 +132,8 @@ func (m *mockSvc) ListCustomers(ctx context.Context, status, search, sort string
 func (m *mockSvc) GetCustomer(ctx context.Context, userID string) (map[string]interface{}, error) {
 	return m.getCustomerFn(ctx, userID)
 }
-func (m *mockSvc) SuspendUser(ctx context.Context, userID string, durationHours int) error {
-	return m.suspendUserFn(ctx, userID, durationHours)
+func (m *mockSvc) SuspendUser(ctx context.Context, userID, reason string, durationHours int) error {
+	return m.suspendUserFn(ctx, userID, reason, durationHours)
 }
 func (m *mockSvc) ReinstateUser(ctx context.Context, userID string) error {
 	return m.reinstateUserFn(ctx, userID)
@@ -784,31 +784,41 @@ func TestGetCustomer_NotFound(t *testing.T) {
 
 func TestSuspendUser_HappyPath(t *testing.T) {
 	var gotHours int
+	var gotReason string
 	mock := &mockSvc{
-		suspendUserFn: func(_ context.Context, _ string, durationHours int) error {
+		suspendUserFn: func(_ context.Context, _ string, reason string, durationHours int) error {
+			gotReason = reason
 			gotHours = durationHours
 			return nil
 		},
 	}
 	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/users/user-abc/suspend",
-		jsonBody(t, map[string]int{"duration_hours": 72}))
+		jsonBody(t, map[string]interface{}{"reason": "Safety violation", "duration_hours": 72}))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNoContent, rr.Code)
 	assert.Equal(t, 72, gotHours)
+	assert.Equal(t, "Safety violation", gotReason)
 }
 
-func TestSuspendUser_MissingDuration(t *testing.T) {
-	mock := &mockSvc{}
+func TestSuspendUser_DefaultDuration(t *testing.T) {
+	var gotHours int
+	mock := &mockSvc{
+		suspendUserFn: func(_ context.Context, _ string, _ string, durationHours int) error {
+			gotHours = durationHours
+			return nil
+		},
+	}
 	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/users/user-abc/suspend",
 		jsonBody(t, map[string]string{"reason": "spam"}))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+	assert.Equal(t, 24, gotHours)
 }
 
 func TestReinstateUser_HappyPath(t *testing.T) {

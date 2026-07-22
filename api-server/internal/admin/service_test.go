@@ -123,7 +123,10 @@ func (t *mockTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, 
 	return &emptyRows{}, nil
 }
 func (t *mockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return errRow(pgx.ErrNoRows)
+	if t.execErr != nil {
+		return errRow(t.execErr)
+	}
+	return scanRow("user-uuid")
 }
 func (t *mockTx) CopyFrom(_ context.Context, _ pgx.Identifier, _ []string, _ pgx.CopyFromSource) (int64, error) {
 	return 0, nil
@@ -362,7 +365,7 @@ func TestSuspendUser_Success(t *testing.T) {
 			return pgconn.CommandTag{}, nil
 		},
 	})
-	assert.NoError(t, svc.SuspendUser(context.Background(), "user-uuid", 72))
+	assert.NoError(t, svc.SuspendUser(context.Background(), "user-uuid", "Violation of Terms", 72))
 }
 
 func TestSuspendUser_DBError(t *testing.T) {
@@ -372,7 +375,7 @@ func TestSuspendUser_DBError(t *testing.T) {
 			return pgconn.CommandTag{}, dbErr
 		},
 	})
-	assert.ErrorIs(t, svc.SuspendUser(context.Background(), "user-uuid", 24), dbErr)
+	assert.ErrorIs(t, svc.SuspendUser(context.Background(), "user-uuid", "Violation of Terms", 24), dbErr)
 }
 
 func TestSuspendUser_RevokesSessions(t *testing.T) {
@@ -399,7 +402,7 @@ func TestSuspendUser_RevokesSessions(t *testing.T) {
 	_ = rdb.Set(ctx, "session:user-uuid:jti2", "valid", 0).Err()
 	_ = rdb.Set(ctx, "session:other-user:jti3", "valid", 0).Err()
 
-	err = svc.SuspendUser(ctx, "user-uuid", 24)
+	err = svc.SuspendUser(ctx, "user-uuid", "Violation of Terms", 24)
 	assert.NoError(t, err)
 
 	assert.False(t, mr.Exists("session:user-uuid:jti1"))

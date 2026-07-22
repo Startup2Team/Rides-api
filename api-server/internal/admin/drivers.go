@@ -167,19 +167,18 @@ func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 		    updated_at = NOW()
 		WHERE id = $2
 	`, reason, profileID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(ctx, `
+	var dpUserID string
+	err = tx.QueryRow(ctx, `
 		UPDATE users u
 		SET is_suspended = TRUE,
 		    suspension_until = $1,
+		    suspension_reason = $2,
 		    role_state = 'DRIVER_SUSPENDED',
 		    updated_at = NOW()
 		FROM driver_profiles dp
-		WHERE dp.id = $2 AND u.id = dp.user_id
-	`, suspendedUntil, profileID)
+		WHERE dp.id = $3 AND u.id = dp.user_id
+		RETURNING u.id
+	`, suspendedUntil, reason, profileID).Scan(&dpUserID)
 	if err != nil {
 		return err
 	}
@@ -192,6 +191,25 @@ func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 	if s.rdb != nil {
 		s.rdb.Set(ctx, rkeys.K.DriverState(profileID), "OFFLINE", 0)
 		s.rdb.ZRem(ctx, rkeys.K.DriverGeoIndex(transportType), profileID)
+	}
+
+	// ⚡ Send 0-second live push notification & in-app message to driver
+	pushTitle := "Driver Account Suspended"
+	pushBody := fmt.Sprintf("Your driver account has been suspended for %d hours.", durationHours)
+	if reason != "" {
+		pushBody = fmt.Sprintf("Your driver account has been suspended. Reason: %s", reason)
+	}
+
+	if s.notifier != nil && dpUserID != "" {
+		s.notifier.SendToAllDevices(ctx, dpUserID, pushTitle, pushBody, "driver_suspended", map[string]string{
+			"kind":   "driver_suspended",
+			"reason": reason,
+		})
+	} else if dpUserID != "" {
+		_, _ = s.db.Exec(ctx, `
+			INSERT INTO notifications (user_id, title, body, type, data)
+			VALUES ($1, $2, $3, 'driver_suspended', $4::jsonb)
+		`, dpUserID, pushTitle, pushBody, fmt.Sprintf(`{"reason": %q}`, reason))
 	}
 
 	return nil
@@ -213,17 +231,36 @@ func (s *Service) ReinstateDriver(ctx context.Context, profileID string) error {
 		return err
 	}
 
-	_, err = tx.Exec(ctx, `
+	var dpUserID string
+	err = tx.QueryRow(ctx, `
 		UPDATE users u
-		SET is_suspended = FALSE, suspension_until = NULL, role_state = 'DRIVER_ACTIVE', updated_at = NOW()
+		SET is_suspended = FALSE, suspension_until = NULL, suspension_reason = NULL, role_state = 'DRIVER_ACTIVE', updated_at = NOW()
 		FROM driver_profiles dp
 		WHERE dp.id = $1 AND u.id = dp.user_id
-	`, profileID)
+		RETURNING u.id
+	`, profileID).Scan(&dpUserID)
 	if err != nil {
 		return err
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	pushTitle := "Driver Account Reinstated"
+	pushBody := "Your driver account has been reinstated! You can now go online and accept ride requests."
+	if s.notifier != nil && dpUserID != "" {
+		s.notifier.SendToAllDevices(ctx, dpUserID, pushTitle, pushBody, "driver_reinstated", map[string]string{
+			"kind": "driver_reinstated",
+		})
+	} else if dpUserID != "" {
+		_, _ = s.db.Exec(ctx, `
+			INSERT INTO notifications (user_id, title, body, type, data)
+			VALUES ($1, $2, $3, 'driver_reinstated', '{}'::jsonb)
+		`, dpUserID, pushTitle, pushBody)
+	}
+
+	return nil
 }
 
 // ListDrivers returns paginated driver profiles, filterable by status, vehicle type, and search.

@@ -454,22 +454,26 @@ func main() {
 	r := chi.NewRouter()
 
 	// ── CORS ──────────────────────────────────────────────────────────────────
-	// Allow the admin Next.js dev server in non-production, and any configured production origin.
-	allowedOrigins := []string{}
-	if cfg.Env != "production" {
-		allowedOrigins = append(allowedOrigins, "http://localhost:3000", "http://localhost:3001")
-	}
-	if origin := cfg.AdminOrigin; origin != "" {
-		allowedOrigins = append(allowedOrigins, origin)
-	}
-	r.Use(chiCors.Handler(chiCors.Options{
-		AllowedOrigins:   allowedOrigins,
+	// Allow Expo dev server, mobile web, and Next.js admin in non-production.
+	corsOpts := chiCors.Options{
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID", "X-Phone-Number"},
 		ExposedHeaders:   []string{"X-Request-ID"},
 		AllowCredentials: true,
 		MaxAge:           300,
-	}))
+	}
+	if cfg.Env != "production" {
+		corsOpts.AllowOriginFunc = func(r *http.Request, origin string) bool {
+			return true
+		}
+	} else {
+		allowedOrigins := []string{}
+		if origin := cfg.AdminOrigin; origin != "" {
+			allowedOrigins = append(allowedOrigins, origin)
+		}
+		corsOpts.AllowedOrigins = allowedOrigins
+	}
+	r.Use(chiCors.Handler(corsOpts))
 
 	r.Use(chimw.RequestID)
 	r.Use(chimw.Recoverer)

@@ -171,16 +171,36 @@ func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]in
 	}, nil
 }
 
-func (s *Service) SuspendUser(ctx context.Context, userID string, durationHours int) error {
+func (s *Service) SuspendUser(ctx context.Context, userID, reason string, durationHours int) error {
 	suspendedUntil := time.Now().Add(time.Duration(durationHours) * time.Hour)
 	_, err := s.db.Exec(ctx, `
-		UPDATE users SET is_suspended = TRUE, suspension_until = $1, updated_at = NOW()
-		WHERE id = $2
-	`, suspendedUntil, userID)
+		UPDATE users SET is_suspended = TRUE, suspension_reason = $1, suspension_until = $2, updated_at = NOW()
+		WHERE id = $3
+	`, reason, suspendedUntil, userID)
 	if err != nil {
 		return err
 	}
 	s.revokeUserSessions(ctx, userID)
+
+	// Send 0-second live push notification & in-app message
+	pushTitle := "Account Suspended"
+	pushBody := fmt.Sprintf("Your account has been suspended for %d hours.", durationHours)
+	if reason != "" {
+		pushBody = fmt.Sprintf("Your account has been suspended. Reason: %s", reason)
+	}
+
+	if s.notifier != nil {
+		s.notifier.SendToAllDevices(ctx, userID, pushTitle, pushBody, "account_suspended", map[string]string{
+			"kind":   "account_suspended",
+			"reason": reason,
+		})
+	} else {
+		_, _ = s.db.Exec(ctx, `
+			INSERT INTO notifications (user_id, title, body, type, data)
+			VALUES ($1, $2, $3, 'account_suspended', $4::jsonb)
+		`, userID, pushTitle, pushBody, fmt.Sprintf(`{"reason": %q}`, reason))
+	}
+
 	return nil
 }
 
@@ -196,10 +216,27 @@ func (s *Service) revokeUserSessions(ctx context.Context, userID string) {
 
 func (s *Service) ReinstateUser(ctx context.Context, userID string) error {
 	_, err := s.db.Exec(ctx, `
-		UPDATE users SET is_suspended = FALSE, suspension_until = NULL, updated_at = NOW()
+		UPDATE users SET is_suspended = FALSE, suspension_until = NULL, suspension_reason = NULL, updated_at = NOW()
 		WHERE id = $1
 	`, userID)
-	return err
+	if err != nil {
+		return err
+	}
+
+	pushTitle := "Account Reinstated"
+	pushBody := "Your account has been reinstated. You can now request rides and use the app normally."
+	if s.notifier != nil {
+		s.notifier.SendToAllDevices(ctx, userID, pushTitle, pushBody, "account_reinstated", map[string]string{
+			"kind": "account_reinstated",
+		})
+	} else {
+		_, _ = s.db.Exec(ctx, `
+			INSERT INTO notifications (user_id, title, body, type, data)
+			VALUES ($1, $2, $3, 'account_reinstated', '{}'::jsonb)
+		`, userID, pushTitle, pushBody)
+	}
+
+	return nil
 }
 
 func (s *Service) UpdateCustomer(ctx context.Context, userID, status, notes string) error {
@@ -217,5 +254,27 @@ func (s *Service) BanCustomer(ctx context.Context, userID, reason string) error 
 	_, err := s.db.Exec(ctx,
 		`UPDATE users SET is_suspended=TRUE, suspension_reason=$1, updated_at=NOW() WHERE id=$2`,
 		reason, userID)
-	return err
+	if err != nil {
+		return err
+	}
+
+	pushTitle := "Account Banned"
+	pushBody := "Your account has been permanently suspended."
+	if reason != "" {
+		pushBody = fmt.Sprintf("Your account has been permanently suspended. Reason: %s", reason)
+	}
+
+	if s.notifier != nil {
+		s.notifier.SendToAllDevices(ctx, userID, pushTitle, pushBody, "account_banned", map[string]string{
+			"kind":   "account_banned",
+			"reason": reason,
+		})
+	} else {
+		_, _ = s.db.Exec(ctx, `
+			INSERT INTO notifications (user_id, title, body, type, data)
+			VALUES ($1, $2, $3, 'account_banned', $4::jsonb)
+		`, userID, pushTitle, pushBody, fmt.Sprintf(`{"reason": %q}`, reason))
+	}
+
+	return nil
 }
