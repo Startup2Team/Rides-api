@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
@@ -231,7 +232,7 @@ func (s *Service) GetLandmarks(ctx context.Context) ([]*Landmark, error) {
 func (s *Service) ListSavedLocations(ctx context.Context, userID string) ([]*SavedLocation, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, user_id, label, address, lat, lng, created_at, updated_at
-		 FROM saved_locations WHERE user_id = $1 ORDER BY created_at ASC`, userID)
+		 FROM saved_locations WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -277,13 +278,202 @@ func (s *Service) UpdateSavedLocation(ctx context.Context, id, userID, label, ad
 
 func (s *Service) DeleteSavedLocation(ctx context.Context, id, userID string) error {
 	tag, err := s.db.Exec(ctx,
-		`DELETE FROM saved_locations WHERE id = $1 AND user_id = $2`, id, userID)
+		`UPDATE saved_locations SET deleted_at = NOW()
+		 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`, id, userID)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return apperrors.ErrNotFound
 	}
+	return nil
+}
+
+// SavedLocationInput is one entry in a bulk replace.
+type SavedLocationInput struct {
+	Label   string
+	Address string
+	Lat     float64
+	Lng     float64
+}
+
+// ReplaceSavedLocations atomically swaps ALL of a user's saved locations for the
+// provided set inside a single transaction. This fixes the client's old
+// sequential delete/update/create path, which could leave the server
+// half-updated if one call failed mid-flight.
+func (s *Service) ReplaceSavedLocations(ctx context.Context, userID string, in []SavedLocationInput) ([]*SavedLocation, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Soft-delete the current live set (kept as history), then insert the new one.
+	if _, err := tx.Exec(ctx, `UPDATE saved_locations SET deleted_at = NOW() WHERE user_id = $1 AND deleted_at IS NULL`, userID); err != nil {
+		return nil, err
+	}
+	for _, loc := range in {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO saved_locations (user_id, label, address, lat, lng)
+			VALUES ($1, $2, $3, $4, $5)
+		`, userID, loc.Label, loc.Address, loc.Lat, loc.Lng); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.ListSavedLocations(ctx, userID)
+}
+
+// ── Admin units (Rwanda hierarchy) ───────────────────────────────────────────
+
+// AdminUnit is one node in the province→village hierarchy.
+type AdminUnit struct {
+	ID       string  `json:"id"`
+	ParentID *string `json:"parent_id"`
+	Level    string  `json:"level"`
+	Name     string  `json:"name"`
+	Path     string  `json:"path"`
+}
+
+func scanAdminUnits(rows pgx.Rows) ([]*AdminUnit, error) {
+	defer rows.Close()
+	units := make([]*AdminUnit, 0)
+	for rows.Next() {
+		u := &AdminUnit{}
+		if err := rows.Scan(&u.ID, &u.ParentID, &u.Level, &u.Name, &u.Path); err != nil {
+			return nil, err
+		}
+		units = append(units, u)
+	}
+	return units, rows.Err()
+}
+
+// ListAdminUnitChildren returns the direct children of a node, or the top-level
+// provinces when parentID is empty. Alphabetical by name.
+func (s *Service) ListAdminUnitChildren(ctx context.Context, parentID string) ([]*AdminUnit, error) {
+	if parentID == "" {
+		rows, err := s.db.Query(ctx,
+			`SELECT id, parent_id, level, name, path FROM admin_units
+			 WHERE parent_id IS NULL ORDER BY name`)
+		if err != nil {
+			return nil, err
+		}
+		return scanAdminUnits(rows)
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, parent_id, level, name, path FROM admin_units
+		 WHERE parent_id = $1 ORDER BY name`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	return scanAdminUnits(rows)
+}
+
+// SearchAdminUnits does prefix/substring autocomplete on unit names. An optional
+// level filter (e.g. "village") narrows results. Capped for a snappy picker.
+func (s *Service) SearchAdminUnits(ctx context.Context, q, level string, limit int) ([]*AdminUnit, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	pattern := "%" + q + "%"
+	if level != "" {
+		rows, err := s.db.Query(ctx,
+			`SELECT id, parent_id, level, name, path FROM admin_units
+			 WHERE level = $1 AND lower(name) LIKE lower($2)
+			 ORDER BY name LIMIT $3`, level, pattern, limit)
+		if err != nil {
+			return nil, err
+		}
+		return scanAdminUnits(rows)
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, parent_id, level, name, path FROM admin_units
+		 WHERE lower(name) LIKE lower($1)
+		 ORDER BY name LIMIT $2`, pattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanAdminUnits(rows)
+}
+
+// ── Recent locations ────────────────────────────────────────────────────────
+
+// RecentLocation is a place the rider recently picked for a booking.
+type RecentLocation struct {
+	ID         string    `json:"id"`
+	Address    string    `json:"address"`
+	Lat        float64   `json:"lat"`
+	Lng        float64   `json:"lng"`
+	UseCount   int       `json:"use_count"`
+	LastUsedAt time.Time `json:"last_used_at"`
+}
+
+// recentLocationsLimit caps how many recents we return / retain per user.
+const recentLocationsLimit = 15
+
+// RecordRecentLocation upserts a picked place into the rider's recents: a new
+// (user,address) inserts; re-picking bumps last_used_at + use_count. Best-effort
+// from the caller's view — a failure here must never block a booking. Invalidates
+// the cached suggestions so the new recent shows immediately.
+func (s *Service) RecordRecentLocation(ctx context.Context, userID, address string, lat, lng float64) error {
+	if address == "" {
+		return apperrors.ErrBadRequest
+	}
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO recent_locations (user_id, address, lat, lng)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, address) WHERE deleted_at IS NULL
+		DO UPDATE SET last_used_at = NOW(), use_count = recent_locations.use_count + 1,
+		              lat = EXCLUDED.lat, lng = EXCLUDED.lng
+	`, userID, address, lat, lng)
+	if err != nil {
+		return err
+	}
+	s.redis.Del(ctx, rkeys.K.UserSuggestions(userID))
+	return nil
+}
+
+// ListRecentLocations returns the rider's most-recent live places, capped.
+func (s *Service) ListRecentLocations(ctx context.Context, userID string) ([]*RecentLocation, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, address, lat, lng, use_count, last_used_at
+		FROM recent_locations
+		WHERE user_id = $1 AND deleted_at IS NULL
+		ORDER BY last_used_at DESC
+		LIMIT $2
+	`, userID, recentLocationsLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	recents := make([]*RecentLocation, 0)
+	for rows.Next() {
+		r := &RecentLocation{}
+		if err := rows.Scan(&r.ID, &r.Address, &r.Lat, &r.Lng, &r.UseCount, &r.LastUsedAt); err != nil {
+			return nil, err
+		}
+		recents = append(recents, r)
+	}
+	return recents, rows.Err()
+}
+
+// DeleteRecentLocation soft-deletes one recent the caller owns (per the
+// soft-delete rule — the row is kept, just hidden).
+func (s *Service) DeleteRecentLocation(ctx context.Context, id, userID string) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE recent_locations SET deleted_at = NOW()
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+	`, id, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	s.redis.Del(ctx, rkeys.K.UserSuggestions(userID))
 	return nil
 }
 
@@ -322,9 +512,13 @@ func (s *Service) GetSuggestions(ctx context.Context, userID string) (map[string
 
 	saved, _ := s.ListSavedLocations(ctx, userID)
 	landmarks, _ := s.GetLandmarks(ctx)
+	// Explicit recents (picked-for-booking); the ride-derived recent_destinations
+	// stay as a fallback for users from before this feature existed.
+	recents, _ := s.ListRecentLocations(ctx, userID)
 
 	result := map[string]interface{}{
 		"saved_locations":     saved,
+		"recent_locations":    recents,
 		"recent_destinations": recentDests,
 		"landmarks":           landmarks,
 	}

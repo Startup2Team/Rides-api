@@ -44,7 +44,7 @@ func (r *Repository) ListByUser(ctx context.Context, userID string, limit, offse
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, title, body, type, data, is_read, sent_at, read_at
 		FROM notifications
-		WHERE user_id = $1
+		WHERE user_id = $1 AND deleted_at IS NULL
 		ORDER BY sent_at DESC
 		LIMIT $2 OFFSET $3
 	`, userID, limit, offset)
@@ -67,7 +67,7 @@ func (r *Repository) ListByUser(ctx context.Context, userID string, limit, offse
 func (r *Repository) UnreadCount(ctx context.Context, userID string) (int, error) {
 	var count int
 	err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = FALSE
+		SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = FALSE AND deleted_at IS NULL
 	`, userID).Scan(&count)
 	return count, err
 }
@@ -83,8 +83,28 @@ func (r *Repository) MarkRead(ctx context.Context, notifID, userID string) error
 func (r *Repository) MarkAllRead(ctx context.Context, userID string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE notifications SET is_read = TRUE, read_at = NOW()
-		WHERE user_id = $1 AND is_read = FALSE
+		WHERE user_id = $1 AND is_read = FALSE AND deleted_at IS NULL
 	`, userID)
+	return err
+}
+
+// MarkUnread reverses a read — scoped to the owner so one user can't touch
+// another's notifications.
+func (r *Repository) MarkUnread(ctx context.Context, notifID, userID string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE notifications SET is_read = FALSE, read_at = NULL
+		WHERE id = $1 AND user_id = $2
+	`, notifID, userID)
+	return err
+}
+
+// Delete SOFT-deletes a single notification the caller owns — the row is kept
+// (audit + "undo delete") and just hidden from the feed via deleted_at.
+func (r *Repository) Delete(ctx context.Context, notifID, userID string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE notifications SET deleted_at = NOW()
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+	`, notifID, userID)
 	return err
 }
 

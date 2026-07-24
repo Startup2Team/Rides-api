@@ -22,7 +22,7 @@ type mockRepo struct {
 func (m *mockRepo) FindByID(_ context.Context, _ string) (*customer.Profile, error) {
 	return nil, nil
 }
-func (m *mockRepo) UpdateProfile(_ context.Context, _ string, _, _, _, _ *string) error {
+func (m *mockRepo) UpdateProfile(_ context.Context, _ string, _ customer.ProfileUpdate) error {
 	return nil
 }
 func (m *mockRepo) RideStats(_ context.Context, _ string) (int, float64, error) {

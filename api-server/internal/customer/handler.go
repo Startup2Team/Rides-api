@@ -92,17 +92,26 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		FullName        *string `json:"full_name"`
-		Email           *string `json:"email"`
-		FCMToken        *string `json:"fcm_token"`
-		ProfileImageURL *string `json:"profile_image_url"`
+		FullName              *string `json:"full_name"`
+		Email                 *string `json:"email"`
+		FCMToken              *string `json:"fcm_token"`
+		ProfileImageURL       *string `json:"profile_image_url"`
+		EmergencyContactName  *string `json:"emergency_contact_name"`
+		EmergencyContactPhone *string `json:"emergency_contact_phone"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
 
-	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, body.FullName, body.Email, body.FCMToken, body.ProfileImageURL); err != nil {
+	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, ProfileUpdate{
+		FullName:              body.FullName,
+		Email:                 body.Email,
+		FCMToken:              body.FCMToken,
+		ProfileImageURL:       body.ProfileImageURL,
+		EmergencyContactName:  body.EmergencyContactName,
+		EmergencyContactPhone: body.EmergencyContactPhone,
+	}); err != nil {
 		respond.Error(w, err)
 		return
 	}
