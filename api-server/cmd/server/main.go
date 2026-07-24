@@ -182,6 +182,14 @@ func main() {
 	}
 	log.Info().Msg("migrations: up to date")
 
+	// Seed Rwanda's admin hierarchy (idempotent; no-op once present). Non-fatal:
+	// the app still boots without it, and it retries next start.
+	if err := location.SeedAdminUnits(context.Background(), db); err != nil {
+		log.Error().Err(err).Msg("admin_units: Rwanda hierarchy seed failed (non-fatal)")
+	} else {
+		log.Info().Msg("admin_units: Rwanda hierarchy ready")
+	}
+
 	// ── Core services ─────────────────────────────────────────────────────────
 	telSvc := telephony.New(cfg, log)
 	notifySvc := notification.New(cfg, log)
@@ -892,12 +900,15 @@ func main() {
 
 		r.Get("/me/saved-locations", locH.ListSavedLocations)
 		r.Post("/me/saved-locations", locH.CreateSavedLocation)
+		r.Put("/me/saved-locations", locH.ReplaceSavedLocations)
 		r.Put("/me/saved-locations/{id}", locH.UpdateSavedLocation)
 		r.Delete("/me/saved-locations/{id}", locH.DeleteSavedLocation)
 
 		r.Get("/me/notifications", notifH.List)
 		r.Get("/me/notifications/unread-count", notifH.UnreadCount)
 		r.Patch("/me/notifications/{id}/read", notifH.MarkRead)
+		r.Patch("/me/notifications/{id}/unread", notifH.MarkUnread)
+		r.Delete("/me/notifications/{id}", notifH.Delete)
 		r.Post("/me/notifications/mark-all-read", notifH.MarkAllRead)
 
 		// Multi-device FCM registration.
@@ -969,10 +980,17 @@ func main() {
 	// ── Locations (route cache, landmarks, suggestions) ───────────────────────
 	r.Route(apiV1Prefix+"/locations", func(r chi.Router) {
 		r.Get("/landmarks", locH.GetLandmarks) // public — no auth needed
+		// Rwanda admin hierarchy (reference data) — public, powers offline-ish
+		// structured address pickers/autocomplete without Google/Mapbox.
+		r.Get("/admin-units", locH.ListAdminUnits)
+		r.Get("/admin-units/search", locH.SearchAdminUnits)
 
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authenticate(cfg, rdb))
 			r.Get("/suggestions", locH.GetSuggestions)
+			r.Get("/recent", locH.ListRecentLocations)
+			r.Post("/recent", locH.RecordRecentLocation)
+			r.Delete("/recent/{id}", locH.DeleteRecentLocation)
 			r.Get("/route", locH.GetRoute)
 			r.Post("/route", locH.UpsertRoute)
 		})
