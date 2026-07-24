@@ -278,6 +278,48 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 	return tokens, user, nil
 }
 
+// Login authenticates an EXISTING user by phone number alone — no OTP. The
+// number was already verified once at registration, so a returning user signs
+// in on any device with just the number (product decision: passwordless,
+// cross-device convenience — the only secret is knowing the number). Mirrors
+// the "existing user" branch of VerifyOTP: it never creates an account, so an
+// unregistered number returns ErrNotFound (the app then routes to register).
+func (s *Service) Login(ctx context.Context, phone, deviceID, platform, appVersion, ipAddr string) (*TokenPair, *User, error) {
+	user, err := s.repo.FindUserByPhone(ctx, phone)
+	if err != nil {
+		// ErrNotFound → 404 (app shows "register instead"); other errors bubble up.
+		return nil, nil, err
+	}
+
+	// Keep the device_id current (used by push targeting + collision detection).
+	_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
+
+	// Reject suspended accounts before issuing tokens (auto-lifting an elapsed
+	// temp-ban first), exactly like VerifyOTP.
+	s.liftExpiredSuspension(ctx, user)
+	if user.IsSuspended {
+		return nil, nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
+	}
+
+	// Log device session (best-effort).
+	_ = s.repo.LogDeviceSession(ctx, user.ID, deviceID, platform, appVersion, ipAddr)
+
+	// Device collision detection — same device_id on multiple accounts. Flag for
+	// review in production only (dev/test routinely shares one device).
+	if collision, _ := s.repo.DetectDeviceCollision(ctx, deviceID, user.ID); collision {
+		s.log.Warn().Str("device_id", deviceID).Str("user_id", user.ID).Msg("device collision detected (login)")
+		if s.cfg.Env == "production" {
+			_ = s.repo.FlagUserForReview(ctx, user.ID)
+		}
+	}
+
+	tokens, err := s.issueTokenPair(ctx, user)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tokens, user, nil
+}
+
 // VerifyOTPCode checks a code against the latest stored OTP for a phone.
 // Used by the admin panel to verify a driver's phone without creating a session.
 func (s *Service) VerifyOTPCode(ctx context.Context, phone, code string) error {

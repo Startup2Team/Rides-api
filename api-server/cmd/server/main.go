@@ -725,6 +725,9 @@ func main() {
 		r.With(mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour)).Post("/register", authH.Register)
 		// verify-otp is brute-forceable (6-digit code) — cap attempts per phone too.
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
+		// Phone-only login (no OTP). Passwordless, so rate-limit by IP to blunt
+		// mass phone-number enumeration / account-takeover sweeps.
+		r.With(mw.IPRateLimit(cfg, rdb, "auth_login", cfg.Security.AuthRefreshRateLimit, 15*time.Minute)).Post("/login", authH.Login)
 		r.With(mw.IPRateLimit(cfg, rdb, "auth_refresh", cfg.Security.AuthRefreshRateLimit, 15*time.Minute)).Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/ws-ticket", authH.WSTicket)
