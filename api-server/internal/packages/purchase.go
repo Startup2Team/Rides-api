@@ -358,7 +358,16 @@ func (s *PurchaseService) GetStatus(ctx context.Context, userID, purchaseID stri
 		return nil, err
 	}
 	if p.Status == "PENDING" {
-		if settled, settleErr := s.devSettlePending(ctx, p.ID, p.PaymentRef); settleErr != nil {
+		// Settle on read so the driver's status poll resolves within seconds
+		// instead of waiting for the 30s reconcile sweep. With a live gateway this
+		// queries MTN (ReconcileSingle); otherwise it uses the dev auto-confirm.
+		if s.momo != nil {
+			if settled, rErr := s.ReconcileSingle(ctx, p.ID); rErr != nil {
+				s.log.Warn().Err(rErr).Str("purchase_id", p.ID).Msg("packages: reconcile on status poll failed")
+			} else if settled != nil {
+				return settled, nil
+			}
+		} else if settled, settleErr := s.devSettlePending(ctx, p.ID, p.PaymentRef); settleErr != nil {
 			s.log.Warn().Err(settleErr).Str("purchase_id", p.ID).Msg("packages: dev auto-confirm on status poll failed")
 		} else if settled != nil {
 			return settled, nil
@@ -585,7 +594,10 @@ func (s *PurchaseService) ReconcileSingle(ctx context.Context, purchaseID string
 		return nil, apperrors.ErrNotFound
 	}
 
-	if p.Status != "pending" {
+	// Purchases are stored with an uppercase status ("PENDING"). The previous
+	// lowercase guard made this return early for every real purchase, so a live
+	// MTN reconcile never ran.
+	if p.Status != "PENDING" {
 		return p, nil
 	}
 
