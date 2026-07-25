@@ -1070,6 +1070,7 @@ func main() {
 			r.Post("/drivers/{id}/reject", adminH.RejectDriver)
 			r.Post("/drivers/{id}/request-more-info", adminH.RequestDriverMoreInfo)
 			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
+			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
@@ -1114,6 +1115,7 @@ func main() {
 			// Push Notifications Campaigns
 			r.Post("/notifications", adminH.CreateNotificationCampaign)
 			r.Get("/notifications", adminH.ListNotificationCampaigns)
+			r.Post("/notifications/{id}/send", adminH.SendNotificationCampaign)
 			r.Delete("/notifications/{id}", adminH.DeleteNotificationCampaign)
 
 			// Safety incidents
@@ -1360,6 +1362,8 @@ func main() {
 	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
 	adminSvc.SetNotifier(notifySvc) // push driver approve/reject decisions to the driver's devices
+	// Fire "Schedule for later" notification campaigns when their time arrives.
+	go adminSvc.RunScheduledCampaignDispatcher(bgCtx)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// WriteTimeout must be 0 when serving WebSockets — a global write timeout
