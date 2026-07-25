@@ -21,6 +21,9 @@ type Profile struct {
 	ProfileImageURL       *string `json:"profile_image_url,omitempty"`
 	EmergencyContactName  *string `json:"emergency_contact_name,omitempty"`
 	EmergencyContactPhone *string `json:"emergency_contact_phone,omitempty"`
+	// PreferredMode is the active VIEW ("customer"|"driver"), separate from
+	// role_state (capability). Null until the user first switches.
+	PreferredMode *string `json:"preferred_mode,omitempty"`
 }
 
 // ProfileUpdate carries the mutable customer profile fields. Nil = leave
@@ -48,10 +51,10 @@ func (r *Repository) FindByID(ctx context.Context, userID string) (*Profile, err
 	p := &Profile{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, phone_number, full_name, email, fcm_token, role_state, profile_image_url,
-		       emergency_contact_name, emergency_contact_phone
+		       emergency_contact_name, emergency_contact_phone, preferred_mode
 		FROM users WHERE id = $1
 	`, userID).Scan(&p.ID, &p.PhoneNumber, &p.FullName, &p.Email, &p.FCMToken, &p.RoleState, &p.ProfileImageURL,
-		&p.EmergencyContactName, &p.EmergencyContactPhone)
+		&p.EmergencyContactName, &p.EmergencyContactPhone, &p.PreferredMode)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperrors.ErrNotFound

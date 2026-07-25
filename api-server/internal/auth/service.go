@@ -248,6 +248,13 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 		_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
 	}
 
+	// Self-heal: reconcile role_state to the driver CAPABILITY so a driver whose
+	// role_state drifted to CUSTOMER_ONLY (e.g. an old mode-switch) is recognised
+	// as a driver again — the JWT below then carries the corrected role.
+	if reconciled, rErr := s.repo.ReconcileRoleState(ctx, user.ID); rErr == nil {
+		user.RoleState = reconciled
+	}
+
 	// Reject suspended accounts before issuing tokens (auto-lifting any temp-ban
 	// whose window has already elapsed).
 	s.liftExpiredSuspension(ctx, user)
@@ -293,6 +300,12 @@ func (s *Service) Login(ctx context.Context, phone, deviceID, platform, appVersi
 
 	// Keep the device_id current (used by push targeting + collision detection).
 	_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
+
+	// Self-heal role_state to the driver capability (see VerifyOTP) so a returning
+	// driver whose role drifted to CUSTOMER_ONLY is signed in as a driver again.
+	if reconciled, rErr := s.repo.ReconcileRoleState(ctx, user.ID); rErr == nil {
+		user.RoleState = reconciled
+	}
 
 	// Reject suspended accounts before issuing tokens (auto-lifting an elapsed
 	// temp-ban first), exactly like VerifyOTP.

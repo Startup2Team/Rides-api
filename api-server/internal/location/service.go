@@ -535,17 +535,22 @@ func (s *Service) SwitchMode(ctx context.Context, userID, mode string) error {
 		return apperrors.ErrBadRequest
 	}
 
+	// Read the driver CAPABILITY once (there may be no driver profile at all).
+	var approvalStatus string
+	var policyAccepted bool
+	hasProfile := true
+	if err := s.db.QueryRow(ctx,
+		`SELECT approval_status, COALESCE(policy_accepted, FALSE) FROM driver_profiles WHERE user_id = $1`,
+		userID,
+	).Scan(&approvalStatus, &policyAccepted); err != nil {
+		hasProfile = false
+	}
+
 	if mode == "driver" {
-		var status string
-		var policyAccepted bool
-		err := s.db.QueryRow(ctx,
-			`SELECT approval_status, COALESCE(policy_accepted, FALSE) FROM driver_profiles WHERE user_id = $1`,
-			userID,
-		).Scan(&status, &policyAccepted)
-		if err != nil {
+		if !hasProfile {
 			return apperrors.New(403, "NO_DRIVER_PROFILE", "driver profile not found")
 		}
-		if status != "APPROVED" {
+		if approvalStatus != "APPROVED" {
 			return apperrors.New(403, "DRIVER_NOT_ACTIVE", "driver profile is not active")
 		}
 		if !policyAccepted {
@@ -563,13 +568,25 @@ func (s *Service) SwitchMode(ctx context.Context, userID, mode string) error {
 		return apperrors.New(409, "ACTIVE_RIDE", "complete your active ride before switching modes")
 	}
 
+	// role_state tracks CAPABILITY (never downgraded by a view switch);
+	// preferred_mode tracks the active VIEW. This is what keeps an approved
+	// driver a driver even while they browse as a customer.
 	roleState := "CUSTOMER_ONLY"
-	if mode == "driver" {
-		roleState = "DRIVER_ACTIVE"
+	if hasProfile {
+		switch approvalStatus {
+		case "APPROVED":
+			roleState = "DRIVER_ACTIVE"
+		case "SUSPENDED":
+			roleState = "DRIVER_SUSPENDED"
+		case "REJECTED":
+			roleState = "CUSTOMER_ONLY"
+		default:
+			roleState = "DRIVER_PENDING"
+		}
 	}
-	_, err := s.db.Exec(ctx,
-		`UPDATE users SET role_state = $1, updated_at = NOW() WHERE id = $2`, roleState, userID)
-	if err != nil {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE users SET role_state = $1, preferred_mode = $2, updated_at = NOW() WHERE id = $3`,
+		roleState, mode, userID); err != nil {
 		return err
 	}
 	s.revokeUserSessions(ctx, userID)
