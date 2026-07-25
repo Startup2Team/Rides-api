@@ -100,8 +100,13 @@ type JWTConfig struct {
 	RefreshSecret       string
 	AccessExpiryMinutes int
 	RefreshExpiryDays   int
-	AccessExpiry        time.Duration
-	RefreshExpiry       time.Duration
+	/** Idle timeout for admin console sessions (renewed on activity). */
+	AdminIdleMinutes     int
+	AdminIdleExpiry      time.Duration
+	AdminSessionMaxHours int
+	AdminSessionMax      time.Duration
+	AccessExpiry         time.Duration
+	RefreshExpiry        time.Duration
 }
 
 type ATConfig struct {
@@ -256,8 +261,17 @@ func Load() (*Config, error) {
 	}
 	cfg.JWT.RefreshSecret = requireEnv("JWT_REFRESH_SECRET")
 	cfg.JWT.AccessExpiryMinutes = getEnvInt("JWT_ACCESS_EXPIRY_MINUTES", 15)
+	// Admin console sessions are separate from the mobile app's: the console
+	// renews on activity, so this is effectively an idle timeout. 15 minutes of
+	// absolute expiry meant admins were bounced to login mid-task.
+	cfg.JWT.AdminIdleMinutes = getEnvInt("JWT_ADMIN_IDLE_MINUTES", 60)
+	// Hard ceiling on a renewed session, no matter how active: a stolen token
+	// must not be renewable forever.
+	cfg.JWT.AdminSessionMaxHours = getEnvInt("JWT_ADMIN_SESSION_MAX_HOURS", 12)
 	cfg.JWT.RefreshExpiryDays = getEnvInt("JWT_REFRESH_EXPIRY_DAYS", 30)
 	cfg.JWT.AccessExpiry = time.Duration(cfg.JWT.AccessExpiryMinutes) * time.Minute
+	cfg.JWT.AdminIdleExpiry = time.Duration(cfg.JWT.AdminIdleMinutes) * time.Minute
+	cfg.JWT.AdminSessionMax = time.Duration(cfg.JWT.AdminSessionMaxHours) * time.Hour
 	cfg.JWT.RefreshExpiry = time.Duration(cfg.JWT.RefreshExpiryDays) * 24 * time.Hour
 
 	cfg.AT.APIKey = getEnv("AT_API_KEY", "")
