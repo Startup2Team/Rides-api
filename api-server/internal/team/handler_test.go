@@ -23,6 +23,7 @@ import (
 // ── Mock ──────────────────────────────────────────────────────────────────
 
 type mockSvc struct {
+	renewSessionFn func(ctx context.Context, adminID, jti string, loginAt int64) (string, error)
 	loginFn            func(ctx context.Context, email, password string) (*team.LoginResult, error)
 	verify2FAFn        func(ctx context.Context, preAuthToken, code string) (*team.LoginResult, error)
 	reissue2FAFn       func(ctx context.Context, adminID string) (string, error)
@@ -128,6 +129,12 @@ func (m *mockSvc) Remove(ctx context.Context, id string) error {
 	return m.removeFn(ctx, id)
 }
 func (m *mockSvc) ResendInvite(ctx context.Context, id, loginURL string) error        { return nil }
+func (m *mockSvc) RenewSession(ctx context.Context, adminID, jti string, loginAt int64) (string, error) {
+	if m.renewSessionFn != nil {
+		return m.renewSessionFn(ctx, adminID, jti, loginAt)
+	}
+	return "renewed-token", nil
+}
 func (m *mockSvc) ResetMember2FA(ctx context.Context, actorID, memberID string) error { return nil }
 func (m *mockSvc) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]team.AuditEntry, error) {
 	return nil, nil

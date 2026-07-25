@@ -52,6 +52,27 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, result)
 }
 
+// POST /api/v1/admin/auth/renew
+// Slides the current admin session forward. Requires a valid access token; the
+// console calls it while the admin is active, making the lifetime an idle timeout.
+func (h *Handler) RenewSession(w http.ResponseWriter, r *http.Request) {
+	claims := mw.GetClaims(r)
+	if claims == nil || claims.UserID == "" {
+		respond.ErrorMsg(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	if claims.TokenType == preAuthTokenType {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "complete sign-in before renewing")
+		return
+	}
+	token, err := h.svc.RenewSession(r.Context(), claims.UserID, claims.ID, claims.LoginAt)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"access_token": token})
+}
+
 // POST /api/v1/admin/auth/2fa/reissue
 // Returns a pre_auth_token when 2FA is already enabled (recovery for setup UI mismatch).
 func (h *Handler) Reissue2FAChallenge(w http.ResponseWriter, r *http.Request) {
