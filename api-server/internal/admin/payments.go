@@ -112,7 +112,6 @@ func (s *Service) RevenueKPIs(ctx context.Context, period string) (map[string]in
 	}, nil
 }
 
-
 // revenueWindow resolves the reporting window. An explicit from/to always wins;
 // otherwise fall back to the named period. periodToInterval maps anything it
 // doesn't recognise — including "custom" and "today" — to INTERVAL '1 day', so
