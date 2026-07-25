@@ -112,8 +112,8 @@ func (m *mockSvc) UpdateRoleByID(ctx context.Context, roleID, name, description 
 func (m *mockSvc) DeleteRoleByID(ctx context.Context, roleID string) error {
 	return m.deleteRoleByIDFn(ctx, roleID)
 }
-func (m *mockSvc) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
-	return nil
+func (m *mockSvc) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) (*team.Role, error) {
+	return &team.Role{ID: roleID, Permissions: permissions}, nil
 }
 func (m *mockSvc) UpdateRole(ctx context.Context, id, roleID string) error {
 	return m.updateRoleFn(ctx, id, roleID)

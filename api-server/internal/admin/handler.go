@@ -201,18 +201,19 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) SuspendUser(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "id")
 	var body struct {
-		DurationHours int `json:"duration_hours"`
+		Reason        string `json:"reason"`
+		DurationHours int    `json:"duration_hours"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DurationHours <= 0 {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-	if err := h.svc.SuspendUser(r.Context(), userID, body.DurationHours); err != nil {
+	if err := h.svc.SuspendUser(r.Context(), userID, body.Reason, body.DurationHours); err != nil {
 		respond.Error(w, err)
 		return
 	}
 	adminID, role := adminCtx(r)
-	h.audit.Record(r.Context(), adminID, role, "customer.suspend", "customer", userID, "Suspended customer", map[string]any{"duration_hours": body.DurationHours})
+	h.audit.Record(r.Context(), adminID, role, "customer.suspend", "customer", userID, "Suspended customer", map[string]any{"duration_hours": body.DurationHours, "reason": body.Reason})
 	respond.NoContent(w)
 }
 

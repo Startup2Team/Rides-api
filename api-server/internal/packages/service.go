@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/rs/zerolog"
 
@@ -177,7 +178,19 @@ func (s *Service) AdminUpdateCampaign(ctx context.Context, id string, input *Upd
 	return s.repo.UpdateCampaign(ctx, id, input)
 }
 
+// campaignStatuses are the only values ride_campaigns.status may hold. The
+// column has no CHECK constraint, and the catalog queries match on 'ACTIVE', so
+// an unnormalized "active" would be stored happily and then never apply.
+var campaignStatuses = map[string]bool{
+	"DRAFT": true, "SCHEDULED": true, "ACTIVE": true, "EXPIRED": true, "ARCHIVED": true,
+}
+
 func (s *Service) AdminSetCampaignStatus(ctx context.Context, id string, status string) error {
+	status = strings.ToUpper(strings.TrimSpace(status))
+	if !campaignStatuses[status] {
+		return apperrors.New(http.StatusBadRequest, "INVALID_STATUS",
+			"status must be DRAFT, SCHEDULED, ACTIVE, EXPIRED, or ARCHIVED")
+	}
 	return s.repo.SetCampaignStatus(ctx, id, status)
 }
 

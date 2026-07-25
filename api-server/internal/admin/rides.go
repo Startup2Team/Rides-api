@@ -176,18 +176,26 @@ func (s *Service) LiveRidesStats(ctx context.Context) (map[string]interface{}, e
 		val   *int
 	}
 	var total, searching, negotiating, driverEnRoute, onTrip int
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status IN ('SEARCHING','DRIVER_FOUND','DRIVER_EN_ROUTE','DRIVER_ARRIVED','NEGOTIATING','ON_TRIP')`).Scan(&total)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = ANY($1)`, liveStatuses).Scan(&total)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'SEARCHING'`).Scan(&searching)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'NEGOTIATING'`).Scan(&negotiating)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status IN ('DRIVER_EN_ROUTE','DRIVER_ARRIVED')`).Scan(&driverEnRoute)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'ON_TRIP'`).Scan(&onTrip)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE status = 'IN_PROGRESS'`).Scan(&onTrip)
 	return map[string]interface{}{
 		"total": total, "searching": searching,
 		"negotiating": negotiating, "driver_en_route": driverEnRoute, "on_trip": onTrip,
 	}, nil
 }
 
-var liveStatuses = []string{"SEARCHING", "DRIVER_FOUND", "DRIVER_EN_ROUTE", "DRIVER_ARRIVED", "NEGOTIATING", "ON_TRIP"}
+// liveStatuses are the ride states that count as "in flight" for the live-ops
+// console. These must match internal/ride/statemachine.go exactly: DRIVER_FOUND
+// and ON_TRIP were listed here but do not exist in the state machine, so trips
+// that were actually underway (IN_PROGRESS) — plus MATCHED and CONFIRMED — were
+// missing from the live list and every stat.
+var liveStatuses = []string{
+	"SEARCHING", "MATCHED", "NEGOTIATING", "CONFIRMED",
+	"DRIVER_EN_ROUTE", "DRIVER_ARRIVED", "IN_PROGRESS",
+}
 
 func (s *Service) ListLiveRides(ctx context.Context, status, district, search string, limit, offset int) ([]map[string]interface{}, int, error) {
 	var wheres []string

@@ -443,9 +443,12 @@ func (h *Handler) UpdateRolePermissions(w http.ResponseWriter, r *http.Request) 
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "permissions array is required")
 		return
 	}
-	role, err := h.svc.UpdateRoleByID(r.Context(), roleID, "", "", body.Permissions)
+	// Permissions-only update. This used to call UpdateRoleByID with empty name and
+	// description, whose UPDATE sets all three columns — so saving a role's
+	// permissions blanked its name and description.
+	role, err := h.svc.UpdateRolePermissions(r.Context(), roleID, body.Permissions)
 	if err != nil {
-		if err.Error() == "cannot_delete_system_role" {
+		if err.Error() == "cannot_modify_system_role" || err.Error() == "cannot_delete_system_role" {
 			respond.ErrorMsg(w, http.StatusBadRequest, "CANNOT_MODIFY_SYSTEM_ROLE", "system roles cannot be modified")
 			return
 		}

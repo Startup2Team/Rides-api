@@ -25,7 +25,7 @@ type AdminService interface {
 	ClearGPSFlags(ctx context.Context, profileID string) error
 	ListCustomers(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
 	GetCustomer(ctx context.Context, userID string) (map[string]interface{}, error)
-	SuspendUser(ctx context.Context, userID string, durationHours int) error
+	SuspendUser(ctx context.Context, userID, reason string, durationHours int) error
 	ReinstateUser(ctx context.Context, userID string) error
 	UpdateCustomer(ctx context.Context, userID, status, notes string) error
 	BanCustomer(ctx context.Context, userID, reason string) error

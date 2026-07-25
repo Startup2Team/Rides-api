@@ -363,7 +363,7 @@ func TestSuspendUser_Success(t *testing.T) {
 			return pgconn.CommandTag{}, nil
 		},
 	})
-	assert.NoError(t, svc.SuspendUser(context.Background(), "user-uuid", 72))
+	assert.NoError(t, svc.SuspendUser(context.Background(), "user-uuid", "policy violation", 72))
 }
 
 func TestSuspendUser_DBError(t *testing.T) {
@@ -373,7 +373,7 @@ func TestSuspendUser_DBError(t *testing.T) {
 			return pgconn.CommandTag{}, dbErr
 		},
 	})
-	assert.ErrorIs(t, svc.SuspendUser(context.Background(), "user-uuid", 24), dbErr)
+	assert.ErrorIs(t, svc.SuspendUser(context.Background(), "user-uuid", "policy violation", 24), dbErr)
 }
 
 func TestSuspendUser_RevokesSessions(t *testing.T) {
@@ -400,7 +400,7 @@ func TestSuspendUser_RevokesSessions(t *testing.T) {
 	_ = rdb.Set(ctx, "session:user-uuid:jti2", "valid", 0).Err()
 	_ = rdb.Set(ctx, "session:other-user:jti3", "valid", 0).Err()
 
-	err = svc.SuspendUser(ctx, "user-uuid", 24)
+	err = svc.SuspendUser(ctx, "user-uuid", "policy violation", 24)
 	assert.NoError(t, err)
 
 	assert.False(t, mr.Exists("session:user-uuid:jti1"))

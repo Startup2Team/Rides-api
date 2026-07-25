@@ -171,12 +171,19 @@ func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]in
 	}, nil
 }
 
-func (s *Service) SuspendUser(ctx context.Context, userID string, durationHours int) error {
+func (s *Service) SuspendUser(ctx context.Context, userID, reason string, durationHours int) error {
 	suspendedUntil := time.Now().Add(time.Duration(durationHours) * time.Hour)
+	// reason is required by the admin UI — keep it on the record so a suspension
+	// can be explained later (it used to be collected and thrown away).
+	var reasonVal *string
+	if reason != "" {
+		reasonVal = &reason
+	}
 	_, err := s.db.Exec(ctx, `
-		UPDATE users SET is_suspended = TRUE, suspension_until = $1, updated_at = NOW()
-		WHERE id = $2
-	`, suspendedUntil, userID)
+		UPDATE users SET is_suspended = TRUE, suspension_until = $1,
+		                 suspension_reason = COALESCE($2, suspension_reason), updated_at = NOW()
+		WHERE id = $3
+	`, suspendedUntil, reasonVal, userID)
 	if err != nil {
 		return err
 	}
