@@ -105,8 +105,8 @@ type JWTConfig struct {
 	AdminIdleExpiry      time.Duration
 	AdminSessionMaxHours int
 	AdminSessionMax      time.Duration
-	AccessExpiry        time.Duration
-	RefreshExpiry       time.Duration
+	AccessExpiry         time.Duration
+	RefreshExpiry        time.Duration
 }
 
 type ATConfig struct {
