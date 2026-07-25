@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/internal/ledger"
+	"github.com/workspace/ride-platform/internal/notification"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -348,7 +349,32 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 	if err := s.postSale(txCtx, p); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	// Notify the driver that their payment went through and the rides landed —
+	// the automatic MoMo flow previously granted credits silently. Best-effort,
+	// after commit so it only fires on a real settlement.
+	s.notifyPurchasePaid(ctx, profileID, rides, bonus)
+	return nil
+}
+
+// notifyPurchasePaid persists an in-app notification + pushes it to the driver's
+// devices once an automatic MoMo package purchase settles.
+func (s *PurchaseService) notifyPurchasePaid(ctx context.Context, profileID string, rides, bonus int) {
+	notifSvc := notification.Default()
+	if notifSvc == nil {
+		return
+	}
+	var userID string
+	if err := s.repo.db.QueryRow(ctx,
+		`SELECT user_id FROM driver_profiles WHERE id = $1`, profileID).Scan(&userID); err != nil || userID == "" {
+		return
+	}
+	total := rides + bonus
+	body := fmt.Sprintf("Payment successful — %d ride credits were added to your account.", total)
+	notifSvc.SendToAllDevices(ctx, userID, "Payment successful", body,
+		"package_purchase_paid", map[string]string{"type": "package_purchase_paid"})
 }
 
 // GetStatus returns a purchase for polling (must belong to the user).
