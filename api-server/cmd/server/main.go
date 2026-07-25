@@ -1024,6 +1024,9 @@ func main() {
 
 		// Auth (protected actions) - My Account (unrestricted admin roles)
 		r.Post("/auth/logout", teamH.Logout)
+		// Sliding session: the console renews while the admin is active, so the
+		// token lifetime behaves as an idle timeout instead of booting them mid-task.
+		r.Post("/auth/renew", teamH.RenewSession)
 		r.Post("/auth/2fa/reissue", teamH.Reissue2FAChallenge)
 		r.Post("/auth/totp/reset", teamH.ResetTOTP)
 
