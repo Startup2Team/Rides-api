@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -816,9 +818,12 @@ func (h *Handler) LaunchReadiness(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/notifications
 func (h *Handler) CreateNotificationCampaign(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title    string `json:"title"`
-		Body     string `json:"body"`
-		Audience string `json:"audience"`
+		Title          string     `json:"title"`
+		Body           string     `json:"body"`
+		Audience       string     `json:"audience"`
+		Status         string     `json:"status"`
+		ScheduledAt    *time.Time `json:"scheduled_at"`
+		TargetDriverID string     `json:"target_driver_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
@@ -826,7 +831,15 @@ func (h *Handler) CreateNotificationCampaign(w http.ResponseWriter, r *http.Requ
 	}
 
 	adminID, role := adminCtx(r)
-	campaign, err := h.svc.CreateNotificationCampaign(r.Context(), body.Title, body.Body, body.Audience, adminID)
+	campaign, err := h.svc.CreateNotificationCampaign(r.Context(), CampaignInput{
+		Title:           body.Title,
+		Body:            body.Body,
+		Audience:        body.Audience,
+		Status:          strings.ToUpper(body.Status),
+		ScheduledAt:     body.ScheduledAt,
+		TargetDriverRef: body.TargetDriverID,
+		CreatedBy:       adminID,
+	})
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -835,6 +848,35 @@ func (h *Handler) CreateNotificationCampaign(w http.ResponseWriter, r *http.Requ
 	h.audit.Record(r.Context(), adminID, role, "notification.send", "admin_notifications", campaign["id"].(string), "Sent notification campaign", map[string]any{
 		"title":    body.Title,
 		"audience": body.Audience,
+		"status":   campaign["status"],
+	})
+
+	respond.Created(w, campaign)
+}
+
+// POST /api/v1/admin/drivers/:id/notify — direct message to one driver.
+func (h *Handler) NotifyDriver(w http.ResponseWriter, r *http.Request) {
+	profileID := chi.URLParam(r, "id")
+	var body struct {
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+
+	adminID, role := adminCtx(r)
+	campaign, err := h.svc.NotifyDriver(r.Context(), profileID, body.Title, body.Body, body.Reason, adminID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	h.audit.Record(r.Context(), adminID, role, "driver.notify", "driver", profileID, "Sent direct notification to driver", map[string]any{
+		"title":  body.Title,
+		"reason": body.Reason,
 	})
 
 	respond.Created(w, campaign)
@@ -852,6 +894,23 @@ func (h *Handler) ListNotificationCampaigns(w http.ResponseWriter, r *http.Reque
 		"notifications": campaigns,
 		"total":         total,
 	})
+}
+
+// POST /api/v1/admin/notifications/:id/send — deliver a draft/scheduled campaign now.
+func (h *Handler) SendNotificationCampaign(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	adminID, role := adminCtx(r)
+	campaign, err := h.svc.SendNotificationCampaignNow(r.Context(), id, adminID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	h.audit.Record(r.Context(), adminID, role, "notification.send", "admin_notifications", id, "Sent notification campaign", map[string]any{
+		"audience": campaign["audience"],
+	})
+
+	respond.OK(w, campaign)
 }
 
 // DELETE /api/v1/admin/notifications/:id

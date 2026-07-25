@@ -61,7 +61,8 @@ type mockSvc struct {
 	getAccountTimelineFn         func(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
 	launchReadinessFn            func(ctx context.Context) (map[string]interface{}, error)
 	getDriverReferralsFn         func(ctx context.Context, profileID string) ([]map[string]interface{}, error)
-	createNotificationCampaignFn func(ctx context.Context, title, body, audience, createdBy string) (map[string]interface{}, error)
+	createNotificationCampaignFn func(ctx context.Context, in admin.CampaignInput) (map[string]interface{}, error)
+	notifyDriverFn               func(ctx context.Context, driverRef, title, body, reason, createdBy string) (map[string]interface{}, error)
 	listNotificationCampaignsFn  func(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error)
 	deleteNotificationCampaignFn func(ctx context.Context, id string) error
 }
@@ -224,11 +225,22 @@ func (m *mockSvc) GetDriverReferrals(ctx context.Context, profileID string) ([]m
 	return nil, nil
 }
 
-func (m *mockSvc) CreateNotificationCampaign(ctx context.Context, title, body, audience, createdBy string) (map[string]interface{}, error) {
+func (m *mockSvc) CreateNotificationCampaign(ctx context.Context, in admin.CampaignInput) (map[string]interface{}, error) {
 	if m.createNotificationCampaignFn != nil {
-		return m.createNotificationCampaignFn(ctx, title, body, audience, createdBy)
+		return m.createNotificationCampaignFn(ctx, in)
 	}
-	return map[string]interface{}{}, nil
+	return map[string]interface{}{"id": "campaign-id"}, nil
+}
+
+func (m *mockSvc) SendNotificationCampaignNow(ctx context.Context, id, sentBy string) (map[string]interface{}, error) {
+	return map[string]interface{}{"id": id, "status": "SENT"}, nil
+}
+
+func (m *mockSvc) NotifyDriver(ctx context.Context, driverRef, title, body, reason, createdBy string) (map[string]interface{}, error) {
+	if m.notifyDriverFn != nil {
+		return m.notifyDriverFn(ctx, driverRef, title, body, reason, createdBy)
+	}
+	return map[string]interface{}{"id": "campaign-id", "status": "SENT"}, nil
 }
 
 func (m *mockSvc) ListNotificationCampaigns(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error) {

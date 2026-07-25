@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -1200,22 +1201,190 @@ func TestCreateNotificationCampaign_Success(t *testing.T) {
 	now := time.Now()
 	// No notifier wired → campaign is recorded (QueryRow) then delivered
 	// feed-only via a set-based insert (Exec).
+	delivered := false
 	svc := newTestService(&mockDB{
 		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
-			return scanRow("campaign-id", "SENT", now, now)
+			return scanRow("campaign-id", now)
 		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			delivered = true
 			return pgconn.NewCommandTag("INSERT 10"), nil
 		},
 	})
 
-	campaign, err := svc.CreateNotificationCampaign(context.Background(), "Promo Title", "Promo Body", "ALL", "admin-id")
+	campaign, err := svc.CreateNotificationCampaign(context.Background(), CampaignInput{
+		Title: "Promo Title", Body: "Promo Body", Audience: "ALL", CreatedBy: "admin-id",
+	})
 	require.NoError(t, err)
 	assert.Equal(t, "campaign-id", campaign["id"])
 	assert.Equal(t, "Promo Title", campaign["title"])
 	assert.Equal(t, "Promo Body", campaign["body"])
 	assert.Equal(t, "ALL", campaign["audience"])
 	assert.Equal(t, "SENT", campaign["status"])
+	assert.True(t, delivered, "an immediate campaign must be delivered")
+}
+
+// A per-vehicle audience filters on the canonical transport_type code — the
+// console's "Rifani" is the tuk-tuk.
+func TestCreateNotificationCampaign_VehicleAudience(t *testing.T) {
+	var deliveryArgs []any
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("campaign-id", time.Now())
+		},
+		execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+			deliveryArgs = args
+			return pgconn.NewCommandTag("INSERT 3"), nil
+		},
+	})
+
+	campaign, err := svc.CreateNotificationCampaign(context.Background(), CampaignInput{
+		Title: "Inspection", Body: "Bring your tuk-tuk in", Audience: "DRIVER_RIFANI", CreatedBy: "admin-id",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "DRIVER_RIFANI", campaign["audience"])
+	require.Len(t, deliveryArgs, 4)
+	assert.Equal(t, "TUK_TUK", deliveryArgs[3])
+}
+
+func TestCreateNotificationCampaign_InvalidAudience(t *testing.T) {
+	svc := newTestService(&mockDB{})
+
+	_, err := svc.CreateNotificationCampaign(context.Background(), CampaignInput{
+		Title: "T", Body: "B", Audience: "DRIVER_SPACESHIP", CreatedBy: "admin-id",
+	})
+	require.Error(t, err)
+	var appErr *apperrors.AppError
+	require.ErrorAs(t, err, &appErr)
+	assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
+}
+
+// A draft is recorded but must NOT be broadcast — it used to go out to every
+// user the moment an admin clicked "Save as draft".
+func TestCreateNotificationCampaign_DraftNotDelivered(t *testing.T) {
+	delivered := false
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("campaign-id", time.Now())
+		},
+		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			delivered = true
+			return pgconn.NewCommandTag("INSERT 10"), nil
+		},
+	})
+
+	campaign, err := svc.CreateNotificationCampaign(context.Background(), CampaignInput{
+		Title: "T", Body: "B", Audience: "ALL", Status: "DRAFT", CreatedBy: "admin-id",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "DRAFT", campaign["status"])
+	assert.False(t, delivered, "a draft must not be delivered")
+}
+
+func TestCreateNotificationCampaign_ScheduledNeedsTime(t *testing.T) {
+	svc := newTestService(&mockDB{})
+
+	_, err := svc.CreateNotificationCampaign(context.Background(), CampaignInput{
+		Title: "T", Body: "B", Audience: "ALL", Status: "SCHEDULED", CreatedBy: "admin-id",
+	})
+	require.Error(t, err)
+	var appErr *apperrors.AppError
+	require.ErrorAs(t, err, &appErr)
+	assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
+}
+
+func TestCreateNotificationCampaign_ScheduledIsHeld(t *testing.T) {
+	delivered := false
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("campaign-id", time.Now())
+		},
+		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+			delivered = true
+			return pgconn.NewCommandTag("INSERT 10"), nil
+		},
+	})
+
+	at := time.Now().Add(2 * time.Hour)
+	campaign, err := svc.CreateNotificationCampaign(context.Background(), CampaignInput{
+		Title: "T", Body: "B", Audience: "ALL", Status: "SCHEDULED", ScheduledAt: &at, CreatedBy: "admin-id",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "SCHEDULED", campaign["status"])
+	assert.False(t, delivered, "a scheduled campaign waits for the dispatcher")
+}
+
+// NotifyDriver takes a driver_profiles.id from the drivers console and resolves
+// it to the user the push must go to.
+func TestNotifyDriver_ResolvesProfileID(t *testing.T) {
+	const profileID = "11111111-1111-1111-1111-111111111111"
+	var insertedTarget any
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
+			if strings.Contains(sql, "FROM driver_profiles") {
+				return scanRow("user-99")
+			}
+			// the INSERT ... RETURNING
+			insertedTarget = args[5]
+			return scanRow("campaign-id", time.Now())
+		},
+		execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+			// feed-only fallback targets exactly that user
+			assert.Equal(t, "user-99", args[3])
+			return pgconn.NewCommandTag("INSERT 1"), nil
+		},
+	})
+
+	campaign, err := svc.NotifyDriver(context.Background(), profileID, "Notice", "Renew your license", "document_expiry", "admin-id")
+	require.NoError(t, err)
+	assert.Equal(t, "SINGLE_DRIVER", campaign["audience"])
+	assert.Equal(t, "user-99", campaign["target_driver_id"])
+	require.NotNil(t, insertedTarget)
+	assert.Equal(t, "user-99", *insertedTarget.(*string))
+}
+
+// Falls back to users.id when the pasted ID isn't a driver profile.
+func TestNotifyDriver_ResolvesUserID(t *testing.T) {
+	const userID = "22222222-2222-2222-2222-222222222222"
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			switch {
+			case strings.Contains(sql, "FROM driver_profiles"):
+				return errRow(pgx.ErrNoRows)
+			case strings.Contains(sql, "FROM users"):
+				return scanRow(userID)
+			default:
+				return scanRow("campaign-id", time.Now())
+			}
+		},
+	})
+
+	campaign, err := svc.NotifyDriver(context.Background(), userID, "Notice", "Body", "", "admin-id")
+	require.NoError(t, err)
+	assert.Equal(t, userID, campaign["target_driver_id"])
+}
+
+func TestNotifyDriver_UnknownDriver(t *testing.T) {
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return errRow(pgx.ErrNoRows)
+		},
+	})
+
+	_, err := svc.NotifyDriver(context.Background(), "33333333-3333-3333-3333-333333333333", "T", "B", "", "admin-id")
+	require.ErrorIs(t, err, apperrors.ErrNotFound)
+}
+
+// Free-text in the ID box must fail the request, not blow up on Postgres's
+// invalid-uuid error.
+func TestNotifyDriver_NonUUIDRef(t *testing.T) {
+	svc := newTestService(&mockDB{})
+
+	_, err := svc.NotifyDriver(context.Background(), "John the moto guy", "T", "B", "", "admin-id")
+	require.Error(t, err)
+	var appErr *apperrors.AppError
+	require.ErrorAs(t, err, &appErr)
+	assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
 }
 
 func TestListNotificationCampaigns_Success(t *testing.T) {
@@ -1232,9 +1401,11 @@ func TestListNotificationCampaigns_Success(t *testing.T) {
 					*dest[2].(*string) = "Promo Body"
 					*dest[3].(*string) = "DRIVERS"
 					*dest[4].(*string) = "SENT"
-					*dest[5].(*time.Time) = now
-					*dest[6].(*string) = "admin-id"
-					*dest[7].(*time.Time) = now
+					*dest[5].(**time.Time) = &now // sent_at
+					*dest[6].(**time.Time) = nil  // scheduled_at
+					*dest[7].(*string) = ""       // target_driver_id
+					*dest[8].(*string) = "admin-id"
+					*dest[9].(*time.Time) = now
 					return nil
 				},
 			}}, nil
