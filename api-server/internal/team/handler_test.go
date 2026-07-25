@@ -112,8 +112,8 @@ func (m *mockSvc) UpdateRoleByID(ctx context.Context, roleID, name, description 
 func (m *mockSvc) DeleteRoleByID(ctx context.Context, roleID string) error {
 	return m.deleteRoleByIDFn(ctx, roleID)
 }
-func (m *mockSvc) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
-	return nil
+func (m *mockSvc) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) (*team.Role, error) {
+	return &team.Role{ID: roleID, Permissions: permissions}, nil
 }
 func (m *mockSvc) UpdateRole(ctx context.Context, id, roleID string) error {
 	return m.updateRoleFn(ctx, id, roleID)
@@ -127,7 +127,7 @@ func (m *mockSvc) Reinstate(ctx context.Context, id string) error {
 func (m *mockSvc) Remove(ctx context.Context, id string) error {
 	return m.removeFn(ctx, id)
 }
-func (m *mockSvc) ResendInvite(ctx context.Context, id string) error                  { return nil }
+func (m *mockSvc) ResendInvite(ctx context.Context, id, loginURL string) error        { return nil }
 func (m *mockSvc) ResetMember2FA(ctx context.Context, actorID, memberID string) error { return nil }
 func (m *mockSvc) GetMemberActivity(ctx context.Context, adminID string, limit int) ([]team.AuditEntry, error) {
 	return nil, nil

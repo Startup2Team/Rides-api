@@ -349,14 +349,26 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/admin/team/members/:id/resend-invite
+// Optional body: { "login_url": "https://admin.rides.rw/admin/login" }
 func (h *Handler) ResendInvite(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.svc.ResendInvite(r.Context(), id); err != nil {
-		respond.ErrorMsg(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+	var body struct {
+		LoginURL string `json:"login_url"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // body is optional
+	if body.LoginURL == "" {
+		body.LoginURL = defaultAdminLoginURL
+	}
+	if err := h.svc.ResendInvite(r.Context(), id, body.LoginURL); err != nil {
+		// Propagate the real failure — a mail-send error is not a 404, and the
+		// console tells the admin the invite was sent.
+		respond.Error(w, err)
 		return
 	}
 	respond.NoContent(w)
 }
+
+const defaultAdminLoginURL = "https://admin.rides.rw/admin/login"
 
 type WelcomeEmailInput struct {
 	TempPassword string `json:"temp_password"`
@@ -443,9 +455,12 @@ func (h *Handler) UpdateRolePermissions(w http.ResponseWriter, r *http.Request) 
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "permissions array is required")
 		return
 	}
-	role, err := h.svc.UpdateRoleByID(r.Context(), roleID, "", "", body.Permissions)
+	// Permissions-only update. This used to call UpdateRoleByID with empty name and
+	// description, whose UPDATE sets all three columns — so saving a role's
+	// permissions blanked its name and description.
+	role, err := h.svc.UpdateRolePermissions(r.Context(), roleID, body.Permissions)
 	if err != nil {
-		if err.Error() == "cannot_delete_system_role" {
+		if err.Error() == "cannot_modify_system_role" || err.Error() == "cannot_delete_system_role" {
 			respond.ErrorMsg(w, http.StatusBadRequest, "CANNOT_MODIFY_SYSTEM_ROLE", "system roles cannot be modified")
 			return
 		}

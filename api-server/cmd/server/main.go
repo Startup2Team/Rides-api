@@ -1311,6 +1311,9 @@ func main() {
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
 			r.Patch("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
+			// The admin console posts this; PATCH-only meant every Activate /
+			// Expire / Archive click got a 405.
+			r.Post("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
 
 			// Partners admin CRUD

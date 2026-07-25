@@ -82,7 +82,11 @@ func (s *Service) Persist(ctx context.Context, userID, title, body, nType string
 		return
 	}
 	if _, err := s.repo.Create(ctx, userID, title, body, nType, data); err != nil {
-		s.log.Warn().Err(err).Str("user_id", userID).Msg("notification: failed to persist")
+		// Error, not Warn: a dropped notification is customer-visible. A VARCHAR
+		// overflow on `type` silently killed every automatic-purchase notice for
+		// weeks precisely because this was easy to scroll past.
+		s.log.Error().Err(err).Str("user_id", userID).Str("type", nType).
+			Msg("notification: failed to persist — the user will never see this")
 	}
 }
 

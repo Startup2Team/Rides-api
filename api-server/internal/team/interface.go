@@ -21,13 +21,13 @@ type TeamService interface {
 	ListRoles(ctx context.Context) ([]*Role, error)
 	CreateRole(ctx context.Context, name, description string, permissions interface{}) (*Role, error)
 	UpdateRoleByID(ctx context.Context, roleID, name, description string, permissions interface{}) (*Role, error)
-	UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error
+	UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) (*Role, error)
 	DeleteRoleByID(ctx context.Context, roleID string) error
 	UpdateRole(ctx context.Context, id, roleID string) error
 	Suspend(ctx context.Context, id string) error
 	Reinstate(ctx context.Context, id string) error
 	Remove(ctx context.Context, id string) error
-	ResendInvite(ctx context.Context, id string) error
+	ResendInvite(ctx context.Context, id, loginURL string) error
 	ResetMember2FA(ctx context.Context, actorID, memberID string) error
 	GetMemberActivity(ctx context.Context, adminID string, limit int) ([]AuditEntry, error)
 	SendWelcomeEmail(ctx context.Context, id, tempPassword, loginURL string) error

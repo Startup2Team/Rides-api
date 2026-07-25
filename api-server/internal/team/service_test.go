@@ -94,8 +94,8 @@ func (m *mockRepo) Delete(ctx context.Context, id string) error {
 }
 func (m *mockRepo) TouchInvitedAt(ctx context.Context, id string) error         { return nil }
 func (m *mockRepo) ReissueInvite(ctx context.Context, id string) (int64, error) { return 1, nil }
-func (m *mockRepo) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
-	return nil
+func (m *mockRepo) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) (*Role, error) {
+	return &Role{ID: roleID, Permissions: permissions}, nil
 }
 func (m *mockRepo) UpdateName(ctx context.Context, id, name string) error {
 	if m.updateNameFn != nil {
