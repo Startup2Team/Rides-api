@@ -349,14 +349,26 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/admin/team/members/:id/resend-invite
+// Optional body: { "login_url": "https://admin.rides.rw/admin/login" }
 func (h *Handler) ResendInvite(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.svc.ResendInvite(r.Context(), id); err != nil {
-		respond.ErrorMsg(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+	var body struct {
+		LoginURL string `json:"login_url"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // body is optional
+	if body.LoginURL == "" {
+		body.LoginURL = defaultAdminLoginURL
+	}
+	if err := h.svc.ResendInvite(r.Context(), id, body.LoginURL); err != nil {
+		// Propagate the real failure — a mail-send error is not a 404, and the
+		// console tells the admin the invite was sent.
+		respond.Error(w, err)
 		return
 	}
 	respond.NoContent(w)
 }
+
+const defaultAdminLoginURL = "https://admin.rides.rw/admin/login"
 
 type WelcomeEmailInput struct {
 	TempPassword string `json:"temp_password"`

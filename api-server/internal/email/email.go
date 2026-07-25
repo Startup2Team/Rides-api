@@ -21,9 +21,12 @@ type ResendPayload struct {
 func SendEmail(ctx context.Context, toEmail, subject, htmlContent string) error {
 	apiKey := os.Getenv("RESEND_API_KEY")
 	if apiKey == "" {
-		// Log email content locally when not configured for easy testing
-		fmt.Printf("\n--- [DEV EMAIL SIMULATION] ---\nTo: %s\nSubject: %s\nContent:\n%s\n------------------------------\n\n", toEmail, subject, htmlContent)
-		return nil
+		// Never print the body: welcome emails carry a temporary password, and
+		// this used to write it to stdout on every unconfigured environment.
+		// Returning nil would also let callers report "invite sent" when nothing
+		// was sent, so this is an error.
+		fmt.Printf("[email] RESEND_API_KEY not set — not sending %q to %s\n", subject, toEmail)
+		return fmt.Errorf("email not configured")
 	}
 
 	payload := ResendPayload{

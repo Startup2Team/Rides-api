@@ -827,7 +827,7 @@ func TestRevenue_EmptyDB(t *testing.T) {
 			return &emptyRows{}, nil
 		},
 	})
-	data, err := svc.Revenue(context.Background(), "week")
+	data, err := svc.Revenue(context.Background(), "week", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "week", data["period"])
 	assert.Equal(t, float64(0), data["gross"])
@@ -847,7 +847,7 @@ func TestRevenue_WithGross(t *testing.T) {
 			return &emptyRows{}, nil
 		},
 	})
-	data, err := svc.Revenue(context.Background(), "month")
+	data, err := svc.Revenue(context.Background(), "month", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, float64(100000), data["gross"])
 }
@@ -860,16 +860,22 @@ func TestDisbursePayouts_EmptyList(t *testing.T) {
 	assert.True(t, errors.Is(err, apperrors.ErrBadRequest))
 }
 
-func TestDisbursePayouts_Success(t *testing.T) {
+// Disbursement must refuse rather than report money as moved. It used to return
+// SUM(agreed_fare) * 0.85 as a "disbursed" total while writing nothing at all,
+// and there is still no payout ledger in the schema to write to.
+func TestDisbursePayouts_RefusesUntilThereIsAPayoutLedger(t *testing.T) {
 	svc := newTestService(&mockDB{
 		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
 			return scanRow(float64(10000))
 		},
 	})
 	count, total, err := svc.DisbursePayouts(context.Background(), []string{"tx-1", "tx-2"})
-	require.NoError(t, err)
-	assert.Equal(t, 2, count)
-	assert.Equal(t, 10000*0.85, total)
+	require.Error(t, err)
+	var appErr *apperrors.AppError
+	require.ErrorAs(t, err, &appErr)
+	assert.Equal(t, http.StatusNotImplemented, appErr.StatusCode)
+	assert.Zero(t, count)
+	assert.Zero(t, total)
 }
 
 // ── GetRide — success path (row scanning) ─────────────────────────────────

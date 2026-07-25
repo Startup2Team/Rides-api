@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -12,6 +13,11 @@ import (
 // Admin payments and revenue: transactions, KPIs and payout disbursement.
 
 func (s *Service) ListTransactions(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
+	// Every row here is a COMPLETED ride, i.e. settled. The filter used to be
+	// accepted and ignored, so picking "Pending payout" returned settled rows.
+	if txStatus != "" && !strings.EqualFold(txStatus, "Settled") {
+		return []map[string]interface{}{}, 0, nil
+	}
 	base := `FROM rides r
 		JOIN users cu ON cu.id = r.customer_id
 		LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
@@ -106,22 +112,51 @@ func (s *Service) RevenueKPIs(ctx context.Context, period string) (map[string]in
 	}, nil
 }
 
-func (s *Service) Revenue(ctx context.Context, period string) (map[string]interface{}, error) {
-	interval := periodToInterval(period)
+
+// revenueWindow resolves the reporting window. An explicit from/to always wins;
+// otherwise fall back to the named period. periodToInterval maps anything it
+// doesn't recognise — including "custom" and "today" — to INTERVAL '1 day', so
+// picking a custom range in the console silently reported the last 24 hours.
+func revenueWindow(period, from, to string) (time.Time, time.Time) {
+	end := time.Now()
+	if f, err := time.Parse("2006-01-02", from); err == nil {
+		if t, tErr := time.Parse("2006-01-02", to); tErr == nil {
+			// `to` is an inclusive day in the UI, so run to the end of it.
+			return f, t.AddDate(0, 0, 1)
+		}
+		return f, end
+	}
+	switch period {
+	case "week":
+		return end.AddDate(0, 0, -7), end
+	case "month":
+		return end.AddDate(0, 0, -30), end
+	case "quarter":
+		return end.AddDate(0, 0, -90), end
+	case "year":
+		return end.AddDate(0, 0, -365), end
+	default: // today
+		return end.AddDate(0, 0, -1), end
+	}
+}
+
+func (s *Service) Revenue(ctx context.Context, period, from, to string) (map[string]interface{}, error) {
+	start, end := revenueWindow(period, from, to)
+	// Previous window of the same length, for the delta.
+	prevStart := start.Add(-end.Sub(start))
 
 	var gross, grossPrev float64
 	var trips, tripsPrev int
 
-	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
+	_ = s.db.QueryRow(ctx, `
 		SELECT COALESCE(SUM(agreed_fare),0), COUNT(*)
-		FROM rides WHERE status='COMPLETED' AND completed_at >= NOW() - %s
-	`, interval)).Scan(&gross, &trips)
+		FROM rides WHERE status='COMPLETED' AND completed_at >= $1 AND completed_at < $2
+	`, start, end).Scan(&gross, &trips)
 
-	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
+	_ = s.db.QueryRow(ctx, `
 		SELECT COALESCE(SUM(agreed_fare),0), COUNT(*)
-		FROM rides WHERE status='COMPLETED'
-		  AND completed_at >= NOW() - 2*%s AND completed_at < NOW() - %s
-	`, interval, interval)).Scan(&grossPrev, &tripsPrev)
+		FROM rides WHERE status='COMPLETED' AND completed_at >= $1 AND completed_at < $2
+	`, prevStart, start).Scan(&grossPrev, &tripsPrev)
 
 	commission := gross * 0.15
 	payouts := gross - commission
@@ -131,11 +166,11 @@ func (s *Service) Revenue(ctx context.Context, period string) (map[string]interf
 	}
 
 	// Trend (daily buckets, last 7 entries)
-	trendRows, _ := s.db.Query(ctx, fmt.Sprintf(`
+	trendRows, _ := s.db.Query(ctx, `
 		SELECT DATE(completed_at) AS day, COALESCE(SUM(agreed_fare),0)
-		FROM rides WHERE status='COMPLETED' AND completed_at >= NOW() - %s
+		FROM rides WHERE status='COMPLETED' AND completed_at >= $1 AND completed_at < $2
 		GROUP BY day ORDER BY day
-	`, interval))
+	`, start, end)
 	var trend []map[string]interface{}
 	if trendRows != nil {
 		defer trendRows.Close()
@@ -149,11 +184,11 @@ func (s *Service) Revenue(ctx context.Context, period string) (map[string]interf
 	}
 
 	// By vehicle type
-	vRows, _ := s.db.Query(ctx, fmt.Sprintf(`
+	vRows, _ := s.db.Query(ctx, `
 		SELECT transport_type, COALESCE(SUM(agreed_fare),0)
-		FROM rides WHERE status='COMPLETED' AND completed_at >= NOW() - %s
+		FROM rides WHERE status='COMPLETED' AND completed_at >= $1 AND completed_at < $2
 		GROUP BY transport_type ORDER BY 2 DESC
-	`, interval))
+	`, start, end)
 	var byVehicle []map[string]interface{}
 	if vRows != nil {
 		defer vRows.Close()
@@ -174,6 +209,8 @@ func (s *Service) Revenue(ctx context.Context, period string) (map[string]interf
 
 	return map[string]interface{}{
 		"period":     period,
+		"from":       start,
+		"to":         end,
 		"gross":      gross,
 		"commission": commission,
 		"payouts":    payouts,
@@ -184,20 +221,20 @@ func (s *Service) Revenue(ctx context.Context, period string) (map[string]interf
 	}, nil
 }
 
+// DisbursePayouts is deliberately not implemented.
+//
+// It used to run a single SELECT and return `SUM(agreed_fare) * 0.85` as though
+// that money had been disbursed — no row was written, no provider was called,
+// and there is no payout table in the schema at all. Reporting a disbursement
+// that never happened is worse than refusing, so it now refuses. Implementing it
+// needs a payout ledger (idempotency key, provider reference, state machine,
+// reconciliation) designed on purpose, not inferred here.
 func (s *Service) DisbursePayouts(ctx context.Context, transactionIDs []string) (int, float64, error) {
 	if len(transactionIDs) == 0 {
 		return 0, 0, apperrors.ErrBadRequest
 	}
-	placeholders := make([]string, len(transactionIDs))
-	args := make([]interface{}, len(transactionIDs))
-	for i, id := range transactionIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
-	var total float64
-	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
-		SELECT COALESCE(SUM(agreed_fare),0) FROM rides WHERE id IN (%s) AND status='COMPLETED'
-	`, strings.Join(placeholders, ",")), args...).Scan(&total)
-
-	return len(transactionIDs), total * 0.85, nil
+	s.log.Warn().Int("requested", len(transactionIDs)).
+		Msg("admin: payout disbursement attempted but no payout ledger exists")
+	return 0, 0, apperrors.New(http.StatusNotImplemented, "NOT_IMPLEMENTED",
+		"payout disbursement is not implemented — no payout ledger exists yet")
 }

@@ -48,7 +48,7 @@ type mockSvc struct {
 	getNegotiationFn             func(ctx context.Context, rideID string) (map[string]interface{}, error)
 	revenueKPIsFn                func(ctx context.Context, period string) (map[string]interface{}, error)
 	listTransactionsFn           func(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	revenueFn                    func(ctx context.Context, period string) (map[string]interface{}, error)
+	revenueFn                    func(ctx context.Context, period, from, to string) (map[string]interface{}, error)
 	disbursePayoutsFn            func(ctx context.Context, transactionIDs []string) (int, float64, error)
 	gpsAnomaliesFn               func(ctx context.Context, limit int) ([]map[string]interface{}, error)
 	deviceCollisionsFn           func(ctx context.Context) ([]map[string]interface{}, error)
@@ -163,8 +163,8 @@ func (m *mockSvc) RevenueKPIs(ctx context.Context, period string) (map[string]in
 func (m *mockSvc) ListTransactions(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
 	return m.listTransactionsFn(ctx, txStatus, sort, limit, offset)
 }
-func (m *mockSvc) Revenue(ctx context.Context, period string) (map[string]interface{}, error) {
-	return m.revenueFn(ctx, period)
+func (m *mockSvc) Revenue(ctx context.Context, period, from, to string) (map[string]interface{}, error) {
+	return m.revenueFn(ctx, period, from, to)
 }
 func (m *mockSvc) DisbursePayouts(ctx context.Context, transactionIDs []string) (int, float64, error) {
 	return m.disbursePayoutsFn(ctx, transactionIDs)
@@ -1086,7 +1086,7 @@ func TestListTransactions_HappyPath(t *testing.T) {
 func TestRevenue_DefaultPeriod(t *testing.T) {
 	var gotPeriod string
 	mock := &mockSvc{
-		revenueFn: func(_ context.Context, period string) (map[string]interface{}, error) {
+		revenueFn: func(_ context.Context, period, _, _ string) (map[string]interface{}, error) {
 			gotPeriod = period
 			return map[string]interface{}{}, nil
 		},

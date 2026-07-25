@@ -38,7 +38,7 @@ type AdminService interface {
 	GetNegotiation(ctx context.Context, rideID string) (map[string]interface{}, error)
 	RevenueKPIs(ctx context.Context, period string) (map[string]interface{}, error)
 	ListTransactions(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	Revenue(ctx context.Context, period string) (map[string]interface{}, error)
+	Revenue(ctx context.Context, period, from, to string) (map[string]interface{}, error)
 	DisbursePayouts(ctx context.Context, transactionIDs []string) (int, float64, error)
 	GPSAnomalies(ctx context.Context, limit int) ([]map[string]interface{}, error)
 	DeviceCollisions(ctx context.Context) ([]map[string]interface{}, error)

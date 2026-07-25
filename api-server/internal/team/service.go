@@ -88,8 +88,30 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 }
 
 // ResendInvite refreshes the invited_at timestamp for a team member invite.
-func (s *Service) ResendInvite(ctx context.Context, id string) error {
-	return s.repo.TouchInvitedAt(ctx, id)
+// ResendInvite re-stamps invited_at and actually sends the invite email. It used
+// to only bump the timestamp while the console toasted "Invite resent to {email}",
+// so the admin believed mail had gone out and the invitee kept waiting.
+//
+// No temporary password is issued here: re-sending an invite must not silently
+// rotate a credential. The mail points the invitee at the login/reset flow.
+func (s *Service) ResendInvite(ctx context.Context, id, loginURL string) error {
+	if err := s.repo.TouchInvitedAt(ctx, id); err != nil {
+		return err
+	}
+	a, _, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if a == nil || a.Email == "" {
+		return apperrors.New(http.StatusUnprocessableEntity, "NO_EMAIL", "this admin has no email address")
+	}
+	htmlContent := email.BuildWelcomeEmail(a.Name, a.Email, a.RoleName, "", loginURL)
+	if err := email.SendEmail(ctx, a.Email, "Your Rides admin invite", htmlContent); err != nil {
+		// Surface it: the caller claims the invite was sent.
+		return apperrors.New(http.StatusBadGateway, "EMAIL_SEND_FAILED",
+			"the invite could not be emailed — check the mail configuration")
+	}
+	return nil
 }
 
 // ResetMember2FA clears TOTP credentials for another admin account.
