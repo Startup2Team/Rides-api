@@ -252,6 +252,9 @@ func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err := h.presigner.PresignPutObject(r.Context(), putInput, s3.WithPresignExpires(5*time.Minute))
 	if err != nil {
+		// Error level → Telegram alert. Presigning is pure local signing, so a
+		// failure here means the storage config itself is broken.
+		log.Error().Err(err).Str("purpose", body.Purpose).Msg("storage: presign failed — uploads are broken")
 		respond.Error(w, apperrors.ErrInternal)
 		return
 	}
@@ -326,6 +329,7 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		ContentLength: aws.Int64(int64(len(data))),
 	})
 	if err != nil {
+		log.Error().Err(err).Str("object_key", objectKey).Msg("storage: proxy upload to bucket failed")
 		respond.Error(w, apperrors.ErrInternal)
 		return
 	}
@@ -357,6 +361,14 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 		Key:    aws.String(objectKey),
 	})
 	if err != nil {
+		// A genuinely absent key is routine (stale link) and stays at Warn.
+		// Anything else — auth, network, bucket gone — is an incident, because
+		// it means documents that DO exist are unreadable to admin reviewers.
+		if isNotFound(err) {
+			log.Warn().Str("object_key", objectKey).Msg("storage: object not found")
+		} else {
+			log.Error().Err(err).Str("object_key", objectKey).Msg("storage: object read failed — documents are unreadable")
+		}
 		respond.ErrorMsg(w, http.StatusNotFound, "NOT_FOUND", "object not found")
 		return
 	}

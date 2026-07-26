@@ -29,6 +29,7 @@ import (
 	"github.com/workspace/ride-platform/internal/bonus"
 	"github.com/workspace/ride-platform/internal/customer"
 	"github.com/workspace/ride-platform/internal/dashboard"
+	"github.com/workspace/ride-platform/internal/digest"
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/internal/export"
 	"github.com/workspace/ride-platform/internal/fare"
@@ -340,6 +341,23 @@ func main() {
 		uploadH = uh
 		// Admin-uploaded driver documents go to the same bucket as mobile ones.
 		adminH.SetObjectStore(uh)
+	}
+
+	// Daily operations digest + the /stats and /pending bot commands. Built
+	// here because it needs the upload handler for its storage health check.
+	var digestSvc *digest.Service
+	if alerts != nil && cfg.Telegram.DigestEnabled {
+		digestSvc = digest.NewService(
+			digest.NewRepository(db),
+			alerts,
+			uploadH, // nil-safe: CheckStorage reports "not configured"
+			digest.Options{
+				Env:      cfg.Env,
+				Timezone: cfg.Telegram.DigestTimezone,
+				Hour:     cfg.Telegram.DigestHour,
+			},
+			log,
+		)
 	}
 
 	ratingRepo := rating.NewRepository(db)
@@ -1393,24 +1411,60 @@ func main() {
 		}
 	}()
 
-	// Telegram bot commands (/status /help) — long-poll getUpdates. Disabled
-	// when the notifier is nil. Uses local /health so the reply reflects what
-	// this process is actually serving.
-	alerts.StartCommands(bgCtx, func(ctx context.Context) string {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+cfg.Port+"/health", nil)
-		if err != nil {
-			return "⚠️ status check failed to build request: " + err.Error()
+	// Storage reachability: probe once at boot and every 10 minutes after.
+	// A revoked bucket credential previously went unnoticed for weeks because
+	// the failing PUT happens phone→R2 and never reaches this process.
+	if uploadH != nil {
+		if err := uploadH.CheckStorage(bgCtx); err != nil {
+			log.Error().Err(err).Msg("storage: bucket unreachable at startup — uploads will fail")
+		} else {
+			log.Info().Str("bucket", cfg.Storage.Bucket).Msg("storage: bucket reachable")
 		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Sprintf("🔴 Rides API (%s)\nhealth: unreachable\n%v", cfg.Env, err)
+		uploadH.WatchStorage(bgCtx, log)
+	}
+
+	// Daily summary to Telegram, so an ordinary day still produces a message.
+	if digestSvc != nil {
+		digestSvc.Start(bgCtx)
+	}
+
+	// Telegram bot commands — long-poll getUpdates. Disabled when the notifier
+	// is nil. /status uses local /health so the reply reflects what this
+	// process is actually serving.
+	botCommands := map[string]alerting.StatusFunc{
+		"status": func(ctx context.Context) string {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+cfg.Port+"/health", nil)
+			if err != nil {
+				return "⚠️ status check failed to build request: " + err.Error()
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Sprintf("🔴 Rides API (%s)\nhealth: unreachable\n%v", cfg.Env, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return fmt.Sprintf("✅ Rides API (%s)\nhealth: OK (HTTP %d)\nport: %s", cfg.Env, resp.StatusCode, cfg.Port)
+			}
+			return fmt.Sprintf("🔴 Rides API (%s)\nhealth: HTTP %d", cfg.Env, resp.StatusCode)
+		},
+	}
+	if digestSvc != nil {
+		botCommands["stats"] = func(ctx context.Context) string {
+			text, err := digestSvc.Build(ctx)
+			if err != nil {
+				return "⚠️ couldn't build the summary: " + err.Error()
+			}
+			return text
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			return fmt.Sprintf("✅ Rides API (%s)\nhealth: OK (HTTP %d)\nport: %s", cfg.Env, resp.StatusCode, cfg.Port)
+		botCommands["pending"] = func(ctx context.Context) string {
+			text, err := digestSvc.BuildPending(ctx)
+			if err != nil {
+				return "⚠️ couldn't read the pending queue: " + err.Error()
+			}
+			return text
 		}
-		return fmt.Sprintf("🔴 Rides API (%s)\nhealth: HTTP %d", cfg.Env, resp.StatusCode)
-	})
+	}
+	alerts.StartCommandsWith(bgCtx, botCommands)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

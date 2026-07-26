@@ -137,6 +137,13 @@ type FirebaseConfig struct {
 type TelegramConfig struct {
 	BotToken string // TELEGRAM_BOT_TOKEN — from @BotFather
 	ChatID   string // TELEGRAM_CHAT_ID — the team group's chat id
+
+	// Daily operations digest (internal/digest). Pushed to the same chat each
+	// morning so an ordinary day produces a message — silence then means the
+	// API is down, rather than meaning nothing happened.
+	DigestEnabled  bool   // DIGEST_ENABLED (default true when Telegram is configured)
+	DigestHour     int    // DIGEST_HOUR — local hour 0–23 (default 7)
+	DigestTimezone string // DIGEST_TIMEZONE — IANA name (default Africa/Kigali)
 }
 
 type GoogleMapsConfig struct {
@@ -291,6 +298,9 @@ func Load() (*Config, error) {
 
 	cfg.Telegram.BotToken = getEnv("TELEGRAM_BOT_TOKEN", "")
 	cfg.Telegram.ChatID = getEnv("TELEGRAM_CHAT_ID", "")
+	cfg.Telegram.DigestEnabled = getEnvBool("DIGEST_ENABLED", true)
+	cfg.Telegram.DigestHour = getEnvInt("DIGEST_HOUR", 7)
+	cfg.Telegram.DigestTimezone = getEnv("DIGEST_TIMEZONE", "Africa/Kigali")
 
 	cfg.GMaps.APIKey = getEnv("GOOGLE_MAPS_API_KEY", "")
 
