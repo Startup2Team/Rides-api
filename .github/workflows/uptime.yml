@@ -58,8 +58,16 @@ jobs:
             echo "Telegram secrets not set — cannot alert"; exit 1
           fi
           # Trim accidental newlines from secrets (common paste mistake → curl exit 3).
-          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '\r\n')
-          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '\r\n')
+          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '[:space:]')
+          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '[:space:]')
+          # Fail loudly on a malformed secret. A stray space made the URL
+          # invalid ("curl: (3) URL rejected"), and because these sends end in
+          # `|| true` the breakage was invisible for weeks — including on the
+          # API-is-down alert, the one that actually matters.
+          if ! printf '%s' "$TOKEN" | grep -qE '^[0-9]+:[A-Za-z0-9_-]{30,}$'; then
+            echo "::error::TELEGRAM_BOT_TOKEN is malformed (expected <digits>:<key>). Re-paste the repo secret with no surrounding whitespace."
+            exit 1
+          fi
           curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
             --data-urlencode "text=🚨 api.rides.rw/health is DOWN (last HTTP ${{ steps.check.outputs.code }}) — 3 attempts failed. Check the box: ssh root@139.84.251.242, docker compose logs api." \
@@ -84,8 +92,16 @@ jobs:
             echo "Telegram secrets not set — skipping daily OK"
             exit 0
           fi
-          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '\r\n')
-          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '\r\n')
+          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '[:space:]')
+          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '[:space:]')
+          # Fail loudly on a malformed secret. A stray space made the URL
+          # invalid ("curl: (3) URL rejected"), and because these sends end in
+          # `|| true` the breakage was invisible for weeks — including on the
+          # API-is-down alert, the one that actually matters.
+          if ! printf '%s' "$TOKEN" | grep -qE '^[0-9]+:[A-Za-z0-9_-]{30,}$'; then
+            echo "::error::TELEGRAM_BOT_TOKEN is malformed (expected <digits>:<key>). Re-paste the repo secret with no surrounding whitespace."
+            exit 1
+          fi
           code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://api.rides.rw/health || echo "000")
           echo "health: HTTP $code"
           if [ "$code" = "200" ]; then
