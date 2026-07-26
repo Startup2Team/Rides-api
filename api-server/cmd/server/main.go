@@ -335,8 +335,11 @@ func main() {
 	var uploadH *upload.Handler
 	if uh, err := upload.NewHandler(cfg); err != nil {
 		log.Warn().Err(err).Msg("upload: storage not configured, presign endpoint disabled")
+		log.Warn().Msg("upload: admin file uploads will fall back to local disk, which is NOT durable in a container")
 	} else {
 		uploadH = uh
+		// Admin-uploaded driver documents go to the same bucket as mobile ones.
+		adminH.SetObjectStore(uh)
 	}
 
 	ratingRepo := rating.NewRepository(db)
@@ -960,8 +963,9 @@ func main() {
 	})
 
 	r.Route(apiV1Prefix+"/uploads", func(r chi.Router) {
-		// Public object serving (proxy/MinIO mode) so the mobile app and admin
-		// panel can render document images via a plain URL. No-op on S3/R2.
+		// Public object serving so the mobile app and admin panel can render
+		// document images via a plain URL. Active in every environment — the
+		// bucket stays private and STORAGE_CDN_URL points back at this route.
 		if uploadH != nil {
 			r.Get("/objects/*", uploadH.GetObject)
 			// Proxy-mode PUT mirrors a presigned S3 URL — the random object key is

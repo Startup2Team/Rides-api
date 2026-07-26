@@ -22,11 +22,19 @@ type Handler struct {
 	auth  AuthService
 	audit *audit.Logger
 	env   string
+	// store persists admin-uploaded driver documents in object storage. Nil when
+	// storage is unconfigured, in which case UploadDriverFile falls back to
+	// (non-durable) local disk.
+	store ObjectStore
 }
 
 func NewHandler(svc AdminService, auth AuthService, auditLog *audit.Logger, env string) *Handler {
 	return &Handler{svc: svc, auth: auth, audit: auditLog, env: env}
 }
+
+// SetObjectStore wires the shared upload/object-storage client. Call it during
+// startup once the storage handler is built.
+func (h *Handler) SetObjectStore(s ObjectStore) { h.store = s }
 
 // adminCtx pulls the admin id + role off the request claims for audit entries.
 func adminCtx(r *http.Request) (id, role string) {

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -17,6 +18,15 @@ import (
 )
 
 const maxUploadBytes = 10 * 1024 * 1024
+
+// ObjectStore is the subset of the upload handler the admin panel needs to
+// persist driver documents in the shared bucket (R2/MinIO). Without it,
+// uploads land on the container's local disk, which has no mounted volume and
+// is therefore wiped on every redeploy.
+type ObjectStore interface {
+	PutObjectBytes(ctx context.Context, objectKey, contentType string, data []byte) error
+	PublicURL(objectKey string) string
+}
 
 var allowedUploadMIME = map[string]string{
 	"image/jpeg":      ".jpg",
@@ -49,14 +59,40 @@ func (h *Handler) UploadDriverFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir := filepath.Join("var", "uploads", "documents")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	key, err := randomUploadKey(ext)
+	if err != nil {
 		respond.Error(w, apperrors.ErrInternal)
 		return
 	}
 
-	key, err := randomUploadKey(ext)
-	if err != nil {
+	// Preferred path: store in the same bucket the mobile app uploads to, so the
+	// file survives redeploys and the admin panel and driver see the same URL.
+	if h.store != nil {
+		data, rerr := io.ReadAll(io.LimitReader(file, maxUploadBytes+1))
+		if rerr != nil {
+			respond.Error(w, apperrors.ErrInternal)
+			return
+		}
+		if len(data) > maxUploadBytes {
+			respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "file exceeds 10MB limit")
+			return
+		}
+		objectKey := "documents/" + key
+		if perr := h.store.PutObjectBytes(r.Context(), objectKey, contentType, data); perr != nil {
+			respond.Error(w, apperrors.ErrInternal)
+			return
+		}
+		respond.OK(w, map[string]interface{}{
+			"file_url": h.store.PublicURL(objectKey),
+			"key":      objectKey,
+		})
+		return
+	}
+
+	// Fallback (local dev with no storage configured): write to disk. NOT
+	// durable in a container — the API logs a warning at startup in that case.
+	dir := filepath.Join("var", "uploads", "documents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		respond.Error(w, apperrors.ErrInternal)
 		return
 	}
