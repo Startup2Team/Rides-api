@@ -32,14 +32,23 @@ jobs:
       name: staging
       url: https://stg-api.rides.rw/health
     steps:
-      - uses: actions/checkout@v4
-
       - name: Resolve image SHA
         id: sha
         run: |
           SHA="${{ github.event.workflow_run.head_sha || github.event.inputs.sha || github.sha }}"
           echo "value=$SHA" >> "$GITHUB_OUTPUT"
           echo "Deploying image tag $SHA to staging"
+
+      # Check out the SAME commit the image was built from.
+      #
+      # On a workflow_run event, checkout defaults to the repository's default
+      # branch — so this shipped main's tree to the box while deploying an image
+      # built from dev. The container ran dev's code but was orchestrated by
+      # main's deploy.sh and compose files, meaning any change to those silently
+      # did not apply to staging until it reached main.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.sha.outputs.value }}
 
       - name: Notify Telegram — staging deploy starting
         env:
@@ -49,11 +58,11 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           [ -z "$TELEGRAM_BOT_TOKEN" ] && { echo "no telegram secret — skipping"; exit 0; }
-          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '\r\n')
-          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '\r\n')
+          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '[:space:]')
+          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '[:space:]')
           curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
-            --data-urlencode "text=🚀 STAGING deploy started — sha ${SHA:0:12} → migrate + health gate → stg-api.rides.rw"$'\n'"$RUN_URL" >/dev/null || true
+            --data-urlencode "text=🚀 STAGING deploy started — sha ${SHA:0:12} → migrate + health gate → stg-api.rides.rw"$'\n'"$RUN_URL" >/dev/null || echo "::warning::Telegram notification failed to send (check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)"
 
       - name: Set up SSH
         run: |
@@ -80,8 +89,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           [ -z "$TELEGRAM_BOT_TOKEN" ] && { echo "no telegram secret — skipping"; exit 0; }
-          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '\r\n')
-          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '\r\n')
+          TOKEN=$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '[:space:]')
+          CHAT=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '[:space:]')
           if [ "$STATUS" = "success" ]; then
             TEXT="✅ STAGING LIVE — sha ${SHA:0:12} healthy at https://stg-api.rides.rw/health"
           else
@@ -89,4 +98,4 @@ jobs:
           fi
           curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
-            --data-urlencode "text=${TEXT}" >/dev/null || true
+            --data-urlencode "text=${TEXT}" >/dev/null || echo "::warning::Telegram notification failed to send (check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)"
