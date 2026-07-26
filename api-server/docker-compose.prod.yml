@@ -109,6 +109,24 @@ services:
       - api
     # No public port — Nginx proxies to admin:3000 on the internal network.
 
+  # ── paccee.com — personal static site ─────────────────────────────────────
+  # Separate container purely for isolation: it must never contend with the API
+  # for memory or take it down when it misbehaves. Content is bind-mounted from
+  # outside the repo (this is a personal site, not a Rides asset) so it can be
+  # updated without a platform deploy.
+  paccee-site:
+    image: nginx:alpine
+    restart: always
+    volumes:
+      - /opt/paccee/site:/usr/share/nginx/html:ro
+    # No public port — the edge nginx proxies to paccee-site:80 internally.
+    mem_limit: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── Nginx reverse proxy + TLS termination ─────────────────────────────────
   nginx:
     image: nginx:alpine
@@ -122,6 +140,7 @@ services:
     depends_on:
       - api
       - admin
+      - paccee-site
 
 volumes:
   postgres_data:
