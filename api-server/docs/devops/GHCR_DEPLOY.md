@@ -59,7 +59,7 @@ pull-based deploy:
 ```yaml
       - name: Deploy — pull image + restart api
         run: |
-          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.244.214"
           # Keep tracked files (compose, nginx) in sync — now a ~1.8 MB archive.
           git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'
           $SSH "cd /opt/rides/Rides-api/api-server && \
