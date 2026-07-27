@@ -159,26 +159,33 @@ func Format(s *Snapshot, env string) string {
 	fmt.Fprintf(&b, "📊 Rides daily — %s (%s)\n", s.Day.Format("Mon 2 Jan 2006"), strings.ToUpper(env))
 	b.WriteString("────────────────────\n")
 
-	fmt.Fprintf(&b, "\n🚗 Rides\n")
-	fmt.Fprintf(&b, "  Completed   %d %s\n", s.RidesCompleted, delta(s.RidesCompleted, s.RidesCompletedPrev))
+	// Each block reads yesterday → last 7 days → all time, so a zero day is
+	// immediately legible as "quiet" rather than "broken".
+	fmt.Fprintf(&b, "\n🚗 Rides            yesterday │ 7d │ all\n")
+	fmt.Fprintf(&b, "  Completed   %s %s\n",
+		triple(s.RidesCompleted, s.Rides7d, s.RidesTotal), delta(s.RidesCompleted, s.RidesCompletedPrev))
 	fmt.Fprintf(&b, "  Requested   %d\n", s.RidesRequested)
 	fmt.Fprintf(&b, "  Cancelled   %d%s\n", s.RidesCancelled, cancelRate(s.RidesCancelled, s.RidesRequested))
-	fmt.Fprintf(&b, "  Fares       %s RWF %s\n", money(s.FareRWF), delta64(s.FareRWF, s.FarePrevRWF))
+	fmt.Fprintf(&b, "  Fares RWF   %s %s\n",
+		triple64(s.FareRWF, s.Fare7dRWF, s.FareTotRWF), delta64(s.FareRWF, s.FarePrevRWF))
 
 	fmt.Fprintf(&b, "\n📈 Growth\n")
-	fmt.Fprintf(&b, "  New users   %d  (drivers %d)\n", s.NewCustomers, s.NewDrivers)
-	fmt.Fprintf(&b, "  Total users %s\n", money(int64(s.TotalUsers)))
+	fmt.Fprintf(&b, "  New users   %s\n", triple(s.NewCustomers, s.NewUsers7d, s.TotalUsers))
+	fmt.Fprintf(&b, "  New drivers %d yesterday\n", s.NewDrivers)
 
 	fmt.Fprintf(&b, "\n💰 Packages\n")
-	fmt.Fprintf(&b, "  Sold        %d\n", s.PackagesSold)
-	fmt.Fprintf(&b, "  Revenue     %s RWF\n", money(s.PackageRevenue))
+	fmt.Fprintf(&b, "  Sold        %s\n", triple(s.PackagesSold, s.Packages7d, -1))
+	fmt.Fprintf(&b, "  Revenue RWF %s\n", triple64(s.PackageRevenue, s.PkgRev7dRWF, s.PkgRevTotal))
 	if len(s.PaymentsByState) > 0 {
 		fmt.Fprintf(&b, "  Payments    %s\n", statuses(s.PaymentsByState))
 	}
 
 	fmt.Fprintf(&b, "\n🧑‍✈️ Drivers\n")
 	fmt.Fprintf(&b, "  Approved    %d  (online now %d)\n", s.ApprovedDrivers, s.OnlineNow)
-	fmt.Fprintf(&b, "  Docs added  %d\n", s.DocumentsUploaded)
+	fmt.Fprintf(&b, "  Docs added  %d yesterday\n", s.DocumentsUploaded)
+	if s.RatingCount7d > 0 {
+		fmt.Fprintf(&b, "  Rating 7d   %.2f★ over %d rating(s)\n", s.AvgRating7d, s.RatingCount7d)
+	}
 
 	// Everything below is a to-do list, not a statistic. Only shown when it
 	// needs a human, so an all-clear morning stays short and skimmable.
@@ -188,6 +195,9 @@ func Format(s *Snapshot, env string) string {
 	}
 	if s.ExpiringDocuments > 0 {
 		actions = append(actions, fmt.Sprintf("  ⚠️ %d driver(s) with documents expiring in 30 days", s.ExpiringDocuments))
+	}
+	if s.PendingClaims > 0 {
+		actions = append(actions, fmt.Sprintf("  ⚠️ %d manual payment claim(s) awaiting review", s.PendingClaims))
 	}
 	if s.OpenTickets > 0 {
 		actions = append(actions, fmt.Sprintf("  ⚠️ %d open support ticket(s)", s.OpenTickets))
@@ -209,8 +219,22 @@ func Format(s *Snapshot, env string) string {
 	fmt.Fprintf(&b, "\n🩺 Platform\n")
 	fmt.Fprintf(&b, "  Storage     %s\n", okLabel(s.StorageOK))
 	fmt.Fprintf(&b, "  Database    %s\n", s.DBSize)
+	fmt.Fprintf(&b, "  Unread notifs %s\n", money(int64(s.UnreadNotifs)))
 
 	return b.String()
+}
+
+// triple renders "yesterday │ 7d │ all". Pass -1 for a window that does not
+// apply and it is omitted rather than printed as a misleading zero.
+func triple(day, week, all int) string {
+	if all < 0 {
+		return fmt.Sprintf("%s │ %s", money(int64(day)), money(int64(week)))
+	}
+	return fmt.Sprintf("%s │ %s │ %s", money(int64(day)), money(int64(week)), money(int64(all)))
+}
+
+func triple64(day, week, all int64) string {
+	return fmt.Sprintf("%s │ %s │ %s", money(day), money(week), money(all))
 }
 
 func okLabel(ok bool) string {
