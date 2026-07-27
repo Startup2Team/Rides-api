@@ -38,7 +38,7 @@ type mockSvc struct {
 	deleteDriverFn               func(ctx context.Context, profileID string) error
 	listCustomersFn              func(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
 	getCustomerFn                func(ctx context.Context, userID string) (map[string]interface{}, error)
-	suspendUserFn                func(ctx context.Context, userID string, durationHours int) error
+	suspendUserFn                func(ctx context.Context, userID, reason string, durationHours int) error
 	reinstateUserFn              func(ctx context.Context, userID string) error
 	updateCustomerFn             func(ctx context.Context, userID, status, notes string) error
 	banCustomerFn                func(ctx context.Context, userID, reason string) error
@@ -48,7 +48,7 @@ type mockSvc struct {
 	getNegotiationFn             func(ctx context.Context, rideID string) (map[string]interface{}, error)
 	revenueKPIsFn                func(ctx context.Context, period string) (map[string]interface{}, error)
 	listTransactionsFn           func(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	revenueFn                    func(ctx context.Context, period string) (map[string]interface{}, error)
+	revenueFn                    func(ctx context.Context, period, from, to string) (map[string]interface{}, error)
 	disbursePayoutsFn            func(ctx context.Context, transactionIDs []string) (int, float64, error)
 	gpsAnomaliesFn               func(ctx context.Context, limit int) ([]map[string]interface{}, error)
 	deviceCollisionsFn           func(ctx context.Context) ([]map[string]interface{}, error)
@@ -61,7 +61,8 @@ type mockSvc struct {
 	getAccountTimelineFn         func(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
 	launchReadinessFn            func(ctx context.Context) (map[string]interface{}, error)
 	getDriverReferralsFn         func(ctx context.Context, profileID string) ([]map[string]interface{}, error)
-	createNotificationCampaignFn func(ctx context.Context, title, body, audience, createdBy string) (map[string]interface{}, error)
+	createNotificationCampaignFn func(ctx context.Context, in admin.CampaignInput) (map[string]interface{}, error)
+	notifyDriverFn               func(ctx context.Context, driverRef, title, body, reason, createdBy string) (map[string]interface{}, error)
 	listNotificationCampaignsFn  func(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error)
 	deleteNotificationCampaignFn func(ctx context.Context, id string) error
 }
@@ -132,8 +133,8 @@ func (m *mockSvc) ListCustomers(ctx context.Context, status, search, sort string
 func (m *mockSvc) GetCustomer(ctx context.Context, userID string) (map[string]interface{}, error) {
 	return m.getCustomerFn(ctx, userID)
 }
-func (m *mockSvc) SuspendUser(ctx context.Context, userID string, durationHours int) error {
-	return m.suspendUserFn(ctx, userID, durationHours)
+func (m *mockSvc) SuspendUser(ctx context.Context, userID, reason string, durationHours int) error {
+	return m.suspendUserFn(ctx, userID, reason, durationHours)
 }
 func (m *mockSvc) ReinstateUser(ctx context.Context, userID string) error {
 	return m.reinstateUserFn(ctx, userID)
@@ -162,8 +163,8 @@ func (m *mockSvc) RevenueKPIs(ctx context.Context, period string) (map[string]in
 func (m *mockSvc) ListTransactions(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
 	return m.listTransactionsFn(ctx, txStatus, sort, limit, offset)
 }
-func (m *mockSvc) Revenue(ctx context.Context, period string) (map[string]interface{}, error) {
-	return m.revenueFn(ctx, period)
+func (m *mockSvc) Revenue(ctx context.Context, period, from, to string) (map[string]interface{}, error) {
+	return m.revenueFn(ctx, period, from, to)
 }
 func (m *mockSvc) DisbursePayouts(ctx context.Context, transactionIDs []string) (int, float64, error) {
 	return m.disbursePayoutsFn(ctx, transactionIDs)
@@ -224,15 +225,22 @@ func (m *mockSvc) GetDriverReferrals(ctx context.Context, profileID string) ([]m
 	return nil, nil
 }
 
-func (m *mockSvc) CreateNotificationCampaign(ctx context.Context, title, body, audience, createdBy string, targetDriverID ...string) (map[string]interface{}, error) {
+func (m *mockSvc) CreateNotificationCampaign(ctx context.Context, in admin.CampaignInput) (map[string]interface{}, error) {
 	if m.createNotificationCampaignFn != nil {
-		return m.createNotificationCampaignFn(ctx, title, body, audience, createdBy)
+		return m.createNotificationCampaignFn(ctx, in)
 	}
-	return map[string]interface{}{}, nil
+	return map[string]interface{}{"id": "campaign-id"}, nil
 }
 
-func (m *mockSvc) NotifyDriver(ctx context.Context, driverIDOrUserID, title, body, reason, createdBy string) (map[string]interface{}, error) {
-	return map[string]interface{}{"status": "SENT"}, nil
+func (m *mockSvc) SendNotificationCampaignNow(ctx context.Context, id, sentBy string) (map[string]interface{}, error) {
+	return map[string]interface{}{"id": id, "status": "SENT"}, nil
+}
+
+func (m *mockSvc) NotifyDriver(ctx context.Context, driverRef, title, body, reason, createdBy string) (map[string]interface{}, error) {
+	if m.notifyDriverFn != nil {
+		return m.notifyDriverFn(ctx, driverRef, title, body, reason, createdBy)
+	}
+	return map[string]interface{}{"id": "campaign-id", "status": "SENT"}, nil
 }
 
 func (m *mockSvc) ListNotificationCampaigns(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error) {
@@ -784,20 +792,24 @@ func TestGetCustomer_NotFound(t *testing.T) {
 
 func TestSuspendUser_HappyPath(t *testing.T) {
 	var gotHours int
+	var gotReason string
 	mock := &mockSvc{
-		suspendUserFn: func(_ context.Context, _ string, durationHours int) error {
+		suspendUserFn: func(_ context.Context, _, reason string, durationHours int) error {
 			gotHours = durationHours
+			gotReason = reason
 			return nil
 		},
 	}
 	r := newRouter(newAdminHandler(mock, nil, "test"), adminID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/users/user-abc/suspend",
-		jsonBody(t, map[string]int{"duration_hours": 72}))
+		jsonBody(t, map[string]any{"duration_hours": 72, "reason": "repeated no-shows"}))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusNoContent, rr.Code)
 	assert.Equal(t, 72, gotHours)
+	// The UI makes the reason mandatory; it must reach the service, not be dropped.
+	assert.Equal(t, "repeated no-shows", gotReason)
 }
 
 func TestSuspendUser_MissingDuration(t *testing.T) {
@@ -1074,7 +1086,7 @@ func TestListTransactions_HappyPath(t *testing.T) {
 func TestRevenue_DefaultPeriod(t *testing.T) {
 	var gotPeriod string
 	mock := &mockSvc{
-		revenueFn: func(_ context.Context, period string) (map[string]interface{}, error) {
+		revenueFn: func(_ context.Context, period, _, _ string) (map[string]interface{}, error) {
 			gotPeriod = period
 			return map[string]interface{}{}, nil
 		},

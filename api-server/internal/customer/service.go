@@ -11,7 +11,7 @@ import (
 // see service_test.go. *Repository satisfies it.
 type Repo interface {
 	FindByID(ctx context.Context, userID string) (*Profile, error)
-	UpdateProfile(ctx context.Context, userID string, fullName, email, fcmToken, profileImageURL *string) error
+	UpdateProfile(ctx context.Context, userID string, u ProfileUpdate) error
 	RideStats(ctx context.Context, userID string) (completedRides int, totalSpend float64, err error)
 }
 
@@ -28,8 +28,8 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 	return s.repo.FindByID(ctx, userID)
 }
 
-func (s *Service) UpdateProfile(ctx context.Context, userID string, fullName, email, fcmToken, profileImageURL *string) error {
-	return s.repo.UpdateProfile(ctx, userID, fullName, email, fcmToken, profileImageURL)
+func (s *Service) UpdateProfile(ctx context.Context, userID string, u ProfileUpdate) error {
+	return s.repo.UpdateProfile(ctx, userID, u)
 }
 
 // GetLevel computes the customer's gamification level from their lifetime

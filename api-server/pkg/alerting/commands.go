@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,13 +21,30 @@ type StatusFunc func(ctx context.Context) string
 // in the configured team chat (and DMs to the bot). Safe no-op on a nil
 // notifier. Never panics; network errors back off and retry.
 func (n *Notifier) StartCommands(ctx context.Context, status StatusFunc) {
-	if n == nil || status == nil {
-		return
-	}
-	go n.commandLoop(ctx, status)
+	n.StartCommandsWith(ctx, map[string]StatusFunc{"status": status})
 }
 
-func (n *Notifier) commandLoop(ctx context.Context, status StatusFunc) {
+// StartCommandsWith is StartCommands with an arbitrary command set, so callers
+// can expose more than health — /stats, /pending and anything added later.
+// Keys are bare command names without the leading slash. A nil notifier, an
+// empty set, or an unanswerable command are all safe no-ops.
+func (n *Notifier) StartCommandsWith(ctx context.Context, handlers map[string]StatusFunc) {
+	if n == nil || len(handlers) == 0 {
+		return
+	}
+	live := make(map[string]StatusFunc, len(handlers))
+	for name, fn := range handlers {
+		if fn != nil {
+			live[strings.ToLower(name)] = fn
+		}
+	}
+	if len(live) == 0 {
+		return
+	}
+	go n.commandLoop(ctx, live)
+}
+
+func (n *Notifier) commandLoop(ctx context.Context, handlers map[string]StatusFunc) {
 	// Long-poll client: Telegram holds the request up to ~25s, so the HTTP
 	// timeout must be longer than the send client's 10s.
 	longClient := &http.Client{Timeout: 35 * time.Second}
@@ -55,7 +73,7 @@ func (n *Notifier) commandLoop(ctx context.Context, status StatusFunc) {
 		offset = next
 
 		for _, u := range updates {
-			n.handleUpdate(ctx, u, status)
+			n.handleUpdate(ctx, u, handlers)
 		}
 	}
 }
@@ -111,7 +129,14 @@ func (n *Notifier) getUpdates(ctx context.Context, client *http.Client, offset i
 	return parsed.Result, next, nil
 }
 
-func (n *Notifier) handleUpdate(ctx context.Context, u tgUpdate, status StatusFunc) {
+// commandAliases maps what people actually type onto a registered handler.
+var commandAliases = map[string]string{
+	"ping": "status", "health": "status",
+	"digest": "stats", "summary": "stats", "today": "stats",
+	"review": "pending", "queue": "pending",
+}
+
+func (n *Notifier) handleUpdate(ctx context.Context, u tgUpdate, handlers map[string]StatusFunc) {
 	if u.Message == nil {
 		return
 	}
@@ -121,16 +146,25 @@ func (n *Notifier) handleUpdate(ctx context.Context, u tgUpdate, status StatusFu
 	}
 	chatID := strconv.FormatInt(u.Message.Chat.ID, 10)
 
-	switch cmd {
-	case "status", "ping", "health":
-		n.reply(chatID, status(ctx))
-	case "help", "start":
-		n.reply(chatID, helpText())
-	default:
-		// Unknown slash-command — point at /help, don't spam on random text.
-		if strings.HasPrefix(strings.TrimSpace(u.Message.Text), "/") {
-			n.reply(chatID, "Unknown command. Try /help")
-		}
+	if alias, ok := commandAliases[cmd]; ok {
+		cmd = alias
+	}
+
+	if cmd == "help" || cmd == "start" {
+		n.reply(chatID, helpText(handlers))
+		return
+	}
+	if fn, ok := handlers[cmd]; ok {
+		// Answers can be slow (the digest runs a handful of queries), so bound
+		// them — a hung database must not wedge the whole command loop.
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		n.reply(chatID, fn(cctx))
+		return
+	}
+	// Unknown slash-command — point at /help, don't spam on random text.
+	if strings.HasPrefix(strings.TrimSpace(u.Message.Text), "/") {
+		n.reply(chatID, "Unknown command. Try /help")
 	}
 }
 
@@ -150,18 +184,42 @@ func parseCommand(text string) (cmd, bot string) {
 	return strings.ToLower(field), ""
 }
 
-func helpText() string {
-	return strings.TrimSpace(`
-Rides alerts bot — commands:
-/status — API health + env (also /ping /health)
-/help — this message
+// commandHelp describes each registered command. Only the ones actually wired
+// up are listed, so /help never advertises something that will answer
+// "Unknown command".
+var commandHelp = map[string]string{
+	"status":  "/status — API health + env (also /ping /health)",
+	"stats":   "/stats — yesterday's rides, revenue, signups and anything needing attention (also /digest /summary)",
+	"pending": "/pending — driver applications and documents waiting on a human (also /review /queue)",
+}
 
-You also get automatic alerts:
+func helpText(handlers map[string]StatusFunc) string {
+	// Fixed order for the documented commands so /help reads the same every
+	// time; anything registered but undocumented is appended alphabetically.
+	lines := make([]string, 0, len(handlers)+1)
+	for _, name := range []string{"status", "stats", "pending"} {
+		if _, ok := handlers[name]; ok {
+			lines = append(lines, commandHelp[name])
+		}
+	}
+	extra := make([]string, 0)
+	for name := range handlers {
+		if _, documented := commandHelp[name]; !documented {
+			extra = append(extra, "/"+name)
+		}
+	}
+	sort.Strings(extra)
+	lines = append(lines, extra...)
+	lines = append(lines, "/help — this message")
+
+	return strings.TrimSpace("Rides alerts bot — commands:\n" + strings.Join(lines, "\n") + `
+
+You also get automatically:
+• 📊 a daily summary each morning
 • 🚀 on every API boot/deploy
 • 🔴 on Error-level API logs (rate-limited)
-• 🚨 from GitHub if /health is down
-• ✅ daily OK ping when the site is up
-`)
+• 🔴 when object storage goes unreachable
+• 🚨 from GitHub if /health is down`)
 }
 
 // reply sends immediately (no dedupe/cap) — command answers must always land.

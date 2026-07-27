@@ -46,6 +46,52 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
+// ReconcileRoleState corrects a user's role_state to match their driver
+// CAPABILITY (derived from driver_profiles), so mode-switching can never leave
+// an approved driver stranded as CUSTOMER_ONLY. Admins are never touched.
+// Returns the effective role_state; a no-op when already consistent. Called on
+// login so any drifted account (or a future bug) self-heals.
+func (r *Repository) ReconcileRoleState(ctx context.Context, userID string) (string, error) {
+	var current string
+	var approval *string
+	err := r.db.QueryRow(ctx, `
+		SELECT u.role_state, dp.approval_status
+		FROM users u
+		LEFT JOIN driver_profiles dp ON dp.user_id = u.id
+		WHERE u.id = $1
+	`, userID).Scan(&current, &approval)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", apperrors.ErrNotFound
+		}
+		return "", err
+	}
+	if current == "ADMIN" {
+		return current, nil // never reconcile admins
+	}
+	want := "CUSTOMER_ONLY"
+	if approval != nil {
+		switch *approval {
+		case "APPROVED":
+			want = "DRIVER_ACTIVE"
+		case "SUSPENDED":
+			want = "DRIVER_SUSPENDED"
+		case "REJECTED":
+			want = "CUSTOMER_ONLY"
+		default:
+			want = "DRIVER_PENDING" // has a profile, still in the review pipeline
+		}
+	}
+	if want == current {
+		return current, nil
+	}
+	if _, err := r.db.Exec(ctx,
+		`UPDATE users SET role_state = $1, updated_at = NOW() WHERE id = $2`, want, userID); err != nil {
+		return current, err
+	}
+	return want, nil
+}
+
 func (r *Repository) FindUserByPhone(ctx context.Context, phone string) (*User, error) {
 	u := &User{}
 	err := r.db.QueryRow(ctx, `

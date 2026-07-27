@@ -61,6 +61,28 @@ func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+// PATCH /api/v1/users/me/notifications/{id}/unread
+func (h *Handler) MarkUnread(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	id := chi.URLParam(r, "id")
+	if err := h.repo.MarkUnread(r.Context(), id, claims.UserID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// DELETE /api/v1/users/me/notifications/{id}
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	id := chi.URLParam(r, "id")
+	if err := h.repo.Delete(r.Context(), id, claims.UserID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
 // POST /api/v1/users/me/notifications/mark-all-read
 func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)

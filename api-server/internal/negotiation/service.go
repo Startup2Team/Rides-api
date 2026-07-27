@@ -139,6 +139,13 @@ func (s *Service) fareBounds(ctx context.Context, r *ride.Ride) (minFare, maxFar
 // is a no-op when enforcement is disabled (no fare config wired) and propagates
 // the fail-closed error from fareBounds when the config cannot be read.
 func (s *Service) checkFareInBand(ctx context.Context, r *ride.Ride, amount float64) error {
+	// Hard per-vehicle floor/cap first: an unconditional guardrail that holds even
+	// when no fare config is wired or the config lookup fails, so an exploitative
+	// amount is always rejected before it can be recorded or broadcast.
+	if err := checkVehicleFareBounds(r, amount); err != nil {
+		return err
+	}
+
 	minFare, maxFare, enforced, err := s.fareBounds(ctx, r)
 	if err != nil {
 		return err

@@ -25,6 +25,7 @@ This folder is the working documentation hub for the Rides ride-hailing backend.
 | [MVP_LOCAL_DEVELOPMENT.md](MVP_LOCAL_DEVELOPMENT.md) | Local development runbook and MVP flow readiness. |
 | [SCALING.md](SCALING.md) | High-scale architecture, horizontal WebSockets, replicas routing, and cluster scaling. |
 | [SECURITY.md](SECURITY.md) | Security threat models, token isolation, single-use tickets, and production startup guards. |
+| [DOCUMENT_STORAGE_AND_INTEGRITY.md](DOCUMENT_STORAGE_AND_INTEGRITY.md) | How KYC documents and avatars are stored in R2, closing public bucket access, and the gaps that let an approved driver swap a document undetected. |
 
 
 ## Current System Summary

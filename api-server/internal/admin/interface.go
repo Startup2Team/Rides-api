@@ -25,7 +25,7 @@ type AdminService interface {
 	ClearGPSFlags(ctx context.Context, profileID string) error
 	ListCustomers(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
 	GetCustomer(ctx context.Context, userID string) (map[string]interface{}, error)
-	SuspendUser(ctx context.Context, userID string, durationHours int) error
+	SuspendUser(ctx context.Context, userID, reason string, durationHours int) error
 	ReinstateUser(ctx context.Context, userID string) error
 	UpdateCustomer(ctx context.Context, userID, status, notes string) error
 	BanCustomer(ctx context.Context, userID, reason string) error
@@ -38,7 +38,7 @@ type AdminService interface {
 	GetNegotiation(ctx context.Context, rideID string) (map[string]interface{}, error)
 	RevenueKPIs(ctx context.Context, period string) (map[string]interface{}, error)
 	ListTransactions(ctx context.Context, txStatus, sort string, limit, offset int) ([]map[string]interface{}, int, error)
-	Revenue(ctx context.Context, period string) (map[string]interface{}, error)
+	Revenue(ctx context.Context, period, from, to string) (map[string]interface{}, error)
 	DisbursePayouts(ctx context.Context, transactionIDs []string) (int, float64, error)
 	GPSAnomalies(ctx context.Context, limit int) ([]map[string]interface{}, error)
 	DeviceCollisions(ctx context.Context) ([]map[string]interface{}, error)
@@ -47,8 +47,9 @@ type AdminService interface {
 	InterveneRide(ctx context.Context, rideID, action, reason string) error
 	UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error
 	LaunchReadiness(ctx context.Context) (map[string]interface{}, error)
-	CreateNotificationCampaign(ctx context.Context, title, body, audience, createdBy string, targetDriverID ...string) (map[string]interface{}, error)
-	NotifyDriver(ctx context.Context, driverIDOrUserID, title, body, reason, createdBy string) (map[string]interface{}, error)
+	CreateNotificationCampaign(ctx context.Context, in CampaignInput) (map[string]interface{}, error)
+	NotifyDriver(ctx context.Context, driverRef, title, body, reason, createdBy string) (map[string]interface{}, error)
 	ListNotificationCampaigns(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error)
+	SendNotificationCampaignNow(ctx context.Context, id, sentBy string) (map[string]interface{}, error)
 	DeleteNotificationCampaign(ctx context.Context, id string) error
 }

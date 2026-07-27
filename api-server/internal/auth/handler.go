@@ -115,6 +115,41 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /api/v1/auth/login
+// Phone-only login (no OTP). The number was verified at registration, so a
+// returning user signs in on any device with just the number. 404 if the
+// number was never registered (the app routes the user to register).
+func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PhoneNumber string `json:"phone_number" validate:"required,e164"`
+		DeviceID    string `json:"device_id"    validate:"required"`
+		Platform    string `json:"platform"`
+		AppVersion  string `json:"app_version"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	tokens, user, err := h.svc.Login(r.Context(), body.PhoneNumber, body.DeviceID, body.Platform, body.AppVersion, realIP(r))
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	respond.OK(w, map[string]interface{}{
+		"access_token":  tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+		"role_state":    user.RoleState,
+		"user_id":       user.ID,
+	})
+}
+
 // POST /api/v1/customer/phone/change/request  (authenticated)
 // Sends an OTP to a new phone number the signed-in user wants to switch to.
 func (h *Handler) RequestPhoneChange(w http.ResponseWriter, r *http.Request) {

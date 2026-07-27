@@ -248,6 +248,13 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 		_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
 	}
 
+	// Self-heal: reconcile role_state to the driver CAPABILITY so a driver whose
+	// role_state drifted to CUSTOMER_ONLY (e.g. an old mode-switch) is recognised
+	// as a driver again — the JWT below then carries the corrected role.
+	if reconciled, rErr := s.repo.ReconcileRoleState(ctx, user.ID); rErr == nil {
+		user.RoleState = reconciled
+	}
+
 	// Reject suspended accounts before issuing tokens (auto-lifting any temp-ban
 	// whose window has already elapsed).
 	s.liftExpiredSuspension(ctx, user)
@@ -275,6 +282,54 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 		return nil, nil, err
 	}
 
+	return tokens, user, nil
+}
+
+// Login authenticates an EXISTING user by phone number alone — no OTP. The
+// number was already verified once at registration, so a returning user signs
+// in on any device with just the number (product decision: passwordless,
+// cross-device convenience — the only secret is knowing the number). Mirrors
+// the "existing user" branch of VerifyOTP: it never creates an account, so an
+// unregistered number returns ErrNotFound (the app then routes to register).
+func (s *Service) Login(ctx context.Context, phone, deviceID, platform, appVersion, ipAddr string) (*TokenPair, *User, error) {
+	user, err := s.repo.FindUserByPhone(ctx, phone)
+	if err != nil {
+		// ErrNotFound → 404 (app shows "register instead"); other errors bubble up.
+		return nil, nil, err
+	}
+
+	// Keep the device_id current (used by push targeting + collision detection).
+	_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
+
+	// Self-heal role_state to the driver capability (see VerifyOTP) so a returning
+	// driver whose role drifted to CUSTOMER_ONLY is signed in as a driver again.
+	if reconciled, rErr := s.repo.ReconcileRoleState(ctx, user.ID); rErr == nil {
+		user.RoleState = reconciled
+	}
+
+	// Reject suspended accounts before issuing tokens (auto-lifting an elapsed
+	// temp-ban first), exactly like VerifyOTP.
+	s.liftExpiredSuspension(ctx, user)
+	if user.IsSuspended {
+		return nil, nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
+	}
+
+	// Log device session (best-effort).
+	_ = s.repo.LogDeviceSession(ctx, user.ID, deviceID, platform, appVersion, ipAddr)
+
+	// Device collision detection — same device_id on multiple accounts. Flag for
+	// review in production only (dev/test routinely shares one device).
+	if collision, _ := s.repo.DetectDeviceCollision(ctx, deviceID, user.ID); collision {
+		s.log.Warn().Str("device_id", deviceID).Str("user_id", user.ID).Msg("device collision detected (login)")
+		if s.cfg.Env == "production" {
+			_ = s.repo.FlagUserForReview(ctx, user.ID)
+		}
+	}
+
+	tokens, err := s.issueTokenPair(ctx, user)
+	if err != nil {
+		return nil, nil, err
+	}
 	return tokens, user, nil
 }
 

@@ -252,6 +252,9 @@ func (h *Handler) PresignedURL(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err := h.presigner.PresignPutObject(r.Context(), putInput, s3.WithPresignExpires(5*time.Minute))
 	if err != nil {
+		// Error level → Telegram alert. Presigning is pure local signing, so a
+		// failure here means the storage config itself is broken.
+		log.Error().Err(err).Str("purpose", body.Purpose).Msg("storage: presign failed — uploads are broken")
 		respond.Error(w, apperrors.ErrInternal)
 		return
 	}
@@ -326,6 +329,7 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		ContentLength: aws.Int64(int64(len(data))),
 	})
 	if err != nil {
+		log.Error().Err(err).Str("object_key", objectKey).Msg("storage: proxy upload to bucket failed")
 		respond.Error(w, apperrors.ErrInternal)
 		return
 	}
@@ -340,16 +344,13 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
-// GetObject (proxy mode) streams a stored object back. Public so <img src> and
-// the admin panel can render documents without forwarding a bearer token; keys
-// are 128-bit random, so they are unguessable (matches S3 public-read + random
-// key design used in production).
+// GetObject streams a stored object back through the API. This is how uploads
+// are served in every environment: the R2/MinIO bucket stays PRIVATE and no
+// public CDN domain is required, so STORAGE_CDN_URL points at this route.
+// Public so <img src> and the admin panel can render documents without
+// forwarding a bearer token; keys are 128-bit random, so they are unguessable.
 // GET /api/v1/uploads/objects/documents/<key>
 func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
-	if !h.proxy {
-		respond.ErrorMsg(w, http.StatusNotFound, "NOT_FOUND", "object serving not enabled")
-		return
-	}
 	objectKey, ok := safeObjectKey(chi.URLParam(r, "*"))
 	if !ok {
 		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "invalid object key")
@@ -360,6 +361,14 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 		Key:    aws.String(objectKey),
 	})
 	if err != nil {
+		// A genuinely absent key is routine (stale link) and stays at Warn.
+		// Anything else — auth, network, bucket gone — is an incident, because
+		// it means documents that DO exist are unreadable to admin reviewers.
+		if isNotFound(err) {
+			log.Warn().Str("object_key", objectKey).Msg("storage: object not found")
+		} else {
+			log.Error().Err(err).Str("object_key", objectKey).Msg("storage: object read failed — documents are unreadable")
+		}
 		respond.ErrorMsg(w, http.StatusNotFound, "NOT_FOUND", "object not found")
 		return
 	}
@@ -369,6 +378,30 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = io.Copy(w, out.Body)
+}
+
+// PutObjectBytes stores an already-buffered file in the bucket under an
+// allowed prefix. Used by the admin panel's multipart upload, which receives
+// the bytes itself rather than handing the browser a presigned URL.
+func (h *Handler) PutObjectBytes(ctx context.Context, objectKey, contentType string, data []byte) error {
+	if _, ok := safeObjectKey(objectKey); !ok {
+		return fmt.Errorf("object key %q is outside the allowed prefixes", objectKey)
+	}
+	_, err := h.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(h.cfg.Storage.Bucket),
+		Key:           aws.String(objectKey),
+		Body:          bytes.NewReader(data),
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(int64(len(data))),
+	})
+	return err
+}
+
+// PublicURL is the URL a client uses to read a stored object back. It is the
+// same value handed out as file_url by the presign endpoint, so admin-uploaded
+// and mobile-uploaded documents are addressed identically.
+func (h *Handler) PublicURL(objectKey string) string {
+	return strings.TrimRight(h.cfg.Storage.CDNURL, "/") + "/" + objectKey
 }
 
 func purposePrefix(p string) string {

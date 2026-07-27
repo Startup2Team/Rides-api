@@ -88,8 +88,30 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 }
 
 // ResendInvite refreshes the invited_at timestamp for a team member invite.
-func (s *Service) ResendInvite(ctx context.Context, id string) error {
-	return s.repo.TouchInvitedAt(ctx, id)
+// ResendInvite re-stamps invited_at and actually sends the invite email. It used
+// to only bump the timestamp while the console toasted "Invite resent to {email}",
+// so the admin believed mail had gone out and the invitee kept waiting.
+//
+// No temporary password is issued here: re-sending an invite must not silently
+// rotate a credential. The mail points the invitee at the login/reset flow.
+func (s *Service) ResendInvite(ctx context.Context, id, loginURL string) error {
+	if err := s.repo.TouchInvitedAt(ctx, id); err != nil {
+		return err
+	}
+	a, _, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if a == nil || a.Email == "" {
+		return apperrors.New(http.StatusUnprocessableEntity, "NO_EMAIL", "this admin has no email address")
+	}
+	htmlContent := email.BuildWelcomeEmail(a.Name, a.Email, a.RoleName, "", loginURL)
+	if err := email.SendEmail(ctx, a.Email, "Your Rides admin invite", htmlContent); err != nil {
+		// Surface it: the caller claims the invite was sent.
+		return apperrors.New(http.StatusBadGateway, "EMAIL_SEND_FAILED",
+			"the invite could not be emailed — check the mail configuration")
+	}
+	return nil
 }
 
 // ResetMember2FA clears TOTP credentials for another admin account.
@@ -117,7 +139,7 @@ func (s *Service) DeleteRoleByID(ctx context.Context, roleID string) error {
 }
 
 // UpdateRolePermissions replaces the permissions of a non-system role.
-func (s *Service) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+func (s *Service) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) (*Role, error) {
 	return s.repo.UpdateRolePermissions(ctx, roleID, permissions)
 }
 
@@ -285,7 +307,7 @@ func (s *Service) Logout(ctx context.Context, adminID, jti string) error {
 		return nil
 	}
 	key := rkeys.K.Session(adminID, jti)
-	return s.rdb.Set(ctx, key, "revoked", s.cfg.JWT.AccessExpiry).Err()
+	return s.rdb.Set(ctx, key, "revoked", s.cfg.JWT.AdminIdleExpiry).Err()
 }
 
 // ── 2FA setup ─────────────────────────────────────────────────────────────
@@ -429,6 +451,13 @@ func (s *Service) ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, curren
 // roleName is the human-readable role from admin_roles.name; it is converted to
 // the stable enum code (e.g. "Super Admin" → "SUPER_ADMIN") embedded in the JWT.
 func (s *Service) issueAccessToken(ctx context.Context, adminID, roleName string) (string, error) {
+	return s.issueAccessTokenAt(ctx, adminID, roleName, time.Now())
+}
+
+// issueAccessTokenAt mints an admin access token. loginAt is the time the session
+// originally started — preserved across renewals so AdminSessionMax can cap the
+// chain regardless of how much activity keeps refreshing it.
+func (s *Service) issueAccessTokenAt(ctx context.Context, adminID, roleName string, loginAt time.Time) (string, error) {
 	jti := uuid.NewString()
 	claims := jwt.MapClaims{
 		"user_id":    adminID,
@@ -436,7 +465,8 @@ func (s *Service) issueAccessToken(ctx context.Context, adminID, roleName string
 		"admin_role": adminrole.FromRoleName(roleName),
 		"token_type": "access",
 		"jti":        jti,
-		"exp":        time.Now().Add(s.cfg.JWT.AccessExpiry).Unix(),
+		"login_at":   loginAt.Unix(),
+		"exp":        time.Now().Add(s.cfg.JWT.AdminIdleExpiry).Unix(),
 		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -446,9 +476,49 @@ func (s *Service) issueAccessToken(ctx context.Context, adminID, roleName string
 	}
 
 	key := rkeys.K.Session(adminID, jti)
-	if err := s.rdb.Set(ctx, key, "valid", s.cfg.JWT.AccessExpiry).Err(); err != nil {
+	if err := s.rdb.Set(ctx, key, "valid", s.cfg.JWT.AdminIdleExpiry).Err(); err != nil {
 		return "", fmt.Errorf("store admin session: %w", err)
 	}
+	return signed, nil
+}
+
+// RenewSession slides an admin session forward. The console calls this while the
+// admin is active, which turns the token lifetime into an idle timeout: keep
+// working and you stay signed in; go idle for JWT_ADMIN_IDLE_MINUTES and the next
+// request lands on the login screen.
+//
+// The old jti is revoked so a renewed session leaves exactly one live token, and
+// the chain is capped at JWT_ADMIN_SESSION_MAX_HOURS from the original login.
+func (s *Service) RenewSession(ctx context.Context, adminID, jti string, loginAt int64) (string, error) {
+	if loginAt > 0 {
+		started := time.Unix(loginAt, 0)
+		if time.Since(started) > s.cfg.JWT.AdminSessionMax {
+			return "", apperrors.New(http.StatusUnauthorized, "SESSION_EXPIRED",
+				"this session has reached its maximum age — sign in again")
+		}
+	} else {
+		loginAt = time.Now().Unix()
+	}
+
+	a, _, err := s.repo.FindByID(ctx, adminID)
+	if err != nil {
+		return "", apperrors.ErrUnauthorized
+	}
+	// A suspended/removed admin must not be able to renew.
+	if a == nil || a.Status == "SUSPENDED" || a.Status == "DISABLED" {
+		return "", apperrors.New(http.StatusUnauthorized, "ACCOUNT_INACTIVE", "this account is no longer active")
+	}
+
+	signed, err := s.issueAccessTokenAt(ctx, adminID, a.RoleName, time.Unix(loginAt, 0))
+	if err != nil {
+		return "", err
+	}
+	if jti != "" {
+		// Best-effort: the new token is already live, so a failed revoke must not
+		// fail the renewal.
+		_ = s.Logout(ctx, adminID, jti)
+	}
+	s.repo.TouchLastActive(ctx, adminID)
 	return signed, nil
 }
 

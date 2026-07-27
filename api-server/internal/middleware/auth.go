@@ -29,6 +29,9 @@ type Claims struct {
 	TokenType   string `json:"token_type"`   // "access" | "refresh"
 	AdminRole   string `json:"admin_role"`   // set only for admin tokens: SUPER_ADMIN, OPS_MANAGER, etc.
 	IsSuspended bool   `json:"is_suspended"` // embedded so suspension is enforced without a DB hit
+	// LoginAt is the unix time the admin session originally started. Preserved
+	// across sliding renewals so the chain can be capped at an absolute age.
+	LoginAt int64 `json:"login_at,omitempty"`
 	jwt.RegisteredClaims
 }
 

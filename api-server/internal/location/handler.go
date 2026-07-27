@@ -47,6 +47,79 @@ func (h *Handler) GetSuggestions(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, result)
 }
 
+// GET /api/v1/locations/admin-units?parent_id=<id>
+// Children of a node (or top-level provinces when parent_id is omitted). Public:
+// the Rwanda hierarchy is reference data, not user data.
+func (h *Handler) ListAdminUnits(w http.ResponseWriter, r *http.Request) {
+	units, err := h.svc.ListAdminUnitChildren(r.Context(), r.URL.Query().Get("parent_id"))
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"admin_units": units})
+}
+
+// GET /api/v1/locations/admin-units/search?q=<term>&level=<optional>
+func (h *Handler) SearchAdminUnits(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if len(q) < 2 {
+		respond.OK(w, map[string]interface{}{"admin_units": []any{}})
+		return
+	}
+	units, err := h.svc.SearchAdminUnits(r.Context(), q, r.URL.Query().Get("level"), 20)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"admin_units": units})
+}
+
+// GET /api/v1/locations/recent
+func (h *Handler) ListRecentLocations(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	recents, err := h.svc.ListRecentLocations(r.Context(), claims.UserID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"recent_locations": recents})
+}
+
+// POST /api/v1/locations/recent  { address, lat, lng }
+// Records a place the rider picked for a booking (upsert; re-picking bumps it).
+func (h *Handler) RecordRecentLocation(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	var body struct {
+		Address string  `json:"address" validate:"required"`
+		Lat     float64 `json:"lat"`
+		Lng     float64 `json:"lng"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+	if err := h.svc.RecordRecentLocation(r.Context(), claims.UserID, body.Address, body.Lat, body.Lng); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
+// DELETE /api/v1/locations/recent/{id}  (soft delete)
+func (h *Handler) DeleteRecentLocation(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	id := chi.URLParam(r, "id")
+	if err := h.svc.DeleteRecentLocation(r.Context(), id, claims.UserID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.NoContent(w)
+}
+
 // POST /api/v1/locations/route
 // Body: pickup_lat, pickup_lng, dest_lat, dest_lng, vehicle_type, distance_km, duration_minutes
 func (h *Handler) UpsertRoute(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +227,42 @@ func (h *Handler) CreateSavedLocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.Created(w, loc)
+}
+
+// PUT /api/v1/users/me/saved-locations  (bulk replace-all, atomic)
+// Replaces the caller's entire saved-locations set in one transaction. The app
+// uses this instead of firing sequential create/update/delete calls, which
+// could leave the server partially updated if one failed mid-way.
+func (h *Handler) ReplaceSavedLocations(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+
+	var body struct {
+		Locations []struct {
+			Label   string  `json:"label"`
+			Address string  `json:"address"`
+			Lat     float64 `json:"lat"`
+			Lng     float64 `json:"lng"`
+		} `json:"locations"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	in := make([]SavedLocationInput, 0, len(body.Locations))
+	for _, l := range body.Locations {
+		if l.Label == "" || l.Address == "" {
+			respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "each saved location needs a label and address")
+			return
+		}
+		in = append(in, SavedLocationInput{Label: l.Label, Address: l.Address, Lat: l.Lat, Lng: l.Lng})
+	}
+
+	locs, err := h.svc.ReplaceSavedLocations(r.Context(), claims.UserID, in)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"saved_locations": locs})
 }
 
 // PUT /api/v1/users/me/saved-locations/:id

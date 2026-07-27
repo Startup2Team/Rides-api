@@ -100,8 +100,13 @@ type JWTConfig struct {
 	RefreshSecret       string
 	AccessExpiryMinutes int
 	RefreshExpiryDays   int
-	AccessExpiry        time.Duration
-	RefreshExpiry       time.Duration
+	/** Idle timeout for admin console sessions (renewed on activity). */
+	AdminIdleMinutes     int
+	AdminIdleExpiry      time.Duration
+	AdminSessionMaxHours int
+	AdminSessionMax      time.Duration
+	AccessExpiry         time.Duration
+	RefreshExpiry        time.Duration
 }
 
 type ATConfig struct {
@@ -132,6 +137,13 @@ type FirebaseConfig struct {
 type TelegramConfig struct {
 	BotToken string // TELEGRAM_BOT_TOKEN — from @BotFather
 	ChatID   string // TELEGRAM_CHAT_ID — the team group's chat id
+
+	// Daily operations digest (internal/digest). Pushed to the same chat each
+	// morning so an ordinary day produces a message — silence then means the
+	// API is down, rather than meaning nothing happened.
+	DigestEnabled  bool   // DIGEST_ENABLED (default true when Telegram is configured)
+	DigestHour     int    // DIGEST_HOUR — local hour 0–23 (default 7)
+	DigestTimezone string // DIGEST_TIMEZONE — IANA name (default Africa/Kigali)
 }
 
 type GoogleMapsConfig struct {
@@ -256,8 +268,17 @@ func Load() (*Config, error) {
 	}
 	cfg.JWT.RefreshSecret = requireEnv("JWT_REFRESH_SECRET")
 	cfg.JWT.AccessExpiryMinutes = getEnvInt("JWT_ACCESS_EXPIRY_MINUTES", 15)
+	// Admin console sessions are separate from the mobile app's: the console
+	// renews on activity, so this is effectively an idle timeout. 15 minutes of
+	// absolute expiry meant admins were bounced to login mid-task.
+	cfg.JWT.AdminIdleMinutes = getEnvInt("JWT_ADMIN_IDLE_MINUTES", 60)
+	// Hard ceiling on a renewed session, no matter how active: a stolen token
+	// must not be renewable forever.
+	cfg.JWT.AdminSessionMaxHours = getEnvInt("JWT_ADMIN_SESSION_MAX_HOURS", 12)
 	cfg.JWT.RefreshExpiryDays = getEnvInt("JWT_REFRESH_EXPIRY_DAYS", 30)
 	cfg.JWT.AccessExpiry = time.Duration(cfg.JWT.AccessExpiryMinutes) * time.Minute
+	cfg.JWT.AdminIdleExpiry = time.Duration(cfg.JWT.AdminIdleMinutes) * time.Minute
+	cfg.JWT.AdminSessionMax = time.Duration(cfg.JWT.AdminSessionMaxHours) * time.Hour
 	cfg.JWT.RefreshExpiry = time.Duration(cfg.JWT.RefreshExpiryDays) * 24 * time.Hour
 
 	cfg.AT.APIKey = getEnv("AT_API_KEY", "")
@@ -277,6 +298,9 @@ func Load() (*Config, error) {
 
 	cfg.Telegram.BotToken = getEnv("TELEGRAM_BOT_TOKEN", "")
 	cfg.Telegram.ChatID = getEnv("TELEGRAM_CHAT_ID", "")
+	cfg.Telegram.DigestEnabled = getEnvBool("DIGEST_ENABLED", true)
+	cfg.Telegram.DigestHour = getEnvInt("DIGEST_HOUR", 7)
+	cfg.Telegram.DigestTimezone = getEnv("DIGEST_TIMEZONE", "Africa/Kigali")
 
 	cfg.GMaps.APIKey = getEnv("GOOGLE_MAPS_API_KEY", "")
 

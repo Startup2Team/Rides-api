@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/internal/ledger"
+	"github.com/workspace/ride-platform/internal/notification"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -348,7 +349,32 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 	if err := s.postSale(txCtx, p); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	// Notify the driver that their payment went through and the rides landed —
+	// the automatic MoMo flow previously granted credits silently. Best-effort,
+	// after commit so it only fires on a real settlement.
+	s.notifyPurchasePaid(ctx, profileID, rides, bonus)
+	return nil
+}
+
+// notifyPurchasePaid persists an in-app notification + pushes it to the driver's
+// devices once an automatic MoMo package purchase settles.
+func (s *PurchaseService) notifyPurchasePaid(ctx context.Context, profileID string, rides, bonus int) {
+	notifSvc := notification.Default()
+	if notifSvc == nil {
+		return
+	}
+	var userID string
+	if err := s.repo.db.QueryRow(ctx,
+		`SELECT user_id FROM driver_profiles WHERE id = $1`, profileID).Scan(&userID); err != nil || userID == "" {
+		return
+	}
+	total := rides + bonus
+	body := fmt.Sprintf("Payment successful — %d ride credits were added to your account.", total)
+	notifSvc.SendToAllDevices(ctx, userID, "Payment successful", body,
+		"package_purchase_paid", map[string]string{"type": "package_purchase_paid"})
 }
 
 // GetStatus returns a purchase for polling (must belong to the user).
@@ -358,7 +384,16 @@ func (s *PurchaseService) GetStatus(ctx context.Context, userID, purchaseID stri
 		return nil, err
 	}
 	if p.Status == "PENDING" {
-		if settled, settleErr := s.devSettlePending(ctx, p.ID, p.PaymentRef); settleErr != nil {
+		// Settle on read so the driver's status poll resolves within seconds
+		// instead of waiting for the 30s reconcile sweep. With a live gateway this
+		// queries MTN (ReconcileSingle); otherwise it uses the dev auto-confirm.
+		if s.momo != nil {
+			if settled, rErr := s.ReconcileSingle(ctx, p.ID); rErr != nil {
+				s.log.Warn().Err(rErr).Str("purchase_id", p.ID).Msg("packages: reconcile on status poll failed")
+			} else if settled != nil {
+				return settled, nil
+			}
+		} else if settled, settleErr := s.devSettlePending(ctx, p.ID, p.PaymentRef); settleErr != nil {
 			s.log.Warn().Err(settleErr).Str("purchase_id", p.ID).Msg("packages: dev auto-confirm on status poll failed")
 		} else if settled != nil {
 			return settled, nil
@@ -585,7 +620,10 @@ func (s *PurchaseService) ReconcileSingle(ctx context.Context, purchaseID string
 		return nil, apperrors.ErrNotFound
 	}
 
-	if p.Status != "pending" {
+	// Purchases are stored with an uppercase status ("PENDING"). The previous
+	// lowercase guard made this return early for every real purchase, so a live
+	// MTN reconcile never ran.
+	if p.Status != "PENDING" {
 		return p, nil
 	}
 

@@ -29,6 +29,7 @@ import (
 	"github.com/workspace/ride-platform/internal/bonus"
 	"github.com/workspace/ride-platform/internal/customer"
 	"github.com/workspace/ride-platform/internal/dashboard"
+	"github.com/workspace/ride-platform/internal/digest"
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/internal/export"
 	"github.com/workspace/ride-platform/internal/fare"
@@ -182,6 +183,14 @@ func main() {
 	}
 	log.Info().Msg("migrations: up to date")
 
+	// Seed Rwanda's admin hierarchy (idempotent; no-op once present). Non-fatal:
+	// the app still boots without it, and it retries next start.
+	if err := location.SeedAdminUnits(context.Background(), db); err != nil {
+		log.Error().Err(err).Msg("admin_units: Rwanda hierarchy seed failed (non-fatal)")
+	} else {
+		log.Info().Msg("admin_units: Rwanda hierarchy ready")
+	}
+
 	// ── Core services ─────────────────────────────────────────────────────────
 	telSvc := telephony.New(cfg, log)
 	notifySvc := notification.New(cfg, log)
@@ -327,8 +336,28 @@ func main() {
 	var uploadH *upload.Handler
 	if uh, err := upload.NewHandler(cfg); err != nil {
 		log.Warn().Err(err).Msg("upload: storage not configured, presign endpoint disabled")
+		log.Warn().Msg("upload: admin file uploads will fall back to local disk, which is NOT durable in a container")
 	} else {
 		uploadH = uh
+		// Admin-uploaded driver documents go to the same bucket as mobile ones.
+		adminH.SetObjectStore(uh)
+	}
+
+	// Daily operations digest + the /stats and /pending bot commands. Built
+	// here because it needs the upload handler for its storage health check.
+	var digestSvc *digest.Service
+	if alerts != nil && cfg.Telegram.DigestEnabled {
+		digestSvc = digest.NewService(
+			digest.NewRepository(db),
+			alerts,
+			uploadH, // nil-safe: CheckStorage reports "not configured"
+			digest.Options{
+				Env:      cfg.Env,
+				Timezone: cfg.Telegram.DigestTimezone,
+				Hour:     cfg.Telegram.DigestHour,
+			},
+			log,
+		)
 	}
 
 	ratingRepo := rating.NewRepository(db)
@@ -725,6 +754,9 @@ func main() {
 		r.With(mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour)).Post("/register", authH.Register)
 		// verify-otp is brute-forceable (6-digit code) — cap attempts per phone too.
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
+		// Phone-only login (no OTP). Passwordless, so rate-limit by IP to blunt
+		// mass phone-number enumeration / account-takeover sweeps.
+		r.With(mw.IPRateLimit(cfg, rdb, "auth_login", cfg.Security.AuthRefreshRateLimit, 15*time.Minute)).Post("/login", authH.Login)
 		r.With(mw.IPRateLimit(cfg, rdb, "auth_refresh", cfg.Security.AuthRefreshRateLimit, 15*time.Minute)).Post("/refresh", authH.Refresh)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/logout", authH.Logout)
 		r.With(mw.Authenticate(cfg, rdb)).Post("/ws-ticket", authH.WSTicket)
@@ -889,12 +921,15 @@ func main() {
 
 		r.Get("/me/saved-locations", locH.ListSavedLocations)
 		r.Post("/me/saved-locations", locH.CreateSavedLocation)
+		r.Put("/me/saved-locations", locH.ReplaceSavedLocations)
 		r.Put("/me/saved-locations/{id}", locH.UpdateSavedLocation)
 		r.Delete("/me/saved-locations/{id}", locH.DeleteSavedLocation)
 
 		r.Get("/me/notifications", notifH.List)
 		r.Get("/me/notifications/unread-count", notifH.UnreadCount)
 		r.Patch("/me/notifications/{id}/read", notifH.MarkRead)
+		r.Patch("/me/notifications/{id}/unread", notifH.MarkUnread)
+		r.Delete("/me/notifications/{id}", notifH.Delete)
 		r.Post("/me/notifications/mark-all-read", notifH.MarkAllRead)
 
 		// Multi-device FCM registration.
@@ -946,8 +981,9 @@ func main() {
 	})
 
 	r.Route(apiV1Prefix+"/uploads", func(r chi.Router) {
-		// Public object serving (proxy/MinIO mode) so the mobile app and admin
-		// panel can render document images via a plain URL. No-op on S3/R2.
+		// Public object serving so the mobile app and admin panel can render
+		// document images via a plain URL. Active in every environment — the
+		// bucket stays private and STORAGE_CDN_URL points back at this route.
 		if uploadH != nil {
 			r.Get("/objects/*", uploadH.GetObject)
 			// Proxy-mode PUT mirrors a presigned S3 URL — the random object key is
@@ -966,10 +1002,17 @@ func main() {
 	// ── Locations (route cache, landmarks, suggestions) ───────────────────────
 	r.Route(apiV1Prefix+"/locations", func(r chi.Router) {
 		r.Get("/landmarks", locH.GetLandmarks) // public — no auth needed
+		// Rwanda admin hierarchy (reference data) — public, powers offline-ish
+		// structured address pickers/autocomplete without Google/Mapbox.
+		r.Get("/admin-units", locH.ListAdminUnits)
+		r.Get("/admin-units/search", locH.SearchAdminUnits)
 
 		r.Group(func(r chi.Router) {
 			r.Use(mw.Authenticate(cfg, rdb))
 			r.Get("/suggestions", locH.GetSuggestions)
+			r.Get("/recent", locH.ListRecentLocations)
+			r.Post("/recent", locH.RecordRecentLocation)
+			r.Delete("/recent/{id}", locH.DeleteRecentLocation)
 			r.Get("/route", locH.GetRoute)
 			r.Post("/route", locH.UpsertRoute)
 		})
@@ -1003,6 +1046,9 @@ func main() {
 
 		// Auth (protected actions) - My Account (unrestricted admin roles)
 		r.Post("/auth/logout", teamH.Logout)
+		// Sliding session: the console renews while the admin is active, so the
+		// token lifetime behaves as an idle timeout instead of booting them mid-task.
+		r.Post("/auth/renew", teamH.RenewSession)
 		r.Post("/auth/2fa/reissue", teamH.Reissue2FAChallenge)
 		r.Post("/auth/totp/reset", teamH.ResetTOTP)
 
@@ -1049,11 +1095,11 @@ func main() {
 			r.Post("/drivers/{id}/reject", adminH.RejectDriver)
 			r.Post("/drivers/{id}/request-more-info", adminH.RequestDriverMoreInfo)
 			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
+			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 			r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)
-			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/uploads/file", adminH.UploadDriverFile)
 			if uploadH != nil {
 				r.Post("/uploads/presigned-url", uploadH.PresignedURL)
@@ -1094,6 +1140,7 @@ func main() {
 			// Push Notifications Campaigns
 			r.Post("/notifications", adminH.CreateNotificationCampaign)
 			r.Get("/notifications", adminH.ListNotificationCampaigns)
+			r.Post("/notifications/{id}/send", adminH.SendNotificationCampaign)
 			r.Delete("/notifications/{id}", adminH.DeleteNotificationCampaign)
 
 			// Safety incidents
@@ -1289,6 +1336,9 @@ func main() {
 			r.Post("/campaigns", pkgH.AdminCreateCampaign)
 			r.Patch("/campaigns/{id}", pkgH.AdminUpdateCampaign)
 			r.Patch("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
+			// The admin console posts this; PATCH-only meant every Activate /
+			// Expire / Archive click got a 405.
+			r.Post("/campaigns/{id}/status", pkgH.AdminSetCampaignStatus)
 			r.Delete("/campaigns/{id}", pkgH.AdminDeleteCampaign)
 
 			// Partners admin CRUD
@@ -1340,6 +1390,8 @@ func main() {
 	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
 	adminSvc.SetNotifier(notifySvc) // push driver approve/reject decisions to the driver's devices
+	// Fire "Schedule for later" notification campaigns when their time arrives.
+	go adminSvc.RunScheduledCampaignDispatcher(bgCtx)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// WriteTimeout must be 0 when serving WebSockets — a global write timeout
@@ -1359,24 +1411,60 @@ func main() {
 		}
 	}()
 
-	// Telegram bot commands (/status /help) — long-poll getUpdates. Disabled
-	// when the notifier is nil. Uses local /health so the reply reflects what
-	// this process is actually serving.
-	alerts.StartCommands(bgCtx, func(ctx context.Context) string {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+cfg.Port+"/health", nil)
-		if err != nil {
-			return "⚠️ status check failed to build request: " + err.Error()
+	// Storage reachability: probe once at boot and every 10 minutes after.
+	// A revoked bucket credential previously went unnoticed for weeks because
+	// the failing PUT happens phone→R2 and never reaches this process.
+	if uploadH != nil {
+		if err := uploadH.CheckStorage(bgCtx); err != nil {
+			log.Error().Err(err).Msg("storage: bucket unreachable at startup — uploads will fail")
+		} else {
+			log.Info().Str("bucket", cfg.Storage.Bucket).Msg("storage: bucket reachable")
 		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Sprintf("🔴 Rides API (%s)\nhealth: unreachable\n%v", cfg.Env, err)
+		uploadH.WatchStorage(bgCtx, log)
+	}
+
+	// Daily summary to Telegram, so an ordinary day still produces a message.
+	if digestSvc != nil {
+		digestSvc.Start(bgCtx)
+	}
+
+	// Telegram bot commands — long-poll getUpdates. Disabled when the notifier
+	// is nil. /status uses local /health so the reply reflects what this
+	// process is actually serving.
+	botCommands := map[string]alerting.StatusFunc{
+		"status": func(ctx context.Context) string {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+cfg.Port+"/health", nil)
+			if err != nil {
+				return "⚠️ status check failed to build request: " + err.Error()
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Sprintf("🔴 Rides API (%s)\nhealth: unreachable\n%v", cfg.Env, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return fmt.Sprintf("✅ Rides API (%s)\nhealth: OK (HTTP %d)\nport: %s", cfg.Env, resp.StatusCode, cfg.Port)
+			}
+			return fmt.Sprintf("🔴 Rides API (%s)\nhealth: HTTP %d", cfg.Env, resp.StatusCode)
+		},
+	}
+	if digestSvc != nil {
+		botCommands["stats"] = func(ctx context.Context) string {
+			text, err := digestSvc.Build(ctx)
+			if err != nil {
+				return "⚠️ couldn't build the summary: " + err.Error()
+			}
+			return text
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			return fmt.Sprintf("✅ Rides API (%s)\nhealth: OK (HTTP %d)\nport: %s", cfg.Env, resp.StatusCode, cfg.Port)
+		botCommands["pending"] = func(ctx context.Context) string {
+			text, err := digestSvc.BuildPending(ctx)
+			if err != nil {
+				return "⚠️ couldn't read the pending queue: " + err.Error()
+			}
+			return text
 		}
-		return fmt.Sprintf("🔴 Rides API (%s)\nhealth: HTTP %d", cfg.Env, resp.StatusCode)
-	})
+	}
+	alerts.StartCommandsWith(bgCtx, botCommands)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

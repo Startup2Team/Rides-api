@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -408,24 +410,36 @@ func (r *Repository) UpdateRoleByID(ctx context.Context, roleID, name, descripti
 	return role, nil
 }
 
-// UpdateRolePermissions replaces only the permissions of a non-system role.
+// UpdateRolePermissions replaces only the permissions of a non-system role and
+// returns the updated row. Name and description are deliberately untouched: the
+// permissions endpoint used to go through UpdateRoleByID with empty strings,
+// which blanked both columns on every save.
 // Returns cannot_modify_system_role if the role is a system role or missing.
-func (r *Repository) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) error {
+func (r *Repository) UpdateRolePermissions(ctx context.Context, roleID string, permissions interface{}) (*Role, error) {
 	raw, err := json.Marshal(permissions)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	tag, err := r.db.Exec(ctx, `
+	role := &Role{}
+	var rawPerms []byte
+	err = r.db.QueryRow(ctx, `
 		UPDATE admin_roles SET permissions=$1
 		WHERE id=$2 AND is_system=FALSE
-	`, raw, roleID)
+		RETURNING id, name, description, permissions, is_system, created_at
+	`, raw, roleID).Scan(
+		&role.ID, &role.Name, &role.Description, &rawPerms, &role.IsSystem, &role.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("cannot_modify_system_role")
+	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("cannot_modify_system_role")
+	var perms interface{}
+	if err := json.Unmarshal(rawPerms, &perms); err == nil {
+		role.Permissions = perms
 	}
-	return nil
+	return role, nil
 }
 
 // ReissueInvite re-stamps invited_at for a still-pending (not yet ACTIVE) admin.

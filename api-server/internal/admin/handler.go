@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -20,11 +22,19 @@ type Handler struct {
 	auth  AuthService
 	audit *audit.Logger
 	env   string
+	// store persists admin-uploaded driver documents in object storage. Nil when
+	// storage is unconfigured, in which case UploadDriverFile falls back to
+	// (non-durable) local disk.
+	store ObjectStore
 }
 
 func NewHandler(svc AdminService, auth AuthService, auditLog *audit.Logger, env string) *Handler {
 	return &Handler{svc: svc, auth: auth, audit: auditLog, env: env}
 }
+
+// SetObjectStore wires the shared upload/object-storage client. Call it during
+// startup once the storage handler is built.
+func (h *Handler) SetObjectStore(s ObjectStore) { h.store = s }
 
 // adminCtx pulls the admin id + role off the request claims for audit entries.
 func adminCtx(r *http.Request) (id, role string) {
@@ -199,18 +209,19 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) SuspendUser(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "id")
 	var body struct {
-		DurationHours int `json:"duration_hours"`
+		Reason        string `json:"reason"`
+		DurationHours int    `json:"duration_hours"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DurationHours <= 0 {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-	if err := h.svc.SuspendUser(r.Context(), userID, body.DurationHours); err != nil {
+	if err := h.svc.SuspendUser(r.Context(), userID, body.Reason, body.DurationHours); err != nil {
 		respond.Error(w, err)
 		return
 	}
 	adminID, role := adminCtx(r)
-	h.audit.Record(r.Context(), adminID, role, "customer.suspend", "customer", userID, "Suspended customer", map[string]any{"duration_hours": body.DurationHours})
+	h.audit.Record(r.Context(), adminID, role, "customer.suspend", "customer", userID, "Suspended customer", map[string]any{"duration_hours": body.DurationHours, "reason": body.Reason})
 	respond.NoContent(w)
 }
 
@@ -648,7 +659,9 @@ func (h *Handler) Revenue(w http.ResponseWriter, r *http.Request) {
 	if period == "" {
 		period = "month"
 	}
-	data, err := h.svc.Revenue(r.Context(), period)
+	// from/to were accepted by the console and dropped here, so a custom range
+	// fell through periodToInterval's default and reported the last 24 hours.
+	data, err := h.svc.Revenue(r.Context(), period, r.URL.Query().Get("from"), r.URL.Query().Get("to"))
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -816,10 +829,12 @@ func (h *Handler) LaunchReadiness(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/notifications
 func (h *Handler) CreateNotificationCampaign(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title          string `json:"title"`
-		Body           string `json:"body"`
-		Audience       string `json:"audience"`
-		TargetDriverID string `json:"target_driver_id"`
+		Title          string     `json:"title"`
+		Body           string     `json:"body"`
+		Audience       string     `json:"audience"`
+		Status         string     `json:"status"`
+		ScheduledAt    *time.Time `json:"scheduled_at"`
+		TargetDriverID string     `json:"target_driver_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
@@ -827,24 +842,32 @@ func (h *Handler) CreateNotificationCampaign(w http.ResponseWriter, r *http.Requ
 	}
 
 	adminID, role := adminCtx(r)
-	campaign, err := h.svc.CreateNotificationCampaign(r.Context(), body.Title, body.Body, body.Audience, adminID, body.TargetDriverID)
+	campaign, err := h.svc.CreateNotificationCampaign(r.Context(), CampaignInput{
+		Title:           body.Title,
+		Body:            body.Body,
+		Audience:        body.Audience,
+		Status:          strings.ToUpper(body.Status),
+		ScheduledAt:     body.ScheduledAt,
+		TargetDriverRef: body.TargetDriverID,
+		CreatedBy:       adminID,
+	})
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
 
 	h.audit.Record(r.Context(), adminID, role, "notification.send", "admin_notifications", campaign["id"].(string), "Sent notification campaign", map[string]any{
-		"title":            body.Title,
-		"audience":         body.Audience,
-		"target_driver_id": body.TargetDriverID,
+		"title":    body.Title,
+		"audience": body.Audience,
+		"status":   campaign["status"],
 	})
 
 	respond.Created(w, campaign)
 }
 
-// POST /api/v1/admin/drivers/:id/notify
+// POST /api/v1/admin/drivers/:id/notify — direct message to one driver.
 func (h *Handler) NotifyDriver(w http.ResponseWriter, r *http.Request) {
-	driverID := chi.URLParam(r, "id")
+	profileID := chi.URLParam(r, "id")
 	var body struct {
 		Title  string `json:"title"`
 		Body   string `json:"body"`
@@ -856,18 +879,18 @@ func (h *Handler) NotifyDriver(w http.ResponseWriter, r *http.Request) {
 	}
 
 	adminID, role := adminCtx(r)
-	result, err := h.svc.NotifyDriver(r.Context(), driverID, body.Title, body.Body, body.Reason, adminID)
+	campaign, err := h.svc.NotifyDriver(r.Context(), profileID, body.Title, body.Body, body.Reason, adminID)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
 
-	h.audit.Record(r.Context(), adminID, role, "driver.notify", "driver_profiles", driverID, "Sent direct notification to driver", map[string]any{
+	h.audit.Record(r.Context(), adminID, role, "driver.notify", "driver", profileID, "Sent direct notification to driver", map[string]any{
 		"title":  body.Title,
 		"reason": body.Reason,
 	})
 
-	respond.Created(w, result)
+	respond.Created(w, campaign)
 }
 
 // GET /api/v1/admin/notifications
@@ -884,6 +907,23 @@ func (h *Handler) ListNotificationCampaigns(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// POST /api/v1/admin/notifications/:id/send — deliver a draft/scheduled campaign now.
+func (h *Handler) SendNotificationCampaign(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	adminID, role := adminCtx(r)
+	campaign, err := h.svc.SendNotificationCampaignNow(r.Context(), id, adminID)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	h.audit.Record(r.Context(), adminID, role, "notification.send", "admin_notifications", id, "Sent notification campaign", map[string]any{
+		"audience": campaign["audience"],
+	})
+
+	respond.OK(w, campaign)
+}
+
 // DELETE /api/v1/admin/notifications/:id
 func (h *Handler) DeleteNotificationCampaign(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -898,11 +938,19 @@ func (h *Handler) DeleteNotificationCampaign(w http.ResponseWriter, r *http.Requ
 	respond.OK(w, map[string]string{"message": "deleted"})
 }
 
+const maxPageLimit = 1000
+
 func paginate(r *http.Request) (int, int) {
 	limit := 20
 	offset := 0
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, _ := strconv.Atoi(l); n > 0 && n <= 500 {
+		// Clamp, don't silently fall back to 20. An out-of-range limit used to
+		// reset to the default, so ?limit=1000 returned 20 rows — and the driver
+		// registration report presented those 20 as the period total.
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			if n > maxPageLimit {
+				n = maxPageLimit
+			}
 			limit = n
 		}
 	}

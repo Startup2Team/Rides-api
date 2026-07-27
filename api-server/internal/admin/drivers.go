@@ -568,6 +568,8 @@ type AdminCreateDriverInput struct {
 
 // Allowed driver document types (aligned with mobile onboarding + admin registration).
 var allowedDriverDocumentTypes = map[string]bool{
+	"NATIONAL_ID_FRONT":          true,
+	"NATIONAL_ID_BACK":           true,
 	"LICENCE_FRONT":              true,
 	"LICENCE_BACK":               true,
 	"VEHICLE_INSURANCE":          true,
