@@ -346,7 +346,7 @@ func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret,
 	}
 
 	key, err := totp.Generate(totp.GenerateOpts{
-		Issuer:      totpIssuer,
+		Issuer:      s.totpIssuerLabel(),
 		AccountName: admin.Email,
 	})
 	if err != nil {
@@ -421,7 +421,7 @@ func (s *Service) ResetTOTP(ctx context.Context, adminID, currentCode string) (s
 	}
 
 	key, genErr := totp.Generate(totp.GenerateOpts{
-		Issuer:      totpIssuer,
+		Issuer:      s.totpIssuerLabel(),
 		AccountName: admin.Email,
 	})
 	if genErr != nil {
@@ -572,6 +572,21 @@ func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {
 
 // validateTOTP checks the code against the secret with a ±60-second tolerance
 // to handle minor phone clock drift.
+// totpIssuerLabel is what the authenticator app shows above the account name.
+//
+// Staging and production are separate databases with separate TOTP secrets, so
+// one person legitimately holds two enrolments for the same email. With a fixed
+// issuer both appeared as an identical "Rides Admin: you@example.com" and there
+// was no way to tell which was which — entering the production code against
+// staging just returns "authenticator code is invalid or expired", with nothing
+// pointing at the real cause. Naming the environment makes the two distinct.
+func (s *Service) totpIssuerLabel() string {
+	if s.cfg.Env == "production" {
+		return totpIssuer
+	}
+	return totpIssuer + " (" + s.cfg.Env + ")"
+}
+
 func validateTOTP(code, secret string) bool {
 	valid, _ := totp.ValidateCustom(code, secret, time.Now().UTC(), totp.ValidateOpts{
 		Period:    30,
