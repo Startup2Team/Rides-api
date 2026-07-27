@@ -127,3 +127,39 @@ func TestUntilNextRunPicksTomorrowOncePastTheHour(t *testing.T) {
 		t.Errorf("after the hour: got %v, want 23h30m", got)
 	}
 }
+
+// A zero-sales day must still show that revenue is arriving. Reporting only
+// yesterday made a quiet day look identical to a broken payment pipeline.
+func TestFormatShowsRollingContextOnAZeroDay(t *testing.T) {
+	s := snap()
+	s.RidesCompleted, s.FareRWF, s.FarePrevRWF = 0, 0, 0
+	s.PackagesSold, s.PackageRevenue = 0, 0
+	s.Packages7d, s.PkgRev7dRWF, s.PkgRevTotal = 4, 9500, 19500
+
+	out := Format(s, "staging")
+	if !strings.Contains(out, "0 │ 9,500 │ 19,500") {
+		t.Fatalf("a zero day must sit beside the 7d and all-time totals:\n%s", out)
+	}
+}
+
+func TestTriple(t *testing.T) {
+	if got := triple(0, 4, 12); got != "0 │ 4 │ 12" {
+		t.Errorf("triple = %q", got)
+	}
+	// -1 means "this window does not apply" — omitted, not printed as a zero.
+	if got := triple(0, 4, -1); got != "0 │ 4" {
+		t.Errorf("triple with no all-time = %q", got)
+	}
+	if got := triple64(0, 9500, 19500); got != "0 │ 9,500 │ 19,500" {
+		t.Errorf("triple64 = %q", got)
+	}
+}
+
+func TestFormatFlagsPendingPaymentClaims(t *testing.T) {
+	s := snap()
+	s.PendingClaims = 3
+	out := Format(s, "prod")
+	if !strings.Contains(out, "3 manual payment claim(s) awaiting review") {
+		t.Fatalf("pending claims must be actionable:\n%s", out)
+	}
+}

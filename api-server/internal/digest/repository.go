@@ -28,10 +28,29 @@ type Snapshot struct {
 	FareRWF            int64
 	FarePrevRWF        int64
 
+	// Rolling context. Without these a quiet day is an unreadable wall of
+	// zeros, and there is no way to tell "nothing sold yesterday" apart from
+	// "sales are broken" — which is exactly the question the daily figures
+	// alone kept raising.
+	Rides7d     int
+	Fare7dRWF   int64
+	RidesTotal  int
+	FareTotRWF  int64
+	NewUsers7d  int
+	Packages7d  int
+	PkgRev7dRWF int64
+	PkgRevTotal int64
+
 	// Growth
 	NewCustomers int
 	NewDrivers   int
 	TotalUsers   int
+
+	// Quality + queue
+	AvgRating7d   float64
+	RatingCount7d int
+	PendingClaims int
+	UnreadNotifs  int
 
 	// Drivers — the actionable column
 	PendingApplications int
@@ -90,13 +109,29 @@ func (r *Repository) Collect(ctx context.Context, day time.Time, loc *time.Locat
 		return nil, err
 	}
 
+	// ── Rolling 7-day and all-time rides ─────────────────────────────────────
+	week := start.AddDate(0, 0, -6) // the reported day plus the six before it
+	if err := r.db.QueryRow(ctx, `
+		SELECT
+		  count(*) FILTER (WHERE completed_at >= $1 AND completed_at < $2),
+		  COALESCE(sum(COALESCE(final_fare_rwf, agreed_fare, 0))
+		           FILTER (WHERE completed_at >= $1 AND completed_at < $2), 0)::bigint,
+		  count(*) FILTER (WHERE completed_at IS NOT NULL),
+		  COALESCE(sum(COALESCE(final_fare_rwf, agreed_fare, 0))
+		           FILTER (WHERE completed_at IS NOT NULL), 0)::bigint
+		FROM rides
+	`, week, end).Scan(&s.Rides7d, &s.Fare7dRWF, &s.RidesTotal, &s.FareTotRWF); err != nil {
+		return nil, err
+	}
+
 	// ── Growth ───────────────────────────────────────────────────────────────
 	if err := r.db.QueryRow(ctx, `
 		SELECT
 		  count(*) FILTER (WHERE created_at >= $1 AND created_at < $2),
+		  count(*) FILTER (WHERE created_at >= $3 AND created_at < $2),
 		  count(*)
 		FROM users
-	`, start, end).Scan(&s.NewCustomers, &s.TotalUsers); err != nil {
+	`, start, end, week).Scan(&s.NewCustomers, &s.NewUsers7d, &s.TotalUsers); err != nil {
 		return nil, err
 	}
 
@@ -119,11 +154,19 @@ func (r *Repository) Collect(ctx context.Context, day time.Time, loc *time.Locat
 	}
 
 	// ── Packages ─────────────────────────────────────────────────────────────
+	// All three windows in one pass, so yesterday's zero always sits next to
+	// the running totals that prove revenue is arriving at all.
 	if err := r.db.QueryRow(ctx, `
-		SELECT count(*), COALESCE(sum(price_paid_rwf), 0)::bigint
+		SELECT
+		  count(*) FILTER (WHERE paid_at >= $1 AND paid_at < $2),
+		  COALESCE(sum(price_paid_rwf) FILTER (WHERE paid_at >= $1 AND paid_at < $2), 0)::bigint,
+		  count(*) FILTER (WHERE paid_at >= $3 AND paid_at < $2),
+		  COALESCE(sum(price_paid_rwf) FILTER (WHERE paid_at >= $3 AND paid_at < $2), 0)::bigint,
+		  COALESCE(sum(price_paid_rwf) FILTER (WHERE paid_at IS NOT NULL), 0)::bigint
 		FROM package_purchases
-		WHERE paid_at >= $1 AND paid_at < $2
-	`, start, end).Scan(&s.PackagesSold, &s.PackageRevenue); err != nil {
+	`, start, end, week).Scan(
+		&s.PackagesSold, &s.PackageRevenue, &s.Packages7d, &s.PkgRev7dRWF, &s.PkgRevTotal,
+	); err != nil {
 		return nil, err
 	}
 
@@ -150,14 +193,22 @@ func (r *Repository) Collect(ctx context.Context, day time.Time, loc *time.Locat
 		return nil, err
 	}
 
-	// ── Support load + platform health ───────────────────────────────────────
+	// ── Support load, quality + platform health ──────────────────────────────
 	if err := r.db.QueryRow(ctx, `
 		SELECT
 		  (SELECT count(*) FROM support_tickets  WHERE status IN ('OPEN','PENDING')),
 		  (SELECT count(*) FROM safety_incidents WHERE status IN ('OPEN','ACKNOWLEDGED','ESCALATED')),
 		  (SELECT count(*) FROM driver_documents WHERE uploaded_at >= $1 AND uploaded_at < $2),
+		  (SELECT count(*) FROM manual_payment_claims WHERE status NOT IN ('approved','rejected','expired')),
+		  (SELECT count(*) FROM notifications WHERE is_read = false),
+		  (SELECT count(*) FROM ratings WHERE created_at >= $3 AND created_at < $2),
+		  (SELECT COALESCE(round(avg(score)::numeric, 2), 0)::float8
+		     FROM ratings WHERE created_at >= $3 AND created_at < $2),
 		  pg_size_pretty(pg_database_size(current_database()))
-	`, start, end).Scan(&s.OpenTickets, &s.OpenIncidents, &s.DocumentsUploaded, &s.DBSize); err != nil {
+	`, start, end, week).Scan(
+		&s.OpenTickets, &s.OpenIncidents, &s.DocumentsUploaded,
+		&s.PendingClaims, &s.UnreadNotifs, &s.RatingCount7d, &s.AvgRating7d, &s.DBSize,
+	); err != nil {
 		return nil, err
 	}
 
