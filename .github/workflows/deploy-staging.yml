@@ -5,7 +5,11 @@ name: Deploy Staging
 # ONLY after the image for that commit has been built & pushed, so it always
 # deploys a real, CI-tested artifact — never a half-built one.
 #
-# Required secret: DEPLOY_SSH_KEY (private key trusted by root@139.84.251.242).
+# Required secret:   DEPLOY_SSH_KEY (private key trusted by root@<DEPLOY_HOST>).
+# Required variable: DEPLOY_HOST — the box IP. Kept as a repo variable, not
+#   hardcoded, so moving to a new server is one edit in Settings → Variables
+#   instead of a commit touching every workflow (which is what the 2026-07
+#   Vultr migration had to do).
 
 on:
   workflow_run:
@@ -65,15 +69,20 @@ jobs:
             --data-urlencode "text=🚀 STAGING deploy started — sha ${SHA:0:12} → migrate + health gate → stg-api.rides.rw"$'\n'"$RUN_URL" >/dev/null || echo "::warning::Telegram notification failed to send (check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)"
 
       - name: Set up SSH
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
         run: |
+          [ -z "$DEPLOY_HOST" ] && { echo "::error::repo variable DEPLOY_HOST is unset — set it to the box IP"; exit 1; }
           install -m 700 -d ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
           chmod 600 ~/.ssh/deploy
-          ssh-keyscan -H 139.84.251.242 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy + migrate + smoke test (rolls back on failure)
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
         run: |
-          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@139.84.251.242"
+          SSH="ssh -i ~/.ssh/deploy -o BatchMode=yes root@$DEPLOY_HOST"
           # Ship the current tree (compose files, migrations, deploy script) but
           # deploy the pre-built image by SHA — no build on the box.
           git archive --format=tar HEAD | $SSH 'tar -x -C /opt/rides/Rides-api --overwrite'

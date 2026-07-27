@@ -70,7 +70,7 @@ jobs:
           fi
           curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
-            --data-urlencode "text=🚨 api.rides.rw/health is DOWN (last HTTP ${{ steps.check.outputs.code }}) — 3 attempts failed. Check the box: ssh root@139.84.251.242, docker compose logs api." \
+            --data-urlencode "text=🚨 api.rides.rw/health is DOWN (last HTTP ${{ steps.check.outputs.code }}) — 3 attempts failed. Check the box: ssh root@${{ vars.DEPLOY_HOST }}, docker compose logs api." \
             -o /tmp/tg.json -w "http=%{http_code}\n"
           cat /tmp/tg.json; echo
           grep -q '"ok":true' /tmp/tg.json

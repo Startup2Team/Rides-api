@@ -20,7 +20,31 @@ AWSCLI_IMAGE="${AWSCLI_IMAGE:-amazon/aws-cli:latest}"
 
 cd "$APP_DIR"
 # Load DB + R2 creds (STORAGE_*, POSTGRES_*, BACKUP_ENCRYPTION_KEY) from .env.
-set -a; . ./.env; set +a
+#
+# NOT `. ./.env`. Sourcing treats the file as bash, so a value containing spaces
+# and no quotes — e.g. MANUAL_PAY_INSTRUCTIONS=Send the exact amount … — parses
+# as an assignment followed by a command, and `set -e` then kills the script on
+# the resulting "the: command not found". That is not hypothetical: it silently
+# killed every nightly backup from 2026-06-30 to 2026-07-27, exiting 127 on this
+# line before a single dump was taken. Nothing noticed, because cron's only
+# output went to a log nobody reads.
+#
+# Compose tolerates those same lines (it does its own parsing), so the env file
+# stays valid for the app while breaking only this script — which is exactly why
+# it went unseen for a month. Parse it literally instead: split on the first
+# `=`, strip one layer of matching quotes, ignore comments and blanks.
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ''|'#'*) continue ;; esac
+  [ "${line#*=}" = "$line" ] && continue          # no '=' → not an assignment
+  key="${line%%=*}"; val="${line#*=}"
+  case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac   # skip non-identifiers
+  # Strip one enclosing pair of quotes, if present.
+  case "$val" in
+    \"*\") val="${val#\"}"; val="${val%\"}" ;;
+    \'*\') val="${val#\'}"; val="${val%\'}" ;;
+  esac
+  export "$key=$val"
+done < ./.env
 
 : "${POSTGRES_USER:?missing}"; : "${POSTGRES_DB:?missing}"
 : "${STORAGE_BUCKET:?missing}"; : "${STORAGE_ENDPOINT:?missing}"
@@ -28,8 +52,29 @@ set -a; . ./.env; set +a
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
 DUMP="$TMP/rideplatform-$STAMP.sql.gz"
+
+# Page Telegram if we exit non-zero anywhere below. A backup that stops running
+# is indistinguishable from one that runs fine until you need it — the 27-day
+# outage above was invisible precisely because failure was silent. Uses the
+# API's existing bot credentials; if they are absent this degrades to the log.
+BACKUP_OK=0
+on_exit() {
+  local rc=$?
+  rm -rf "$TMP"
+  if [ "$rc" -ne 0 ] || [ "$BACKUP_OK" -ne 1 ]; then
+    echo "ERROR: backup FAILED (exit $rc) at $(date -u +%FT%TZ)" >&2
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+      curl -sS --max-time 20 -X POST \
+        "https://api.telegram.org/bot$(printf '%s' "$TELEGRAM_BOT_TOKEN" | tr -d '[:space:]')/sendMessage" \
+        --data-urlencode "chat_id=$(printf '%s' "$TELEGRAM_CHAT_ID" | tr -d '[:space:]')" \
+        --data-urlencode "text=🚨 DB BACKUP FAILED on $(hostname) (exit $rc). No new copy in R2 — check /var/log/pg-backup.log now." \
+        >/dev/null 2>&1 || echo "WARN: could not send Telegram backup alert" >&2
+    fi
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 
 # 1. Dump (no-owner so it restores cleanly into a fresh role) + compress.
 docker exec "$PG_CONTAINER" pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner \
@@ -75,4 +120,6 @@ aws_r2 s3 ls "s3://$STORAGE_BUCKET/$PREFIX/" 2>/dev/null | awk '{print $4}' | wh
     aws_r2 s3 rm "s3://$STORAGE_BUCKET/$PREFIX/$f" >/dev/null && echo "pruned $f"
   fi
 done
+# Reached only if every step above succeeded; the EXIT trap alerts unless set.
+BACKUP_OK=1
 echo "Backup complete."
