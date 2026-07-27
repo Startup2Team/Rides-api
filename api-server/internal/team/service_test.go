@@ -701,3 +701,19 @@ func TestLogin_With2FA_EnforcedOutsideProduction(t *testing.T) {
 	assert.NotEmpty(t, result.PreAuthToken, "a pre-auth token is what /2fa/verify needs")
 	assert.Empty(t, result.AccessToken, "no full access token before the second factor")
 }
+
+// Staging and production hold separate TOTP secrets for the same email, so one
+// person legitimately has two enrolments. A fixed issuer made both show up in
+// the authenticator as an identical "Rides Admin: you@example.com", and using
+// the wrong one returns only "authenticator code is invalid or expired" — which
+// points nowhere near the real cause.
+func TestTOTPIssuerLabelNamesNonProductionEnvironments(t *testing.T) {
+	prod := newTestServiceProduction(&mockRepo{}, newTestRedis(t))
+	assert.Equal(t, "Rides Admin", prod.totpIssuerLabel(),
+		"production stays unadorned — it is the one people use daily")
+
+	other := newTestService(&mockRepo{}, newTestRedis(t))
+	assert.NotEqual(t, "Rides Admin", other.totpIssuerLabel(),
+		"a non-production enrolment must be distinguishable in the authenticator")
+	assert.Contains(t, other.totpIssuerLabel(), "Rides Admin")
+}

@@ -1,6 +1,15 @@
 # Rides — Operations Guide (how the live system works)
 
-Server: **Vultr Johannesburg**, IP **139.84.251.242**, Ubuntu 24.04, 8 GB / 4 vCPU / 150 GB.
+Server: **Vultr Johannesburg**, IP **139.84.244.214**, Ubuntu 24.04, 4 GB / 2 vCPU / 80 GB.
+
+Migrated here on 2026-07-27 from `139.84.251.242` (4 vCPU / 8 GB / 160 GB, ~$45/mo).
+That box measured 1.0–1.14 GB RAM and ~0.05 cores of real application load; its
+apparent 53% CPU was dockerd/containerd churning over 45 accumulated deploy
+images and 111 build-cache entries, which nothing ever pruned. Hence the weekly
+prune cron below — without it, this box regrows the same problem.
+
+CI reaches the box via the repo **variable** `DEPLOY_HOST` (Settings → Variables),
+not a hardcoded IP. Moving servers again is one edit there.
 
 ---
 
@@ -8,7 +17,7 @@ Server: **Vultr Johannesburg**, IP **139.84.251.242**, Ubuntu 24.04, 8 GB / 4 vC
 
 From your Mac (your SSH key is already authorized):
 ```bash
-ssh root@139.84.251.242
+ssh root@139.84.244.214
 ```
 - Login is **key-based** (your `~/.ssh/id_ed25519`). No password needed.
 - A root password also exists (Vultr generated it) as a backup, but prefer the key.
@@ -27,7 +36,7 @@ Everything below is run **on the box** after you SSH in.
   Cloudflare  (DNS, CDN, DDoS, edge TLS)
         │  HTTPS (Origin cert, Full-strict)
         ▼
-  ┌──────────────── Vultr box (139.84.251.242) ───────────────┐
+  ┌──────────────── Vultr box (139.84.244.214) ───────────────┐
   │  nginx :80/:443  ── reverse proxy + TLS                    │
   │     ├── api.rides.rw    → api    :8080  (Go)               │
   │     ├── admin.rides.rw  → admin  :3000  (Next.js)          │
@@ -130,18 +139,18 @@ The box does **not** clone from GitHub. Code is shipped **from your Mac** with `
 **Backend (Rides-api):**
 ```bash
 # on your Mac, in the Rides-api repo:
-git archive --format=tar deploy/vultr-jnb | ssh root@139.84.251.242 \
+git archive --format=tar deploy/vultr-jnb | ssh root@139.84.244.214 \
   'tar -x -C /opt/rides/Rides-api --overwrite'
-ssh root@139.84.251.242 'cd /opt/rides/Rides-api/api-server && \
+ssh root@139.84.244.214 'cd /opt/rides/Rides-api/api-server && \
   docker compose -f docker-compose.prod.yml up -d --build api'
 ```
 
 **Web (Rides-web, from the `main`-based branch):**
 ```bash
 # on your Mac, in the Rides-web repo:
-git archive --format=tar deploy/docker-main | ssh root@139.84.251.242 \
+git archive --format=tar deploy/docker-main | ssh root@139.84.244.214 \
   'rm -rf /opt/rides/Rides-web && mkdir -p /opt/rides/Rides-web && tar -x -C /opt/rides/Rides-web'
-ssh root@139.84.251.242 'cd /opt/rides/Rides-api/api-server && \
+ssh root@139.84.244.214 'cd /opt/rides/Rides-api/api-server && \
   docker compose -f docker-compose.prod.yml up -d --build admin'
 ```
 > The `.env` and `nginx/certs/` live only on the box and are never overwritten by these pushes.
@@ -230,3 +239,34 @@ curl -I https://admin.rides.rw/admin/login       # 200
 docker compose -f docker-compose.prod.yml ps     # all "Up"/"healthy"
 df -h / ; free -h                                # disk + memory
 ```
+
+---
+
+## 15. Scheduled jobs (crontab)
+
+`crontab -l` on the box:
+
+```cron
+30 2 * * *  cd /opt/rides/Rides-api/api-server && bash scripts/pg-backup.sh >> /var/log/pg-backup.log 2>&1
+0  4 * * 0  docker image prune -af --filter "until=168h" >> /var/log/docker-prune.log 2>&1; docker builder prune -af >> /var/log/docker-prune.log 2>&1
+```
+
+**02:30 daily — encrypted DB backup to R2.** Verify it is actually running:
+
+```bash
+tail -5 /var/log/pg-backup.log      # want "Backup complete.", not an error
+```
+
+This job silently did nothing from **2026-06-30 to 2026-07-27**. `pg-backup.sh`
+sourced `.env` as bash, so an unquoted value containing spaces
+(`MANUAL_PAY_INSTRUCTIONS=Send the exact amount …`) made bash try to run `the`
+as a command; with `set -e` the script died on exit 127 before taking a dump.
+Compose parses that same line happily, so the app was fine and only the backup
+broke. It now parses `.env` literally and **pages Telegram on any failure** — so
+check that alert rather than trusting silence. R2 held only two backups (both
+late June) when this was found; a month of coverage was simply absent.
+
+**04:00 Sunday — prune images and build cache.** Keeps `dockerd`/`containerd`
+from the runaway CPU growth described at the top. `until=168h` keeps anything
+newer than a week, so recent rollback targets survive; older ones can still be
+re-pulled since the GHCR package is public.

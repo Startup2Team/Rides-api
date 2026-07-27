@@ -127,6 +127,25 @@ services:
     depends_on:
       - api
       - admin
+    # `default` is listed explicitly because naming any network here replaces the
+    # implicit default — without it nginx would join only rides-edge and lose
+    # `api` and `admin`, 502-ing the production sites to fix staging.
+    #
+    # rides-edge is how nginx reaches the SEPARATE staging compose project:
+    # nginx.conf proxies stg-api/stg-admin to `rides-staging-api` and
+    # `rides-staging-admin` by name, which only resolves on a shared network.
+    # This was previously attached by hand (`docker network connect`) and was
+    # therefore invisible to this file — so it survived neither a container
+    # recreate nor the move to a new box, where staging 502'd until it was
+    # reattached. Declaring it keeps the topology reproducible.
+    networks:
+      - default
+      - rides-edge
+
+networks:
+  # Created once per box, outside compose: `docker network create rides-edge`.
+  rides-edge:
+    external: true
 
 volumes:
   postgres_data:
