@@ -197,9 +197,20 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
 	}
 
-	// In dev we skip 2FA entirely so testing isn't gated behind authenticator
-	// codes / clock-skew. Production always enforces it.
-	if admin.TwoFactor && s.cfg.Env == "production" {
+	// Enforce 2FA wherever it is switched on, in every environment.
+	//
+	// This used to also require cfg.Env == "production", which locked staging
+	// admins out entirely: the admin web decides whether to show the 2FA wall
+	// from NODE_ENV, and a built Next.js image reports "production" even on
+	// staging. So the UI demanded a code while the API, seeing ENV=staging,
+	// never issued the pre-auth token that /2fa/verify needs — every attempt
+	// came back INVALID_PRE_AUTH_TOKEN, surfaced to the user as "your sign-in
+	// session expired", with no way through.
+	//
+	// Two components disagreeing about what "production" means is not a thing
+	// to re-tune; an authentication control should behave identically
+	// everywhere, and staging is precisely where you want to exercise it.
+	if admin.TwoFactor {
 		preAuth, err := s.issuePreAuthToken(admin.ID)
 		if err != nil {
 			return nil, apperrors.ErrInternal

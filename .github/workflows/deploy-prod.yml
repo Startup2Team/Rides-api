@@ -14,13 +14,23 @@ name: Deploy Production
 #     fast at the pull step — deliberately.
 
 on:
+  # Every merged `main` commit ships, exactly like staging ships every merged
+  # `dev` commit — but only after its image is built and CI-green, and still
+  # behind the health gate + auto-rollback in deploy.sh.
+  workflow_run:
+    workflows: ["Build Image"]
+    types: [completed]
+    branches: [main]
+  # Kept as manual escapes. Note a release deploys the commit its TAG points
+  # at, NOT main's tip: re-running an old release redeploys that old commit,
+  # which is how a "production deploy" once shipped a three-week-old image.
   release:
     types: [published]
   workflow_dispatch:
     inputs:
       sha:
-        description: "Commit SHA to deploy to prod (must have a built image)"
-        required: true
+        description: "Commit SHA to deploy to prod (defaults to main's tip)"
+        required: false
 
 concurrency:
   group: deploy-prod
@@ -30,15 +40,20 @@ jobs:
   deploy:
     name: Deploy to production
     runs-on: ubuntu-latest
+    # Never promote an image whose build failed.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     environment:
-      name: production # ← manual-approval gate lives here
+      # Kept for the deployment record and the Deployments panel. The approval
+      # requirement lives in Settings → Environments, not here.
+      name: production
       url: https://api.rides.rw/health
     steps:
       - name: Resolve image SHA
         id: sha
         run: |
-          # On a release event, github.sha is the tagged commit.
-          SHA="${{ github.event.inputs.sha || github.sha }}"
+          # workflow_run → the main commit just built. release → the TAGGED
+          # commit (github.sha), which may be far behind main.
+          SHA="${{ github.event.workflow_run.head_sha || github.event.inputs.sha || github.sha }}"
           echo "value=$SHA" >> "$GITHUB_OUTPUT"
           echo "Promoting image tag $SHA to production"
 
