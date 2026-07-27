@@ -452,8 +452,6 @@ func TestLogin_With2FA_ReturnsPreAuthToken(t *testing.T) {
 		},
 	}
 
-	// 2FA is only enforced in production (dev skips it for testing ergonomics),
-	// so exercise the pre-auth path with a production config.
 	svc := newTestServiceProduction(repo, newTestRedis(t))
 
 	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
@@ -672,4 +670,34 @@ func TestTOTPEncryption_RoundTripAndFallback(t *testing.T) {
 	fallbackDecrypted, err := decryptTOTP(plainSecret)
 	require.NoError(t, err)
 	assert.Equal(t, plainSecret, fallbackDecrypted)
+}
+
+// 2FA must be enforced in every environment, not just production.
+//
+// It used to be gated on cfg.Env == "production", which locked staging admins
+// out completely: the admin web decides whether to show the 2FA wall from
+// NODE_ENV, and a built Next.js image reports "production" even on staging, so
+// the UI demanded a code the API would never issue a pre-auth token for.
+func TestLogin_With2FA_EnforcedOutsideProduction(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	hashStr := string(hash)
+	totpSecret := "JBSWY3DPEHPK3PXP"
+	repo := &mockRepo{
+		findByEmailFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
+			return &AdminAccount{ID: "a1", Status: "ACTIVE", TwoFactor: true}, &hashStr, nil
+		},
+		getTOTPSecretFn: func(_ context.Context, _ string) (*string, error) {
+			return &totpSecret, nil
+		},
+	}
+
+	// Default test config is NOT production — previously this returned a full
+	// access token and skipped 2FA entirely.
+	svc := newTestService(repo, newTestRedis(t))
+
+	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
+	require.NoError(t, err)
+	assert.True(t, result.TwoFactorRequired, "2FA must be required outside production too")
+	assert.NotEmpty(t, result.PreAuthToken, "a pre-auth token is what /2fa/verify needs")
+	assert.Empty(t, result.AccessToken, "no full access token before the second factor")
 }

@@ -91,6 +91,11 @@ services:
       # Server-side (Next route handlers) → staging api on the internal network.
       # Origin only; the app appends /api/v1 itself.
       BACKEND_ORIGIN: http://api:8080
+      # The admin session cookie's max-age is computed from this in the Next
+      # route handlers, while the API computes the JWT's lifetime from the same
+      # variable. Both previously fell back to their own hardcoded 60, so the
+      # two halves of one session agreed only by coincidence.
+      JWT_ADMIN_IDLE_MINUTES: ${JWT_ADMIN_IDLE_MINUTES:-480}
     ports:
       - "127.0.0.1:3100:3000" # loopback for direct/testing; nginx uses rides-edge
     depends_on:

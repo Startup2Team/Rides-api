@@ -104,6 +104,11 @@ services:
     environment:
       # Server-side calls from Next route handlers stay on the internal network.
       BACKEND_ORIGIN: http://api:8080
+      # The admin session cookie's max-age is computed from this in the Next
+      # route handlers, while the API computes the JWT's lifetime from the same
+      # variable. Both previously fell back to their own hardcoded 60, so the
+      # two halves of one session agreed only by coincidence.
+      JWT_ADMIN_IDLE_MINUTES: ${JWT_ADMIN_IDLE_MINUTES:-480}
       NODE_ENV: production
     depends_on:
       - api
