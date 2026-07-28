@@ -208,13 +208,46 @@ func (s *Service) AcceptPolicy(ctx context.Context, userID string) error {
 	return s.repo.SetPolicyAccepted(ctx, profile.ID)
 }
 
-// UploadDocument upserts a driver document record (URL only — file hosting is external).
-func (s *Service) UploadDocument(ctx context.Context, userID, documentType, fileURL string) error {
+// UploadDocument records a new version of a driver document (URL only — file
+// hosting is external). sha256 may be empty when the client uploaded via a
+// presigned URL and did not report a digest.
+//
+// If the driver was already APPROVED, replacing a document sends them back to
+// PENDING review. Approval is a statement about specific papers; swapping those
+// papers invalidates it. Previously nothing linked the two, so a driver could be
+// approved on genuine documents and then substitute anything while staying
+// APPROVED — the hole this closes. It is enforced here, server-side, because
+// hiding the button in the app is not enforcement.
+func (s *Service) UploadDocument(ctx context.Context, userID, documentType, fileURL, sha256 string) error {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		return err
 	}
-	return s.repo.UpsertDocument(ctx, profile.ID, documentType, fileURL)
+	if err := s.repo.UpsertDocument(ctx, profile.ID, documentType, fileURL, sha256, false); err != nil {
+		return err
+	}
+
+	if profile.ApprovalStatus == "APPROVED" {
+		if err := s.repo.SetApprovalStatus(ctx, profile.ID, "PENDING", "", nil); err != nil {
+			// The document is already stored; failing the request now would tell
+			// the driver the upload failed when it did not. Log loudly instead —
+			// a driver left APPROVED on unreviewed papers needs to be visible.
+			s.log.Error().Err(err).
+				Str("driver_profile_id", profile.ID).
+				Str("document_type", documentType).
+				Msg("documents: replaced a document on an APPROVED driver but could not reopen review — driver is approved on unreviewed papers")
+			return nil
+		}
+		if err := s.repo.UpdateUserRoleState(ctx, userID, "DRIVER_PENDING"); err != nil {
+			s.log.Error().Err(err).Str("user_id", userID).
+				Msg("documents: reopened review but could not demote role_state from DRIVER_ACTIVE")
+		}
+		s.log.Warn().
+			Str("driver_profile_id", profile.ID).
+			Str("document_type", documentType).
+			Msg("documents: approved driver replaced a document — review reopened")
+	}
+	return nil
 }
 
 // ListDocuments returns all uploaded documents for a driver.

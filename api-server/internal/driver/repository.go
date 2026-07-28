@@ -56,7 +56,26 @@ type Document struct {
 	DocumentType string    `json:"document_type"`
 	FileURL      string    `json:"file_url"`
 	UploadedAt   time.Time `json:"uploaded_at"`
+	// ReviewStatus is per-document, independent of the driver's overall
+	// approval: PENDING | APPROVED | REJECTED.
+	ReviewStatus string `json:"review_status"`
+	// Editable tells the app whether a replacement would be accepted. Approved
+	// documents are view-only unless an admin has opened a re-upload window, so
+	// the app can render the correct affordance instead of offering a button the
+	// API will reject.
+	Editable bool    `json:"editable"`
+	SHA256   *string `json:"sha256,omitempty"`
 }
+
+// ErrDocumentLocked is returned when a driver tries to replace a document that
+// has already been APPROVED and has no open admin re-upload request.
+//
+// This is the server-side half of "documents are view-only after approval".
+// Hiding the replace button in the app is not enforcement — without this check a
+// driver could get approved with genuine papers and then swap them for anything,
+// keeping their APPROVED status, because approval lives on driver_profiles and
+// nothing bound it to a specific file.
+var ErrDocumentLocked = errors.New("document is approved and view-only; ask an admin to request a re-upload")
 
 // NearbyDriver is the anonymised view returned to customers.
 type NearbyDriver struct {
@@ -252,20 +271,138 @@ func (r *Repository) SetPolicyAccepted(ctx context.Context, profileID string) er
 	return err
 }
 
-func (r *Repository) UpsertDocument(ctx context.Context, driverProfileID, documentType, fileURL string) error {
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO driver_documents (driver_id, document_type, file_url)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (driver_id, document_type)
-		DO UPDATE SET file_url = EXCLUDED.file_url, uploaded_at = NOW()
-	`, driverProfileID, documentType, fileURL)
-	return err
+// UpsertDocument records a new version of a document, append-only.
+//
+// It used to be `ON CONFLICT ... DO UPDATE SET file_url`, which overwrote the row
+// and destroyed the previously approved file. Now the live row is marked
+// superseded and a new row inserted, so the chain is preserved and "which file
+// did we approve" stays answerable.
+//
+// asAdmin distinguishes the two upload paths. A driver may not replace an
+// APPROVED document unless an admin has opened a re-upload window; an admin
+// acting on the driver's behalf always may, since they are the ones who would
+// have opened that window. Both run in one transaction: superseding without
+// inserting would leave the driver with no live document at all.
+func (r *Repository) UpsertDocument(ctx context.Context, driverProfileID, documentType, fileURL, sha256 string, asAdmin bool) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the live row so two concurrent uploads cannot both supersede it and
+	// then both insert, which the partial unique index would reject anyway — but
+	// with a confusing constraint error rather than a clean serialisation.
+	var liveID, liveStatus string
+	var reuploadOpen bool
+	err = tx.QueryRow(ctx, `
+		SELECT id, review_status, (reupload_requested_at IS NOT NULL)
+		  FROM driver_documents
+		 WHERE driver_id = $1 AND document_type = $2 AND superseded_at IS NULL
+		 FOR UPDATE
+	`, driverProfileID, documentType).Scan(&liveID, &liveStatus, &reuploadOpen)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// First upload of this type — nothing to supersede.
+	case err != nil:
+		return err
+	default:
+		if liveStatus == "APPROVED" && !reuploadOpen && !asAdmin {
+			return ErrDocumentLocked
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE driver_documents SET superseded_at = NOW() WHERE id = $1
+		`, liveID); err != nil {
+			return err
+		}
+	}
+
+	// The replacement always starts PENDING: a new file has not been reviewed,
+	// whatever the status of the one it replaces. This is what re-opens review
+	// after an approved driver swaps a document.
+	var hash any
+	if sha256 != "" {
+		hash = sha256
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO driver_documents (driver_id, document_type, file_url, sha256, review_status)
+		VALUES ($1, $2, $3, $4, 'PENDING')
+	`, driverProfileID, documentType, fileURL, hash); err != nil {
+		return err
+	}
+
+	// Consume the re-upload window so it authorises exactly one replacement.
+	if reuploadOpen {
+		if _, err := tx.Exec(ctx, `
+			UPDATE driver_documents
+			   SET reupload_requested_at = NULL, reupload_requested_by = NULL
+			 WHERE id = $1
+		`, liveID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
 }
 
+// RequestDocumentReupload opens a one-shot window letting the driver replace an
+// otherwise view-only approved document. Consumed by the next upload.
+func (r *Repository) RequestDocumentReupload(ctx context.Context, driverProfileID, documentType, adminID string) error {
+	var admin any
+	if adminID != "" {
+		admin = adminID
+	}
+	tag, err := r.db.Exec(ctx, `
+		UPDATE driver_documents
+		   SET reupload_requested_at = NOW(), reupload_requested_by = $3
+		 WHERE driver_id = $1 AND document_type = $2 AND superseded_at IS NULL
+	`, driverProfileID, documentType, admin)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// SetDocumentReview records a per-document decision against the live version.
+// Binding the decision to a row that can no longer change is what makes "this is
+// the licence the reviewer approved" checkable rather than arguable.
+func (r *Repository) SetDocumentReview(ctx context.Context, documentID, status, adminID, notes string) error {
+	var admin any
+	if adminID != "" {
+		admin = adminID
+	}
+	tag, err := r.db.Exec(ctx, `
+		UPDATE driver_documents
+		   SET review_status = $2, reviewed_at = NOW(), reviewed_by = $3, review_notes = NULLIF($4, '')
+		 WHERE id = $1 AND superseded_at IS NULL
+	`, documentID, status, admin, notes)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// ListDocuments returns the LIVE version of each document.
+//
+// Superseded rows are deliberately excluded: the driver's own list should show
+// what currently stands, not every historical attempt. Admin review reads the
+// full chain separately.
+//
+// `editable` is computed here rather than left to the app, so the affordance the
+// app renders and the rule the API enforces come from one place.
 func (r *Repository) ListDocuments(ctx context.Context, driverProfileID string) ([]*Document, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, document_type, file_url, uploaded_at
-		FROM driver_documents WHERE driver_id = $1
+		SELECT id, document_type, file_url, uploaded_at, review_status, sha256,
+		       (review_status <> 'APPROVED' OR reupload_requested_at IS NOT NULL) AS editable
+		FROM driver_documents
+		WHERE driver_id = $1 AND superseded_at IS NULL
 		ORDER BY uploaded_at ASC
 	`, driverProfileID)
 	if err != nil {
@@ -276,7 +413,36 @@ func (r *Repository) ListDocuments(ctx context.Context, driverProfileID string) 
 	var docs []*Document
 	for rows.Next() {
 		d := &Document{}
-		if err := rows.Scan(&d.ID, &d.DocumentType, &d.FileURL, &d.UploadedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.DocumentType, &d.FileURL, &d.UploadedAt,
+			&d.ReviewStatus, &d.SHA256, &d.Editable); err != nil {
+			return nil, err
+		}
+		docs = append(docs, d)
+	}
+	return docs, rows.Err()
+}
+
+// ListDocumentHistory returns every version of every document, newest first —
+// the audit view behind "what did we approve on the 4th".
+func (r *Repository) ListDocumentHistory(ctx context.Context, driverProfileID string) ([]*Document, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, document_type, file_url, uploaded_at, review_status, sha256,
+		       (superseded_at IS NULL
+		        AND (review_status <> 'APPROVED' OR reupload_requested_at IS NOT NULL)) AS editable
+		FROM driver_documents
+		WHERE driver_id = $1
+		ORDER BY document_type ASC, uploaded_at DESC
+	`, driverProfileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var docs []*Document
+	for rows.Next() {
+		d := &Document{}
+		if err := rows.Scan(&d.ID, &d.DocumentType, &d.FileURL, &d.UploadedAt,
+			&d.ReviewStatus, &d.SHA256, &d.Editable); err != nil {
 			return nil, err
 		}
 		docs = append(docs, d)

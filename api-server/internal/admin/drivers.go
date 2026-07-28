@@ -436,10 +436,21 @@ func (s *Service) GetDriverReferrals(ctx context.Context, profileID string) ([]m
 	return result, nil
 }
 
+// listDriverDocuments returns the LIVE version of each document.
+//
+// The superseded_at filter matters: documents are append-only since migration
+// 077, so without it the review screen would list every historical upload and
+// show the same document_type several times, with no indication which one counts.
+//
+// review_status and sha256 come along so the reviewer can see whether this exact
+// file has been looked at, and can quote a digest when it is disputed.
 func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT document_type, file_url, uploaded_at
-		FROM driver_documents WHERE driver_id = $1
+		SELECT document_type, file_url, uploaded_at, review_status, sha256,
+		       (SELECT count(*) - 1 FROM driver_documents h
+		         WHERE h.driver_id = d.driver_id AND h.document_type = d.document_type) AS prior_versions
+		FROM driver_documents d
+		WHERE driver_id = $1 AND superseded_at IS NULL
 		ORDER BY uploaded_at DESC
 	`, profileID)
 	if err != nil {
@@ -449,15 +460,20 @@ func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]
 
 	var result []map[string]interface{}
 	for rows.Next() {
-		var docType, fileURL string
+		var docType, fileURL, reviewStatus string
+		var sha *string
+		var priorVersions int
 		var uploadedAt time.Time
-		if err := rows.Scan(&docType, &fileURL, &uploadedAt); err != nil {
+		if err := rows.Scan(&docType, &fileURL, &uploadedAt, &reviewStatus, &sha, &priorVersions); err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]interface{}{
-			"document_type": docType,
-			"file_url":      fileURL,
-			"uploaded_at":   uploadedAt,
+			"document_type":  docType,
+			"file_url":       fileURL,
+			"uploaded_at":    uploadedAt,
+			"review_status":  reviewStatus,
+			"sha256":         sha,
+			"prior_versions": priorVersions,
 		})
 	}
 	return result, nil
@@ -474,13 +490,33 @@ func (s *Service) UpsertDriverDocument(ctx context.Context, profileID, documentT
 	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE id = $1)`, profileID).Scan(&exists); err != nil || !exists {
 		return apperrors.ErrNotFound
 	}
-	_, err := s.db.Exec(ctx, `
-		INSERT INTO driver_documents (driver_id, document_type, file_url)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (driver_id, document_type)
-		DO UPDATE SET file_url = EXCLUDED.file_url, uploaded_at = NOW()
-	`, profileID, documentType, fileURL)
+	// Append-only, matching the driver-side path: supersede the live version and
+	// insert a new one rather than overwriting file_url in place. The old
+	// ON CONFLICT DO UPDATE destroyed whichever file had been approved, so the
+	// approval record pointed at bytes that no longer existed.
+	//
+	// An admin may replace an approved document without a re-upload request —
+	// they are the party who would grant one. The replacement still starts
+	// PENDING, because a file nobody has looked at is not approved.
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE driver_documents SET superseded_at = NOW()
+		 WHERE driver_id = $1 AND document_type = $2 AND superseded_at IS NULL
+	`, profileID, documentType); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO driver_documents (driver_id, document_type, file_url, review_status)
+		VALUES ($1, $2, $3, 'PENDING')
+	`, profileID, documentType, fileURL); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	if documentType == "PROFILE_SELFIE" {

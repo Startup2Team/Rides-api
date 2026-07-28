@@ -334,14 +334,19 @@ func (h *Handler) UpdateLocationsBatch(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/driver/documents
 // Accepts a document_type from the onboarding KYC set and a stored file_url
-// (produced by the /uploads flow). Repeated uploads of the same type replace
-// the prior file (UpsertDocument), so re-taking a photo overwrites cleanly.
+// (produced by the /uploads flow), plus an optional sha256 of the bytes.
+//
+// Uploads are append-only: a repeated upload of the same type supersedes the
+// previous version rather than overwriting it, so the approved file is never
+// lost. An APPROVED document is view-only — replacing it needs an admin
+// re-upload request, and doing so sends the driver back to PENDING review.
 func (h *Handler) UploadDocument(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
 		DocumentType string `json:"document_type" validate:"required,oneof=LICENCE_FRONT LICENCE_BACK NATIONAL_ID_FRONT NATIONAL_ID_BACK VEHICLE_INSURANCE VEHICLE_AUTHORIZATION SELFIE"`
 		FileURL      string `json:"file_url"      validate:"required,url"`
+		SHA256       string `json:"sha256"        validate:"omitempty,len=64,hexadecimal"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
@@ -352,7 +357,14 @@ func (h *Handler) UploadDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.UploadDocument(r.Context(), claims.UserID, body.DocumentType, body.FileURL); err != nil {
+	if err := h.svc.UploadDocument(r.Context(), claims.UserID, body.DocumentType, body.FileURL, body.SHA256); err != nil {
+		// 409: the request was well-formed and authorised, but the document is
+		// locked. Distinct from a validation error so the app can render "ask
+		// support to reopen this" rather than "your input was wrong".
+		if errors.Is(err, ErrDocumentLocked) {
+			respond.ErrorMsg(w, http.StatusConflict, "DOCUMENT_LOCKED", err.Error())
+			return
+		}
 		respond.Error(w, err)
 		return
 	}
