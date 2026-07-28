@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/workspace/ride-platform/internal/ledger"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
@@ -96,38 +97,31 @@ func (s *Service) compute(ctx context.Context, w Window) (*Snapshot, error) {
 		SELECT COUNT(*) FROM support_tickets WHERE status IN ('OPEN','PENDING')
 	`).Scan(&snap.OpenTickets)
 
-	if w.isCustom() {
-		// revenueInPeriod — completed fares within [from, to]
-		_ = s.db.QueryRow(ctx, `
-			SELECT COALESCE(SUM(agreed_fare),0)
-			FROM rides
-			WHERE status = 'COMPLETED'
-			  AND completed_at >= $1 AND completed_at < $2
-		`, w.From, w.To).Scan(&snap.RevenueInPeriod)
-
-		// ridesInPeriod — rides created within [from, to]
-		_ = s.db.QueryRow(ctx, `
-			SELECT COUNT(*) FROM rides
-			WHERE created_at >= $1 AND created_at < $2
-		`, w.From, w.To).Scan(&snap.RidesInPeriod)
-	} else {
-		days := w.Days
-		if days < 1 {
-			days = 1
+	// revenueInPeriod comes from the general ledger, not from ride fares. Summing
+	// rides.agreed_fare reported the passenger's payment to the driver — money the
+	// platform never receives — while ignoring package sales, which are the actual
+	// revenue. The tile therefore read zero no matter how many packages sold.
+	{
+		from, to := w.From, w.To
+		if !w.isCustom() {
+			days := w.Days
+			if days < 1 {
+				days = 1
+			}
+			to = time.Now()
+			from = to.AddDate(0, 0, -days)
 		}
-		// revenueInPeriod — completed fares within the last N days
-		_ = s.db.QueryRow(ctx, `
-			SELECT COALESCE(SUM(agreed_fare),0)
-			FROM rides
-			WHERE status = 'COMPLETED'
-			  AND completed_at >= NOW() - ($1 || ' days')::INTERVAL
-		`, days).Scan(&snap.RevenueInPeriod)
+		rev, err := ledger.RevenueBetween(ctx, s.db, from, to)
+		if err != nil {
+			return nil, err
+		}
+		snap.RevenueInPeriod = float64(rev.Total)
 
-		// ridesInPeriod — rides created within the last N days
-		_ = s.db.QueryRow(ctx, `
-			SELECT COUNT(*) FROM rides
-			WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
-		`, days).Scan(&snap.RidesInPeriod)
+		if err := s.db.QueryRow(ctx, `
+			SELECT COUNT(*) FROM rides WHERE created_at >= $1 AND created_at < $2
+		`, from, to).Scan(&snap.RidesInPeriod); err != nil {
+			return nil, fmt.Errorf("dashboard: rides in period: %w", err)
+		}
 	}
 
 	// pendingVerifications — drivers awaiting review

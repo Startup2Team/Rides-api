@@ -126,3 +126,54 @@ func (s *Service) Post(ctx context.Context, q Querier, e Entry) error {
 	}
 	return nil
 }
+
+// Revenue is platform revenue recognised in a window, in whole RWF.
+//
+// Total is every REVENUE-type account, so a new revenue stream added to the
+// chart of accounts is counted without touching this code. PackageSales and
+// Commission are broken out because they are the two the console reports on.
+type Revenue struct {
+	Total        int64
+	PackageSales int64
+	Commission   int64
+}
+
+// RevenueBetween sums revenue recognised in [from, to).
+//
+// This exists because the admin console derived "revenue" from
+// SUM(rides.agreed_fare) over completed rides, which is wrong twice over. A
+// fare is what the passenger hands the driver — the platform never receives it,
+// so it is gross merchandise value, not revenue. Meanwhile the actual revenue
+// stream, drivers buying prepaid ride packages, was not counted at all: a
+// driver could spend 19,500 RWF on packages and the dashboard would still read
+// zero, which is precisely what was reported.
+//
+// Revenue accounts are credit-normal, so the balance is credits less debits;
+// subtracting debits means a refund or reversal reduces revenue instead of
+// being silently ignored.
+//
+// Package-level and Querier-based rather than a method, so the admin and
+// dashboard services can call it with the handle they already hold — neither
+// has a *pgxpool.Pool to build a ledger Service from.
+func RevenueBetween(ctx context.Context, q Querier, from, to time.Time) (Revenue, error) {
+	var r Revenue
+	err := q.QueryRow(ctx, `
+		SELECT
+		  COALESCE(SUM(jl.credit_rwf - jl.debit_rwf), 0)                                        AS total,
+		  COALESCE(SUM(CASE WHEN jl.account_code = $3
+		                    THEN jl.credit_rwf - jl.debit_rwf ELSE 0 END), 0)                   AS package_sales,
+		  COALESCE(SUM(CASE WHEN jl.account_code = $4
+		                    THEN jl.credit_rwf - jl.debit_rwf ELSE 0 END), 0)                   AS commission
+		FROM journal_lines jl
+		JOIN journal_entries je ON je.id = jl.entry_id
+		JOIN ledger_accounts la ON la.code = jl.account_code
+		WHERE la.type = 'REVENUE'
+		  AND je.entry_date >= $1
+		  AND je.entry_date <  $2
+	`, from, to, AcctPackageRevenue, AcctCommissionRevenue).Scan(&r.Total, &r.PackageSales, &r.Commission)
+	if err != nil {
+		return Revenue{}, fmt.Errorf("ledger: revenue between %s and %s: %w",
+			from.Format(time.RFC3339), to.Format(time.RFC3339), err)
+	}
+	return r, nil
+}
