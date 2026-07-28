@@ -99,3 +99,78 @@ func TestPost_IdempotentNoOpOnConflict(t *testing.T) {
 	assert.NoError(t, err, "duplicate post is a silent no-op")
 	assert.Equal(t, 0, q.execs, "no line inserts when the entry already exists")
 }
+
+// ── RevenueBetween ────────────────────────────────────────────────────────────
+
+// revenueRow fills the three int64 destinations RevenueBetween scans into.
+type revenueRow struct {
+	err                          error
+	total, packageSales, commiss int64
+}
+
+func (r revenueRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	vals := []int64{r.total, r.packageSales, r.commiss}
+	for i, v := range vals {
+		if i >= len(dest) {
+			break
+		}
+		if p, ok := dest[i].(*int64); ok {
+			*p = v
+		}
+	}
+	return nil
+}
+
+type revenueQuerier struct {
+	row     revenueRow
+	lastSQL string
+	args    []any
+}
+
+func (q *revenueQuerier) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	q.lastSQL, q.args = sql, args
+	return q.row
+}
+
+func (q *revenueQuerier) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func TestRevenueBetween_MapsColumnsToFields(t *testing.T) {
+	q := &revenueQuerier{row: revenueRow{total: 19500, packageSales: 19500, commiss: 0}}
+	from := time.Unix(1_700_000_000, 0)
+	to := from.Add(24 * time.Hour)
+
+	rev, err := RevenueBetween(context.Background(), q, from, to)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(19500), rev.Total)
+	assert.Equal(t, int64(19500), rev.PackageSales)
+	assert.Equal(t, int64(0), rev.Commission)
+
+	// The window must be passed through, not silently widened to "everything".
+	assert.Equal(t, from, q.args[0])
+	assert.Equal(t, to, q.args[1])
+}
+
+func TestRevenueBetween_PropagatesError(t *testing.T) {
+	// The bug this replaces discarded scan errors with `_ =`, so a broken query
+	// was indistinguishable from genuinely zero revenue.
+	q := &revenueQuerier{row: revenueRow{err: pgx.ErrNoRows}}
+	_, err := RevenueBetween(context.Background(), q, time.Unix(0, 0), time.Unix(1, 0))
+	assert.Error(t, err, "a failed revenue query must not read as zero revenue")
+}
+
+func TestRevenueBetween_CountsOnlyRevenueAccountsNetOfDebits(t *testing.T) {
+	q := &revenueQuerier{}
+	_, _ = RevenueBetween(context.Background(), q, time.Unix(0, 0), time.Unix(1, 0))
+
+	// Guards the two properties that make this correct: it is scoped to
+	// REVENUE-type accounts (not ride fares, which live on rides.agreed_fare),
+	// and it nets debits off credits so a refund reduces revenue.
+	assert.Contains(t, q.lastSQL, "la.type = 'REVENUE'")
+	assert.Contains(t, q.lastSQL, "credit_rwf - jl.debit_rwf")
+	assert.NotContains(t, q.lastSQL, "agreed_fare")
+}
