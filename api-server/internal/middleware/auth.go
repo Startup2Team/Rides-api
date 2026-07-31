@@ -22,6 +22,39 @@ const (
 	ContextKeyLogger contextKey = "logger"
 )
 
+// Session values stored at session:<userID>:<jti>.
+//
+// Access and refresh sessions previously both stored "valid", which made them
+// indistinguishable. That mattered because switching customer/driver mode
+// revoked `session:<userID>:*` wholesale to force the role_state claim to be
+// re-issued — and so killed the refresh session too. The client then 401'd, its
+// refresh attempt 401'd as well, tokens were cleared, and the user was silently
+// signed out of a UI that still looked signed in until the app was restarted.
+//
+// Marking the kind lets a mode switch drop only the access session, so the app's
+// existing 401 → refresh → replay path transparently obtains a token carrying
+// the new role.
+const (
+	// SessionValueLegacy is what both kinds were written as before this change.
+	// Accepted by both predicates so sessions issued by an older build keep
+	// working across the deploy; they age out within their own TTL.
+	SessionValueLegacy  = "valid"
+	SessionValueAccess  = "access"
+	SessionValueRefresh = "refresh"
+)
+
+// SessionValueIsAccess reports whether the stored value represents a live access
+// session. Anything else — including "revoked" written by Logout — is not.
+func SessionValueIsAccess(v string) bool {
+	return v == SessionValueAccess || v == SessionValueLegacy
+}
+
+// SessionValueIsRefresh reports whether the stored value represents a live
+// refresh session.
+func SessionValueIsRefresh(v string) bool {
+	return v == SessionValueRefresh || v == SessionValueLegacy
+}
+
 // Claims are the JWT payload fields embedded in every access token.
 type Claims struct {
 	UserID      string `json:"user_id"`
@@ -128,7 +161,7 @@ func Authenticate(cfg *config.Config, rdb goredis.UniversalClient) func(http.Han
 				}
 				key := rkeys.K.Session(claims.UserID, jti)
 				val, redisErr := rdb.Get(r.Context(), key).Result()
-				if redisErr != nil || val != "valid" {
+				if redisErr != nil || !SessionValueIsAccess(val) {
 					respond.Error(w, apperrors.ErrTokenRevoked)
 					return
 				}

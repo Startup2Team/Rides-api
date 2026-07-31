@@ -442,7 +442,7 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 
 	key := rkeys.K.Session(claims.UserID, claims.ID)
 	val, err := s.redis.Get(ctx, key).Result()
-	if err != nil || val != "valid" {
+	if err != nil || !middleware.SessionValueIsRefresh(val) {
 		return nil, apperrors.ErrTokenRevoked
 	}
 
@@ -563,14 +563,14 @@ func (s *Service) issueTokenPair(ctx context.Context, user *User) (*TokenPair, e
 
 	// Refresh-token session — checked by RefreshTokens to validate the refresh token.
 	refreshSessionKey := rkeys.K.Session(user.ID, refreshJTI)
-	if err := s.redis.Set(ctx, refreshSessionKey, "valid", s.cfg.JWT.RefreshExpiry).Err(); err != nil {
+	if err := s.redis.Set(ctx, refreshSessionKey, middleware.SessionValueRefresh, s.cfg.JWT.RefreshExpiry).Err(); err != nil {
 		return nil, fmt.Errorf("persist refresh session: %w", err)
 	}
 
 	// Access-token session — checked by the Authenticate middleware on every API call.
 	// TTL matches the access token's lifetime so the key expires naturally.
 	accessSessionKey := rkeys.K.Session(user.ID, accessJTI)
-	if err := s.redis.Set(ctx, accessSessionKey, "valid", s.cfg.JWT.AccessExpiry).Err(); err != nil {
+	if err := s.redis.Set(ctx, accessSessionKey, middleware.SessionValueAccess, s.cfg.JWT.AccessExpiry).Err(); err != nil {
 		return nil, fmt.Errorf("persist access session: %w", err)
 	}
 

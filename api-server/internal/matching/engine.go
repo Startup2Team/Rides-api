@@ -86,8 +86,20 @@ func NewEngine(
 }
 
 // StartSearch kicks off the matching loop for a new ride in a goroutine.
+//
+// The context carries a hard deadline so a search cannot run unbounded. Without
+// it the worst case was data-dependent (candidates × offer timeout) with nothing
+// in code enforcing a ceiling, and the customer's screen had no timeout either.
 func (e *Engine) StartSearch(rideID string, pickup geo.Point, transportType string) {
-	go e.runLoop(context.Background(), rideID, pickup, transportType)
+	giveUp := time.Duration(e.cfg.Matching.GiveUpSeconds) * time.Second
+	if giveUp <= 0 {
+		giveUp = 90 * time.Second
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), giveUp)
+		defer cancel()
+		e.runLoop(ctx, rideID, pickup, transportType)
+	}()
 }
 
 // acceptSignal carries the responding driver's identity so the matching loop
@@ -136,7 +148,40 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	// failing immediately after the first empty ring.
 	baseRadius := e.cfg.Matching.PrimaryRadiusM
 
+	waveInterval := time.Duration(e.cfg.Matching.WaveIntervalSeconds) * time.Second
+
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// A round after the first waits before widening. Previously this loop did
+		// a bare `continue`, so every attempt ran back-to-back in milliseconds:
+		// with nobody online the "3 attempts" were three identical queries in the
+		// same instant and the ride was cancelled before the customer's app had
+		// even opened its websocket. The wait is the point — it gives drivers time
+		// to come online or finish a trip.
+		if attempt > 0 && waveInterval > 0 {
+			select {
+			case <-time.After(waveInterval):
+			case <-ctx.Done():
+				e.log.Info().Str("ride_id", rideID).Int("attempt", attempt).
+					Msg("matching: deadline reached while waiting to widen")
+				e.giveUp(context.WithoutCancel(ctx), rideID,
+					"no driver found before deadline", "No driver found nearby. Please try again.")
+				return
+			}
+		}
+
+		// Stop if the ride is no longer searchable — the customer may have
+		// cancelled, or another path may have resolved it. The loop used to run on
+		// context.Background() and never re-read status, so offers kept going out
+		// for cancelled rides and a driver could accept one, ending up stuck
+		// ON_TRIP on a dead ride.
+		if cur, err := e.rideRepo.FindByID(ctx, rideID); err == nil && cur != nil {
+			if cur.Status != ride.StatusSearching {
+				e.log.Info().Str("ride_id", rideID).Str("status", string(cur.Status)).
+					Msg("matching: ride no longer SEARCHING — stopping")
+				return
+			}
+		}
+
 		// Double the search radius on each attempt after the first.
 		currentRadius := baseRadius * (1 << attempt) // 1×, 2×, 4×, …
 		if currentRadius > e.cfg.Matching.ExpandedRadiusM {
@@ -177,18 +222,76 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	}
 
 	// All attempts exhausted
-	e.log.Warn().Str("ride_id", rideID).Msg("matching: no driver found — cancelling ride")
-	_, _ = e.rideRepo.Cancel(ctx, rideID, "no driver found after max attempts", "SYSTEM")
+	e.giveUp(ctx, rideID, "no driver found after max attempts", "No driver found nearby. Please try again.")
+}
+
+// giveUp ends an unsuccessful search and — critically — releases the Redis state
+// the search reserved.
+//
+// The previous version cancelled the ride in Postgres and published a websocket
+// message, and touched Redis not at all. Three things followed:
+//
+//  1. `customer:<id>:active_ride` is written with no TTL and was never cleared,
+//     while CreateRide rejects on that key's presence alone without consulting
+//     the ride's actual status. A customer who searched with no drivers online
+//     became PERMANENTLY unable to book again — and "Cancel Search" did not fix
+//     it either, because CancelRide early-returns on an already-terminal ride
+//     before reaching its own cleanup. Recovery needed manual Redis surgery.
+//
+//  2. `ride:<id>:state` stayed "SEARCHING" for its 15-minute TTL. The socket's
+//     state-replay reads exactly that key, so a reconnecting app was told to go
+//     back to the searching screen for a ride the database had cancelled —
+//     a deterministic infinite spinner.
+//
+//  3. The `ride_cancelled` websocket message was published before the customer's
+//     socket existed (the app only connects after POST /customer/rides returns,
+//     and matching could finish first), and websocket sends are fire-and-forget
+//     Redis publishes with no buffering. The message was simply dropped.
+//
+// Order matters here: write the terminal state to Redis BEFORE publishing, so a
+// client that reconnects instead of receiving the push still learns the truth.
+// FCM goes out alongside the socket message for the same reason.
+func (e *Engine) giveUp(ctx context.Context, rideID, dbReason, customerMessage string) {
+	e.log.Warn().Str("ride_id", rideID).Str("reason", dbReason).Msg("matching: giving up — cancelling ride")
+
+	r, findErr := e.rideRepo.FindByID(ctx, rideID)
+
+	if _, err := e.rideRepo.Cancel(ctx, rideID, dbReason, "SYSTEM"); err != nil {
+		e.log.Error().Err(err).Str("ride_id", rideID).Msg("matching: could not cancel ride on give-up")
+	}
 	_ = e.rideRepo.AppendEvent(ctx, rideID, "ride.cancelled", "SYSTEM", rideID, map[string]interface{}{
 		"reason": "no_driver_found",
 	})
 	e.analytics.Publish(ctx, "ride.cancelled", "SYSTEM", rideID, &rideID, map[string]interface{}{
 		"ride_id": rideID, "reason": "no_driver_found",
 	})
+
+	// Release everything the search reserved. Without this the customer cannot
+	// book again, and the state replay contradicts the database.
+	e.redis.Del(ctx, rkeys.K.RidePendingDriver(rideID))
+	e.redis.Del(ctx, rkeys.K.RideExcludedDrivers(rideID))
+	if findErr == nil && r != nil {
+		e.redis.Del(ctx, rkeys.K.CustomerActiveRide(r.CustomerID))
+		// Short-lived CANCELLED marker rather than a delete: the replay path
+		// distinguishes "cancelled" from "unknown ride", and it self-expires.
+		e.redis.Set(ctx, rkeys.K.RideState(rideID), string(ride.StatusCancelled), 2*time.Minute)
+	} else {
+		e.log.Error().Err(findErr).Str("ride_id", rideID).
+			Msg("matching: could not load ride on give-up — customer active_ride pointer may be stale")
+		e.redis.Del(ctx, rkeys.K.RideState(rideID))
+	}
+
 	e.hub.SendToCustomer(rideID, tracking.Message{
 		Type: "ride_cancelled", RideID: rideID,
-		Payload: map[string]interface{}{"reason": "No driver found nearby. Please try again."},
+		Payload: map[string]interface{}{"reason": customerMessage},
 	})
+	// The socket may not have been connected when the message went out, so also
+	// push. This is what driver_matched already does.
+	if findErr == nil && r != nil {
+		e.notify.SendToAllDevices(ctx, r.CustomerID, "No driver found",
+			customerMessage, "ride",
+			map[string]string{"type": "ride_cancelled", "ride_id": rideID})
+	}
 }
 
 // searchCandidatesWithRadius uses Redis GEO to find nearby drivers within the given radius,
