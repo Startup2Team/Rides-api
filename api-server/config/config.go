@@ -333,12 +333,16 @@ func Load() (*Config, error) {
 	cfg.Storage.Endpoint = getEnv("STORAGE_ENDPOINT", "")
 	cfg.Storage.AccountID = getEnv("STORAGE_ACCOUNT_ID", "")
 
-	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 5000)
+	// Wave ladder: radius doubles per attempt from the primary and clamps at the
+	// expanded radius — 2km → 4km → 8km → 10km. Starting at 2km targets drivers
+	// ~5 minutes away (25 km/h city speed) before widening; waves fire at
+	// 0/12/24/36s so the whole search resolves inside the 60s give-up budget.
+	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 2000)
 	cfg.Matching.ExpandedRadiusM = getEnvInt("MATCH_RADIUS_EXPANDED_M", 10000)
 	cfg.Matching.TimeoutSeconds = getEnvInt("MATCH_TIMEOUT_SECONDS", 15)
 	cfg.Matching.MaxAttempts = getEnvInt("MATCH_MAX_ATTEMPTS", 4)
-	cfg.Matching.WaveIntervalSeconds = getEnvInt("MATCH_WAVE_INTERVAL_SECONDS", 20)
-	cfg.Matching.GiveUpSeconds = getEnvInt("MATCH_GIVE_UP_SECONDS", 90)
+	cfg.Matching.WaveIntervalSeconds = getEnvInt("MATCH_WAVE_INTERVAL_SECONDS", 12)
+	cfg.Matching.GiveUpSeconds = getEnvInt("MATCH_GIVE_UP_SECONDS", 60)
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
