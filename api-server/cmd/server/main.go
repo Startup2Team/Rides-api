@@ -1790,8 +1790,14 @@ func recoverOrphanedRides(
 				`UPDATE rides SET status = 'CANCELLED', cancelled_by = 'SYSTEM', cancel_reason = 'server_restart', updated_at = NOW() WHERE id = $1 AND status = 'NEGOTIATING'`,
 				o.id,
 			)
-			rdb.Del(ctx, "ride:state:"+o.id)
-			rdb.Del(ctx, "customer:active_ride:"+o.customerID)
+			// Use the key helpers. These were hand-written as "ride:state:<id>" and
+			// "customer:active_ride:<id>", but the real keys are "ride:<id>:state"
+			// and "customer:<id>:active_ride" — the segments were transposed, so
+			// both deletes were silent no-ops and orphaned rides kept their Redis
+			// state after a restart. Since customer:<id>:active_ride has no TTL,
+			// that left the customer permanently unable to book.
+			rdb.Del(ctx, rdpkg.K.RideState(o.id))
+			rdb.Del(ctx, rdpkg.K.CustomerActiveRide(o.customerID))
 			hub.SendToCustomer(o.id, tracking.Message{
 				Type:   "ride_cancelled",
 				RideID: o.id,

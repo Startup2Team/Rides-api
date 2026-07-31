@@ -187,6 +187,16 @@ type MatchingConfig struct {
 	ExpandedRadiusM int
 	TimeoutSeconds  int
 	MaxAttempts     int
+	// WaveIntervalSeconds is how long to wait before widening the search after a
+	// round finds nobody. It was effectively zero: the loop did a bare `continue`,
+	// so all attempts completed in milliseconds and the ride was cancelled before
+	// the HTTP response was even written. Waiting is the cheapest supply-side
+	// lever there is — a driver who finishes a trip 30s from now is invisible to a
+	// search that gave up instantly.
+	WaveIntervalSeconds int
+	// GiveUpSeconds caps the whole search. Previously no wall-clock deadline
+	// existed anywhere, so the worst case was data-dependent and unbounded.
+	GiveUpSeconds int
 }
 
 type RideConfig struct {
@@ -326,7 +336,9 @@ func Load() (*Config, error) {
 	cfg.Matching.PrimaryRadiusM = getEnvInt("MATCH_RADIUS_PRIMARY_M", 5000)
 	cfg.Matching.ExpandedRadiusM = getEnvInt("MATCH_RADIUS_EXPANDED_M", 10000)
 	cfg.Matching.TimeoutSeconds = getEnvInt("MATCH_TIMEOUT_SECONDS", 15)
-	cfg.Matching.MaxAttempts = getEnvInt("MATCH_MAX_ATTEMPTS", 3)
+	cfg.Matching.MaxAttempts = getEnvInt("MATCH_MAX_ATTEMPTS", 4)
+	cfg.Matching.WaveIntervalSeconds = getEnvInt("MATCH_WAVE_INTERVAL_SECONDS", 20)
+	cfg.Matching.GiveUpSeconds = getEnvInt("MATCH_GIVE_UP_SECONDS", 90)
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)

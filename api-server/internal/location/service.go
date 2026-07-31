@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/config"
+	"github.com/workspace/ride-platform/internal/middleware"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
@@ -589,14 +590,35 @@ func (s *Service) SwitchMode(ctx context.Context, userID, mode string) error {
 		roleState, mode, userID); err != nil {
 		return err
 	}
-	s.revokeUserSessions(ctx, userID)
+	s.revokeAccessSessionsOnly(ctx, userID)
 	return nil
 }
 
-func (s *Service) revokeUserSessions(ctx context.Context, userID string) {
+// revokeAccessSessionsOnly drops the user's access sessions, leaving refresh
+// sessions intact.
+//
+// role_state is a JWT claim (RequireRole reads claims.RoleState), so after a mode
+// switch the token must be re-issued for the new role to take effect. This used
+// to delete `session:<userID>:*` wholesale — which also destroyed the refresh
+// session. The result was that switching mode signed the user out: the next call
+// 401'd TOKEN_REVOKED, the client's refresh attempt hit the same deleted key and
+// 401'd too, tokens were cleared, and because AuthContext still held the user in
+// memory the UI went on looking signed in while every request failed. Only a cold
+// restart recovered it.
+//
+// Dropping just the access session lets the client's existing
+// 401 → refresh → replay path fetch a token carrying the new role, invisibly.
+//
+// Sessions written by a build predating the kind marker hold "valid" and are
+// indistinguishable, so they are left alone rather than risk logging those users
+// out; they expire within the access TTL and the switch takes effect then.
+func (s *Service) revokeAccessSessionsOnly(ctx context.Context, userID string) {
 	iter := s.redis.Scan(ctx, 0, "session:"+userID+":*", 100).Iterator()
 	for iter.Next(ctx) {
-		s.redis.Del(ctx, iter.Val())
+		key := iter.Val()
+		if val, err := s.redis.Get(ctx, key).Result(); err == nil && val == middleware.SessionValueAccess {
+			s.redis.Del(ctx, key)
+		}
 	}
 }
 
