@@ -26,16 +26,6 @@ const (
 	driverStateAvailable = "AVAILABLE"
 	driverStateOnTrip    = "ON_TRIP"
 	matchLockTTL         = 20 * time.Second
-
-	// scoreReferenceM is the FIXED distance the score normalises against.
-	//
-	// It used to divide by whichever radius the current round happened to use, so
-	// the same driver 1.9km away scored 0.95 when found by a 2km ring but 0.19 by
-	// a 10km one. That made the distance weight meaningless across rounds and let a
-	// far driver with a clean decline record outrank a near one purely because of
-	// which ring surfaced them. A fixed reference makes the score comparable
-	// everywhere.
-	scoreReferenceM = 3000.0
 )
 
 // rideServiceInterface exposes only what the engine needs from ride.Service.
@@ -141,11 +131,16 @@ func (e *Engine) NotifyAccept(rideID, driverID string, accepted bool) bool {
 // ──────────────────────────────────────────────────────────────────────────
 
 func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, transportType string) {
-	tiers := e.cfg.Matching.TierRadiiM
+	// Bands are derived from the ETA promise and THIS vehicle type's speed, so a
+	// Fuso search widens over shorter distances than a moto search for the same
+	// promised wait. Pure arithmetic on load-time values — no query.
+	tiers := e.cfg.Matching.TierRadiiForVehicle(transportType)
 	if len(tiers) == 0 {
 		tiers = []int{e.cfg.Matching.PrimaryRadiusM, e.cfg.Matching.ExpandedRadiusM}
 	}
 	maxRadius := tiers[len(tiers)-1]
+	e.log.Debug().Str("ride_id", rideID).Str("vehicle", transportType).
+		Ints("tier_radii_m", tiers).Msg("matching: derived broadcast bands")
 
 	batchSize := e.cfg.Matching.BatchSize
 	if batchSize < 1 {
@@ -445,6 +440,17 @@ func (e *Engine) giveUp(ctx context.Context, rideID, dbReason, customerMessage s
 // searchCandidatesWithRadius uses Redis GEO to find nearby drivers within the given radius,
 // enriches and scores them.
 func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Point, vehicleType string, tried map[string]bool, radiusM int) ([]*candidate, error) {
+	// Fixed reference for the whole search. It used to divide by whichever ring the
+	// current round used, so the same driver scored 0.95 found by a 2km ring and
+	// 0.19 by a 10km one — the distance weight meant nothing across rounds. There
+	// is now ONE query per search at the widest band, so radiusM is constant here,
+	// and it scales per vehicle automatically: a Fuso search normalises over its
+	// own shorter bands rather than a moto's.
+	scoreRef := float64(radiusM)
+	if scoreRef <= 0 {
+		scoreRef = 1
+	}
+
 	geoKey := rkeys.K.DriverGeoIndex(vehicleType)
 
 	results, err := e.redis.GeoSearchLocation(ctx, geoKey, &goredis.GeoSearchLocationQuery{
@@ -502,7 +508,7 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 		}
 
 		distM := r.Dist * 1000
-		normalizedDist := math.Min(distM, scoreReferenceM) / scoreReferenceM
+		normalizedDist := math.Min(distM, scoreRef) / scoreRef
 		normalizedDeclines := math.Min(float64(declines), 10) / 10.0
 		acceptancePenalty := 1.0 - profile.AcceptanceRate/100.0
 		score := (normalizedDist * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
@@ -525,6 +531,17 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 
 // fallbackPostGIS is used on cold start when Redis GEO index is empty.
 func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleType string, tried map[string]bool, radiusM int) ([]*candidate, error) {
+	// Fixed reference for the whole search. It used to divide by whichever ring the
+	// current round used, so the same driver scored 0.95 found by a 2km ring and
+	// 0.19 by a 10km one — the distance weight meant nothing across rounds. There
+	// is now ONE query per search at the widest band, so radiusM is constant here,
+	// and it scales per vehicle automatically: a Fuso search normalises over its
+	// own shorter bands rather than a moto's.
+	scoreRef := float64(radiusM)
+	if scoreRef <= 0 {
+		scoreRef = 1
+	}
+
 	var excludedIDs []string
 	for id := range tried {
 		excludedIDs = append(excludedIDs, id)
@@ -542,7 +559,7 @@ func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleT
 			declines = d
 		}
 
-		normalizedDist := math.Min(n.DistanceM, scoreReferenceM) / scoreReferenceM
+		normalizedDist := math.Min(n.DistanceM, scoreRef) / scoreRef
 		normalizedDeclines := math.Min(float64(declines), 10) / 10.0
 		acceptancePenalty := 1.0 - n.AcceptanceRate/100.0
 		score := (normalizedDist * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
