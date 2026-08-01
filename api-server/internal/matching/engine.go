@@ -26,6 +26,16 @@ const (
 	driverStateAvailable = "AVAILABLE"
 	driverStateOnTrip    = "ON_TRIP"
 	matchLockTTL         = 20 * time.Second
+
+	// scoreReferenceM is the FIXED distance the score normalises against.
+	//
+	// It used to divide by whichever radius the current round happened to use, so
+	// the same driver 1.9km away scored 0.95 when found by a 2km ring but 0.19 by
+	// a 10km one. That made the distance weight meaningless across rounds and let a
+	// far driver with a clean decline record outrank a near one purely because of
+	// which ring surfaced them. A fixed reference makes the score comparable
+	// everywhere.
+	scoreReferenceM = 3000.0
 )
 
 // rideServiceInterface exposes only what the engine needs from ride.Service.
@@ -126,54 +136,39 @@ func (e *Engine) NotifyAccept(rideID, driverID string, accepted bool) bool {
 	return false
 }
 
-// ValidateAcceptTTL checks that the pending_driver key in Redis still exists.
-func (e *Engine) ValidateAcceptTTL(ctx context.Context, rideID string) (string, bool) {
-	driverID, err := e.redis.Get(ctx, rkeys.K.RidePendingDriver(rideID)).Result()
-	if err != nil {
-		return "", false
-	}
-	return driverID, true
-}
-
 // ──────────────────────────────────────────────────────────────────────────
 // Internal matching loop
 // ──────────────────────────────────────────────────────────────────────────
 
 func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, transportType string) {
-	maxAttempts := e.cfg.Matching.MaxAttempts
-	tried := make(map[string]bool)
+	tiers := e.cfg.Matching.TierRadiiM
+	if len(tiers) == 0 {
+		tiers = []int{e.cfg.Matching.PrimaryRadiusM, e.cfg.Matching.ExpandedRadiusM}
+	}
+	maxRadius := tiers[len(tiers)-1]
 
-	// Radius expands each round: primary → expanded → 2× expanded → …
-	// This way a ride in a quiet area keeps searching wider rather than
-	// failing immediately after the first empty ring.
-	baseRadius := e.cfg.Matching.PrimaryRadiusM
-
+	batchSize := e.cfg.Matching.BatchSize
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	window := time.Duration(e.cfg.Matching.TierWindowSeconds) * time.Second
+	if window <= 0 {
+		window = 10 * time.Second
+	}
 	waveInterval := time.Duration(e.cfg.Matching.WaveIntervalSeconds) * time.Second
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		// A round after the first waits before widening. Previously this loop did
-		// a bare `continue`, so every attempt ran back-to-back in milliseconds:
-		// with nobody online the "3 attempts" were three identical queries in the
-		// same instant and the ride was cancelled before the customer's app had
-		// even opened its websocket. The wait is the point — it gives drivers time
-		// to come online or finish a trip.
-		if attempt > 0 && waveInterval > 0 {
-			select {
-			case <-time.After(waveInterval):
-			case <-ctx.Done():
-				e.log.Info().Str("ride_id", rideID).Int("attempt", attempt).
-					Msg("matching: deadline reached while waiting to widen")
-				e.giveUp(context.WithoutCancel(ctx), rideID,
-					"no driver found before deadline", "No driver found nearby. Please try again.")
-				return
-			}
+	tried := make(map[string]bool)
+
+	for {
+		if ctx.Err() != nil {
+			e.giveUp(context.WithoutCancel(ctx), rideID,
+				"no driver found before deadline", "No driver found nearby. Please try again.")
+			return
 		}
 
 		// Stop if the ride is no longer searchable — the customer may have
-		// cancelled, or another path may have resolved it. The loop used to run on
-		// context.Background() and never re-read status, so offers kept going out
-		// for cancelled rides and a driver could accept one, ending up stuck
-		// ON_TRIP on a dead ride.
+		// cancelled, or another path resolved it. Without this the loop kept
+		// offering a dead ride and an accepting driver ended up stuck ON_TRIP.
 		if cur, err := e.rideRepo.FindByID(ctx, rideID); err == nil && cur != nil {
 			if cur.Status != ride.StatusSearching {
 				e.log.Info().Str("ride_id", rideID).Str("status", string(cur.Status)).
@@ -182,47 +177,200 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 			}
 		}
 
-		// Double the search radius on each attempt after the first.
-		currentRadius := baseRadius * (1 << attempt) // 1×, 2×, 4×, …
-		if currentRadius > e.cfg.Matching.ExpandedRadiusM {
-			currentRadius = e.cfg.Matching.ExpandedRadiusM
-		}
-
-		candidates, err := e.searchCandidatesWithRadius(ctx, pickup, transportType, tried, currentRadius)
+		// ONE query, at the WIDEST radius, sorted nearest-first.
+		//
+		// The old loop issued a fresh query per radius ring. That was wasted work:
+		// GEOSEARCH already returns results sorted ascending by distance, so a
+		// 3km query *contains* the 800m and 1500m results in order. Querying
+		// narrow-then-wide re-fetched the same nearest drivers repeatedly — and
+		// because Count capped results at 10, widening usually returned the very
+		// same ten rows, which is why "expanding the radius" achieved so little.
+		candidates, err := e.searchCandidatesWithRadius(ctx, pickup, transportType, tried, maxRadius)
 		if err != nil {
-			e.log.Warn().Err(err).Str("ride_id", rideID).Int("attempt", attempt).Msg("matching: candidate search error")
-			break
-		}
-		if len(candidates) == 0 {
-			e.log.Debug().Str("ride_id", rideID).Int("attempt", attempt).Int("radius_m", currentRadius).Msg("matching: no candidates at radius, expanding")
-			continue
+			e.log.Warn().Err(err).Str("ride_id", rideID).Msg("matching: candidate search error")
 		}
 
-		for _, c := range candidates {
-			if tried[c.profileID] {
-				continue
+		offeredAnyone := false
+		for _, tierRadius := range tiers {
+			if ctx.Err() != nil {
+				break
 			}
-			// Skip seeded/offline drivers with no live socket — otherwise each offer waits
-			// for the full match timeout before trying the next candidate.
-			if !e.hub.IsDriverConnected(c.profileID) {
-				continue
-			}
-			tried[c.profileID] = true
 
-			accepted, ok := e.offerToDriver(ctx, rideID, c)
-			if !ok {
+			// Take the next batch from within this band. Candidates arrive already
+			// ordered by score (distance dominating at 0.6), so this is
+			// nearest-and-best first within the band.
+			batch := make([]*candidate, 0, batchSize)
+			for _, c := range candidates {
+				if len(batch) >= batchSize {
+					break
+				}
+				if tried[c.profileID] || c.distanceM > float64(tierRadius) {
+					continue
+				}
+				if !e.hub.IsDriverConnected(c.profileID) {
+					continue
+				}
+				batch = append(batch, c)
+			}
+			if len(batch) == 0 {
 				continue
 			}
-			if accepted {
-				e.onAccepted(ctx, rideID, c)
+			for _, c := range batch {
+				tried[c.profileID] = true
+			}
+			offeredAnyone = true
+
+			e.log.Info().Str("ride_id", rideID).
+				Int("tier_radius_m", tierRadius).Int("batch", len(batch)).
+				Msg("matching: broadcasting offer to batch")
+
+			if winner := e.offerToBatch(ctx, rideID, batch, window); winner != nil {
+				e.onAccepted(ctx, rideID, winner)
 				return
 			}
-			e.onDeclined(ctx, rideID, c)
+		}
+
+		if !offeredAnyone {
+			// Nobody reachable at any distance. Waiting is the only lever left:
+			// a driver who comes online or finishes a trip in the next few seconds
+			// is invisible to a search that gives up immediately. The old loop did
+			// a bare `continue` here with no sleep, so all its "attempts" burned
+			// out in the same millisecond.
+			select {
+			case <-time.After(waveInterval):
+			case <-ctx.Done():
+				e.giveUp(context.WithoutCancel(ctx), rideID,
+					"no driver found before deadline", "No driver found nearby. Please try again.")
+				return
+			}
 		}
 	}
+}
 
-	// All attempts exhausted
-	e.giveUp(ctx, rideID, "no driver found after max attempts", "No driver found nearby. Please try again.")
+// offerToBatch broadcasts one ride to several nearby drivers at once and returns
+// whoever accepts first, or nil if the window closes with nobody.
+//
+// Offers used to be strictly sequential, each blocking for the full 15s match
+// timeout before the next driver was tried. Four drivers who simply had their
+// phones in a pocket cost a full minute of a passenger's time, and no amount of
+// radius tuning touched that — the wait was in the offer loop, not the search.
+// Broadcasting collapses time-to-match to roughly one window regardless of how
+// many drivers ignore it, which is how Uber and Bolt behave.
+//
+// Correctness under a race: several drivers can accept in the same instant, so the
+// winner is decided by a single SET NX on RideClaimedBy. Exactly one succeeds; the
+// rest are told the ride is taken. Without that atomic step two drivers could both
+// be assigned, or one could be assigned while the other's app believed it had won.
+func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candidate, window time.Duration) *candidate {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	// Reserve each driver so a concurrent search for a different ride cannot offer
+	// to them at the same time. Drivers already locked elsewhere are dropped.
+	offered := make([]*candidate, 0, len(batch))
+	for _, c := range batch {
+		ok, err := e.redis.SetNX(ctx, rkeys.K.MatchingLock(c.profileID), rideID, matchLockTTL).Result()
+		if err == nil && ok {
+			offered = append(offered, c)
+		}
+	}
+	if len(offered) == 0 {
+		return nil
+	}
+	defer func() {
+		for _, c := range offered {
+			e.redis.Del(ctx, rkeys.K.MatchingLock(c.profileID))
+		}
+		e.redis.Del(ctx, rkeys.K.RidePendingDrivers(rideID))
+	}()
+
+	// The accept endpoint authorises against this set, so it must be written
+	// BEFORE any offer goes out — otherwise a very fast driver's accept arrives
+	// while the set is still empty and is rejected as "not your offer".
+	ids := make([]interface{}, 0, len(offered))
+	for _, c := range offered {
+		ids = append(ids, c.profileID)
+	}
+	e.redis.SAdd(ctx, rkeys.K.RidePendingDrivers(rideID), ids...)
+	e.redis.Expire(ctx, rkeys.K.RidePendingDrivers(rideID), window+10*time.Second)
+
+	acceptCh := make(chan acceptSignal, len(offered))
+	e.acceptChannels.Store(rideID, acceptCh)
+	defer e.acceptChannels.Delete(rideID)
+
+	inBatch := make(map[string]*candidate, len(offered))
+	for _, c := range offered {
+		inBatch[c.profileID] = c
+		e.sendOffer(ctx, rideID, c)
+	}
+
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+
+	declined := 0
+	for {
+		select {
+		case sig := <-acceptCh:
+			c, ours := inBatch[sig.driverID]
+			if !ours {
+				// A driver outside this batch probing the ride_id, or a stale
+				// signal from an earlier round. Ignore rather than let it
+				// resolve someone else's offer.
+				continue
+			}
+			if !sig.accepted {
+				e.onDeclined(ctx, rideID, c)
+				declined++
+				if declined >= len(offered) {
+					// Everyone said no; don't burn the rest of the window.
+					return nil
+				}
+				continue
+			}
+			// Atomic winner selection.
+			won, err := e.redis.SetNX(ctx, rkeys.K.RideClaimedBy(rideID), c.profileID, window+time.Minute).Result()
+			if err != nil || !won {
+				e.hub.SendToDriver(c.profileID, tracking.Message{
+					Type: "ride_taken", RideID: rideID,
+					Payload: map[string]interface{}{"reason": "Another driver accepted first."},
+				})
+				continue
+			}
+			// Record the winner where the rest of the system expects a single value.
+			e.redis.Set(ctx, rkeys.K.RidePendingDriver(rideID), c.profileID, window+time.Minute)
+			for _, other := range offered {
+				if other.profileID == c.profileID {
+					continue
+				}
+				e.hub.SendToDriver(other.profileID, tracking.Message{
+					Type: "ride_taken", RideID: rideID,
+					Payload: map[string]interface{}{"reason": "Another driver accepted first."},
+				})
+			}
+			return c
+		case <-timer.C:
+			return nil
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+// IsOfferedTo reports whether the ride is currently offered to this driver.
+//
+// Replaces a single-value check: with batched offers, "who may accept" is a set,
+// and comparing against one stored ID would have rejected two of every three
+// drivers in a batch with NOT_YOUR_OFFER.
+func (e *Engine) IsOfferedTo(ctx context.Context, rideID, driverProfileID string) bool {
+	ok, err := e.redis.SIsMember(ctx, rkeys.K.RidePendingDrivers(rideID), driverProfileID).Result()
+	if err == nil && ok {
+		return true
+	}
+	// Fall back to the single-driver key so an offer made by an older build (or
+	// the winner path) still validates.
+	id, err := e.redis.Get(ctx, rkeys.K.RidePendingDriver(rideID)).Result()
+	return err == nil && id == driverProfileID
 }
 
 // giveUp ends an unsuccessful search and — critically — releases the Redis state
@@ -305,8 +453,12 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 			Latitude:   pickup.Lat,
 			Radius:     float64(radiusM) / 1000.0,
 			RadiusUnit: "km",
-			Sort:       "ASC",
-			Count:      10,
+			Sort: "ASC",
+			// Raised from 10. With tiered batching the loop needs enough of the
+			// sorted list to fill several bands; capping at 10 meant widening the
+			// radius usually returned the very same ten drivers, which is why
+			// expansion accomplished so little.
+			Count: 30,
 		},
 		WithCoord: true,
 		WithDist:  true,
@@ -328,6 +480,17 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 			continue
 		}
 
+		// Location freshness. Redis GEO members never expire, so a driver who
+		// closed the app and went home stays in the index indefinitely and would
+		// keep matching against their last known position. driver:<id>:location is
+		// written with a 120s TTL on every fix, so its mere existence is a
+		// free freshness signal — no extra bookkeeping needed. Until now the
+		// socket check happened to mask this; it would have surfaced the moment
+		// that check was relaxed.
+		if n, err := e.redis.Exists(ctx, rkeys.K.DriverLocation(profileID)).Result(); err != nil || n == 0 {
+			continue
+		}
+
 		profile, err := e.driverRepo.FindProfileByID(ctx, profileID)
 		if err != nil {
 			continue
@@ -339,7 +502,7 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 		}
 
 		distM := r.Dist * 1000
-		normalizedDist := distM / float64(radiusM)
+		normalizedDist := math.Min(distM, scoreReferenceM) / scoreReferenceM
 		normalizedDeclines := math.Min(float64(declines), 10) / 10.0
 		acceptancePenalty := 1.0 - profile.AcceptanceRate/100.0
 		score := (normalizedDist * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
@@ -379,7 +542,7 @@ func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleT
 			declines = d
 		}
 
-		normalizedDist := n.DistanceM / float64(radiusM)
+		normalizedDist := math.Min(n.DistanceM, scoreReferenceM) / scoreReferenceM
 		normalizedDeclines := math.Min(float64(declines), 10) / 10.0
 		acceptancePenalty := 1.0 - n.AcceptanceRate/100.0
 		score := (normalizedDist * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
@@ -401,21 +564,18 @@ func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleT
 }
 
 // offerToDriver locks the driver with SET NX, sends the offer, waits for response.
-func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate) (bool, bool) {
-	lockKey := rkeys.K.MatchingLock(c.profileID)
-	ttl := time.Duration(e.cfg.Matching.TimeoutSeconds) * time.Second
-
-	ok, err := e.redis.SetNX(ctx, lockKey, rideID, matchLockTTL).Result()
-	if err != nil || !ok {
-		return false, false
-	}
-	defer e.redis.Del(ctx, lockKey)
-
-	e.redis.Set(ctx, rkeys.K.RidePendingDriver(rideID), c.profileID, ttl)
-
-	// Persist an in-app notification AND push to every device the driver has
-	// registered (best-effort, dead tokens pruned) so a backgrounded driver app
-	// wakes for the offer — not only the live WebSocket path below.
+// sendOffer dispatches one ride offer to one driver and returns immediately.
+//
+// Split out of the old offerToDriver, which sent AND then blocked for the full
+// match timeout waiting for that driver alone. offerToBatch needs the send
+// without the wait so it can put the same ride in front of several drivers at
+// once and let them race.
+//
+// Both transports are used deliberately: the WebSocket reaches a driver with the
+// app open, and the push wakes one whose app is backgrounded. A driver holding a
+// live socket is still worth pushing to, because "app in foreground" and "phone in
+// pocket" are not the same thing.
+func (e *Engine) sendOffer(ctx context.Context, rideID string, c *candidate) {
 	e.notify.SendToAllDevices(ctx, c.userID, "New ride request",
 		fmt.Sprintf("A rider is %.0fm away. Tap to view the request.", c.distanceM),
 		"ride", map[string]string{"type": "ride_request", "ride_id": rideID})
@@ -449,30 +609,6 @@ func (e *Engine) offerToDriver(ctx context.Context, rideID string, c *candidate)
 		"daily_declines":  c.dailyDeclines,
 		"acceptance_rate": c.acceptanceRate,
 	})
-
-	acceptCh := make(chan acceptSignal, 1)
-	e.acceptChannels.Store(rideID, acceptCh)
-	defer e.acceptChannels.Delete(rideID)
-
-	timer := time.NewTimer(ttl)
-	defer timer.Stop()
-
-	for {
-		select {
-		case sig := <-acceptCh:
-			// Only the driver currently being offered this ride may resolve it.
-			// A stale signal from a previously-offered driver (or any other
-			// driver probing the ride_id) is ignored so it can't hijack or
-			// prematurely decline the current offer.
-			if sig.driverID != "" && sig.driverID != c.profileID {
-				continue
-			}
-			return sig.accepted, true
-		case <-timer.C:
-			e.redis.Del(ctx, rkeys.K.RidePendingDriver(rideID))
-			return false, true
-		}
-	}
 }
 
 func (e *Engine) onAccepted(ctx context.Context, rideID string, c *candidate) {

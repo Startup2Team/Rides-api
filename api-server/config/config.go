@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -197,6 +198,21 @@ type MatchingConfig struct {
 	// GiveUpSeconds caps the whole search. Previously no wall-clock deadline
 	// existed anywhere, so the worst case was data-dependent and unbounded.
 	GiveUpSeconds int
+	// TierRadiiM are the concentric bands offers are broadcast within, nearest
+	// band first. Calibrated to pickup ETA rather than round numbers: Redis GEO
+	// measures straight-line distance, and Kigali road distance runs about 1.4x
+	// crow-flies over hilly, winding streets, so at a ~22km/h effective moto
+	// speed 800m is roughly a 3-minute pickup, 1500m about 5, and 3000m about 9.
+	// A 10km ring — the old expanded radius — is a ~25 minute pickup that no
+	// passenger waits for.
+	TierRadiiM []int
+	// BatchSize is how many drivers in a band are offered the ride AT ONCE, first
+	// accept wins. Offers used to be strictly sequential with a 15s block each, so
+	// four uninterested drivers cost a full minute before a fifth was tried.
+	BatchSize int
+	// TierWindowSeconds is how long a broadcast waits for any driver in the band
+	// to accept before moving outward.
+	TierWindowSeconds int
 }
 
 type RideConfig struct {
@@ -342,7 +358,10 @@ func Load() (*Config, error) {
 	cfg.Matching.TimeoutSeconds = getEnvInt("MATCH_TIMEOUT_SECONDS", 15)
 	cfg.Matching.MaxAttempts = getEnvInt("MATCH_MAX_ATTEMPTS", 4)
 	cfg.Matching.WaveIntervalSeconds = getEnvInt("MATCH_WAVE_INTERVAL_SECONDS", 12)
-	cfg.Matching.GiveUpSeconds = getEnvInt("MATCH_GIVE_UP_SECONDS", 60)
+	cfg.Matching.GiveUpSeconds = getEnvInt("MATCH_GIVE_UP_SECONDS", 45)
+	cfg.Matching.TierRadiiM = getEnvIntList("MATCH_TIER_RADII_M", []int{800, 1500, 3000})
+	cfg.Matching.BatchSize = getEnvInt("MATCH_BATCH_SIZE", 3)
+	cfg.Matching.TierWindowSeconds = getEnvInt("MATCH_TIER_WINDOW_SECONDS", 10)
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
@@ -408,6 +427,30 @@ func requireEnv(key string) string {
 		panic(fmt.Sprintf("required environment variable %q is not set", key))
 	}
 	return v
+}
+
+// getEnvIntList parses a comma-separated list of ints, e.g. "800,1500,3000".
+// Falls back wholesale on any malformed entry rather than silently dropping one:
+// a half-parsed tier list would change matching behaviour in a way nobody would
+// notice until pickups got slow.
+func getEnvIntList(key string, fallback []int) []int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil || n <= 0 {
+			return fallback
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 func getEnvInt(key string, fallback int) int {

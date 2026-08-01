@@ -537,6 +537,13 @@ func (r *Repository) FindNearby(ctx context.Context, loc geo.Point, radiusM int,
 		WHERE dp.is_online = TRUE
 		  AND dp.approval_status = 'APPROVED'
 		  AND dp.transport_type = $2
+		  -- Location freshness. is_online was the only gate, so a driver who shut
+		  -- the app without going offline kept matching against a position that
+		  -- could be hours old -- offering rides to someone already at home. The
+		  -- Redis path gets this free from the 120s TTL on driver:<id>:location;
+		  -- this fallback had no equivalent. Kept generous (5x that TTL) because
+		  -- the fallback exists for cold start, when fixes are naturally sparse.
+		  AND dl.updated_at > NOW() - INTERVAL '10 minutes'
 		  AND ST_DWithin(dl.location, ST_GeographyFromText($1), $3)
 		  AND dp.id != ALL($4::uuid[])
 		  AND dp.user_id NOT IN (
@@ -547,7 +554,9 @@ func (r *Repository) FindNearby(ctx context.Context, loc geo.Point, radiusM int,
 		      AND r2.driver_id IS NOT NULL
 		  )
 		ORDER BY dp.priority_tier ASC, distance_m ASC
-		LIMIT 5
+		-- Raised from 5: tiered batching needs enough of the sorted list to fill
+		-- several distance bands.
+		LIMIT 30
 	`, loc.WKT(), transportType, radiusM, excludedIDs)
 	if err != nil {
 		return nil, err

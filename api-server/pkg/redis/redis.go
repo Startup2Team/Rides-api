@@ -58,6 +58,19 @@ func (Keys) DriverLocationHistory(driverID string) string {
 
 // ── Driver state ──────────────────────────────────────────────────────────
 
+// DriverWSPresence marks that a driver holds a live WebSocket, in Redis rather
+// than in one process's memory.
+//
+// Matching skips drivers with no socket, but the check read a per-process map, so
+// with more than one API replica a driver connected to instance B was invisible
+// to matching running on instance A — silently cutting usable supply by however
+// many replicas are running. Refreshed on every server ping (54s) with a TTL
+// comfortably beyond it, so a hard-killed process expires rather than stranding a
+// driver as permanently "present".
+func (Keys) DriverWSPresence(driverProfileID string) string {
+	return fmt.Sprintf("driver:%s:ws_present", driverProfileID)
+}
+
 // DriverState stores AVAILABLE | ON_TRIP | OFFLINE
 func (Keys) DriverState(driverID string) string {
 	return fmt.Sprintf("driver:%s:state", driverID)
@@ -79,6 +92,21 @@ func (Keys) DriverGeoIndex(vehicleType string) string {
 // MatchingLock is SET NX per driver — prevents two rides grabbing the same driver
 func (Keys) MatchingLock(driverID string) string {
 	return fmt.Sprintf("matching:lock:%s", driverID)
+}
+
+// RidePendingDrivers is the SET of drivers a ride is currently offered to.
+//
+// Offers are broadcast to a batch now, first accept wins, so "who may accept this
+// ride" is no longer a single value. RidePendingDriver is kept for the winner.
+func (Keys) RidePendingDrivers(rideID string) string {
+	return fmt.Sprintf("ride:%s:pending_drivers", rideID)
+}
+
+// RideClaimedBy is the atomic winner of a broadcast race. Written with SET NX, so
+// exactly one driver in a batch can win even if several accept in the same
+// instant.
+func (Keys) RideClaimedBy(rideID string) string {
+	return fmt.Sprintf("ride:%s:claimed_by", rideID)
 }
 
 func (Keys) RidePendingDriver(rideID string) string {

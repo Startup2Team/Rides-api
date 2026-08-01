@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
+
+	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
 // safeClose closes ch exactly once. Safe to call from multiple goroutines.
@@ -117,23 +120,42 @@ func (h *Hub) handlePubSubMessage(channel, payload string) {
 	}
 }
 
+// wsPresenceTTL outlives the 54s server ping so a live driver is never briefly
+// considered absent, while a hard-killed process still expires rather than
+// leaving the driver marked present forever.
+const wsPresenceTTL = 150 * time.Second
+
 // RegisterDriver adds a driver WebSocket client to the hub.
+//
+// userID is in fact the driver_profiles.id (see the call site) — kept as the
+// parameter name for continuity with the customer methods.
 func (h *Hub) RegisterDriver(userID string, client *Client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if existing, ok := h.drivers[userID]; ok {
 		existing.Done()
 	}
 	h.drivers[userID] = client
-	h.log.Info().Str("user_id", userID).Msg("ws: driver connected")
+	h.mu.Unlock()
+
+	// Publish presence to Redis so matching on ANY replica can see this driver.
+	h.MarkDriverPresent(context.Background(), userID)
+	h.log.Info().Str("driver_profile_id", userID).Msg("ws: driver connected")
 }
 
 // UnregisterDriver removes a driver client.
 func (h *Hub) UnregisterDriver(userID string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	delete(h.drivers, userID)
-	h.log.Info().Str("user_id", userID).Msg("ws: driver disconnected")
+	h.mu.Unlock()
+
+	h.rdb.Del(context.Background(), rkeys.K.DriverWSPresence(userID))
+	h.log.Info().Str("driver_profile_id", userID).Msg("ws: driver disconnected")
+}
+
+// MarkDriverPresent refreshes the driver's Redis presence marker. Called on
+// connect and on every server ping, so presence survives as long as the socket.
+func (h *Hub) MarkDriverPresent(ctx context.Context, driverProfileID string) {
+	h.rdb.Set(ctx, rkeys.K.DriverWSPresence(driverProfileID), "1", wsPresenceTTL)
 }
 
 // RegisterCustomer adds a customer WebSocket client keyed by ride_id.
@@ -204,12 +226,26 @@ func (h *Hub) SendToCustomer(rideID string, msg Message) {
 	h.rdb.Publish(ctx, "ws:ride:"+rideID, string(payload))
 }
 
-// IsDriverConnected returns true if the driver has an active WebSocket locally.
-func (h *Hub) IsDriverConnected(driverUserID string) bool {
+// IsDriverConnected reports whether the driver holds a live WebSocket on ANY
+// replica.
+//
+// This used to consult only the local map, which meant matching could not see a
+// driver connected to a different API process. With more than one replica that
+// silently discarded most of the available supply, and the symptom — "no driver
+// found" while drivers were plainly online — would have looked like a matching
+// bug rather than a presence bug.
+//
+// The local map is still checked first: it is authoritative for this process and
+// costs nothing, so a Redis blip cannot make a locally-connected driver vanish.
+func (h *Hub) IsDriverConnected(driverProfileID string) bool {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	_, ok := h.drivers[driverUserID]
-	return ok
+	_, local := h.drivers[driverProfileID]
+	h.mu.RUnlock()
+	if local {
+		return true
+	}
+	n, err := h.rdb.Exists(context.Background(), rkeys.K.DriverWSPresence(driverProfileID)).Result()
+	return err == nil && n > 0
 }
 
 // ActiveConnectionsCount returns the current count of local WebSocket connections.

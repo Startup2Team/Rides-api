@@ -1555,12 +1555,6 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
 
-		pendingDriverID, valid := engine.ValidateAcceptTTL(r.Context(), rideID)
-		if !valid {
-			respond.Error(w, apperrors.ErrAcceptExpired)
-			return
-		}
-
 		// Identity check: this ride must currently be offered to THIS driver.
 		// Without it, any authenticated driver who learns a ride_id with a live
 		// offer could accept it (and be assigned the ride). We need the profile
@@ -1570,7 +1564,12 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 			respond.Error(w, apperrors.ErrAcceptExpired)
 			return
 		}
-		if profile.ID != pendingDriverID {
+		// Set membership, not equality against a single stored id. Offers are now
+		// broadcast to a batch of nearby drivers who race to accept, so comparing
+		// against one value would have rejected two of every three with
+		// NOT_YOUR_OFFER. IsOfferedTo also covers the expiry case the old
+		// ValidateAcceptTTL handled: an absent set means no live offer.
+		if !engine.IsOfferedTo(r.Context(), rideID, profile.ID) {
 			respond.Error(w, apperrors.New(http.StatusForbidden, "NOT_YOUR_OFFER", "this ride is not currently offered to you"))
 			return
 		}
