@@ -420,7 +420,16 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 	// This handles the common case where the matching engine or a timeout
 	// cancelled the ride between when the customer tapped "Cancel" and when
 	// the request reached the server.
+	//
+	// Still release the Redis state before returning. This early return used to
+	// skip the cleanup below, which made "Cancel Search" useless as a recovery:
+	// if matching had already given up (and it gave up in milliseconds when no
+	// driver was online), customer:<id>:active_ride — a key with no TTL — was
+	// left behind, and CreateRide rejects on that key alone. The customer was
+	// then permanently unable to book, and the one button that looked like it
+	// should fix it did nothing.
 	if IsTerminal(r.Status) {
+		s.releaseRideRedisState(ctx, rideID, customerID, r.DriverID, r.TransportType)
 		return nil
 	}
 	if !CancellableStatuses[r.Status] {
