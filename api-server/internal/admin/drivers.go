@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/pkg/documents"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
@@ -159,7 +160,8 @@ func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 	suspendedUntil := time.Now().Add(time.Duration(durationHours) * time.Hour)
 
 	var transportType string
-	err := s.db.QueryRow(ctx, `SELECT transport_type FROM driver_profiles WHERE id = $1`, profileID).Scan(&transportType)
+	var userID string
+	err := s.db.QueryRow(ctx, `SELECT transport_type, user_id FROM driver_profiles WHERE id = $1`, profileID).Scan(&transportType, &userID)
 	if err != nil {
 		return err
 	}
@@ -203,6 +205,15 @@ func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 	if s.rdb != nil {
 		s.rdb.Set(ctx, rkeys.K.DriverState(profileID), "OFFLINE", 0)
 		s.rdb.ZRem(ctx, rkeys.K.DriverGeoIndex(transportType), profileID)
+	}
+
+	// Dispatch FCM push notification directly to driver's phone
+	if n := notification.Default(); n != nil && userID != "" {
+		n.SendToAllDevices(ctx, userID, "Driver Account Suspended", fmt.Sprintf("Your driver account has been suspended for %d hours. Reason: %s", durationHours, reason), "ACCOUNT_SUSPENDED", map[string]string{
+			"type":           "ACCOUNT_SUSPENDED",
+			"reason":         reason,
+			"duration_hours": fmt.Sprintf("%d", durationHours),
+		})
 	}
 
 	return nil

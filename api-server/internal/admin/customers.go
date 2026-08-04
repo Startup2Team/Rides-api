@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/workspace/ride-platform/internal/notification"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -188,6 +189,16 @@ func (s *Service) SuspendUser(ctx context.Context, userID, reason string, durati
 		return err
 	}
 	s.revokeUserSessions(ctx, userID)
+
+	// Dispatch FCM push notification directly to user's phone
+	if n := notification.Default(); n != nil && userID != "" {
+		n.SendToAllDevices(ctx, userID, "Account Suspended", fmt.Sprintf("Your account has been suspended for %d hours. Reason: %s", durationHours, reason), "ACCOUNT_SUSPENDED", map[string]string{
+			"type":           "ACCOUNT_SUSPENDED",
+			"reason":         reason,
+			"duration_hours": fmt.Sprintf("%d", durationHours),
+		})
+	}
+
 	return nil
 }
 
