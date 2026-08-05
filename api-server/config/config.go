@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -197,6 +198,31 @@ type MatchingConfig struct {
 	// GiveUpSeconds caps the whole search. Previously no wall-clock deadline
 	// existed anywhere, so the worst case was data-dependent and unbounded.
 	GiveUpSeconds int
+	// TierRadiiM is an explicit metre override for the broadcast bands, applied to
+	// EVERY vehicle type. Leave it empty (the default) to derive bands per vehicle
+	// from TierETAMinutes instead, which is almost always what you want — see
+	// TierRadiiForVehicle.
+	TierRadiiM []int
+	// TierETAMinutes is the pickup promise, in minutes, for each broadcast band.
+	// One promise for all vehicle types; the DISTANCE that satisfies it differs
+	// per vehicle because their speeds differ. A Fuso at 800m is a ~4.5 minute
+	// pickup while a moto at 800m is ~3, so a single metre figure quietly means a
+	// different customer experience per vehicle.
+	TierETAMinutes []int
+	// VehicleSpeedKmh is the effective door-to-door speed per vehicle_types.code,
+	// including traffic and Kigali's hills — not a vehicle's top speed.
+	VehicleSpeedKmh map[string]float64
+	// RoadDetourFactor converts straight-line distance (which is all Redis GEO
+	// measures) into road distance. Kigali's winding, hilly streets with few
+	// through-routes run about 1.4x crow-flies.
+	RoadDetourFactor float64
+	// BatchSize is how many drivers in a band are offered the ride AT ONCE, first
+	// accept wins. Offers used to be strictly sequential with a 15s block each, so
+	// four uninterested drivers cost a full minute before a fifth was tried.
+	BatchSize int
+	// TierWindowSeconds is how long a broadcast waits for any driver in the band
+	// to accept before moving outward.
+	TierWindowSeconds int
 }
 
 type RideConfig struct {
@@ -342,7 +368,19 @@ func Load() (*Config, error) {
 	cfg.Matching.TimeoutSeconds = getEnvInt("MATCH_TIMEOUT_SECONDS", 15)
 	cfg.Matching.MaxAttempts = getEnvInt("MATCH_MAX_ATTEMPTS", 4)
 	cfg.Matching.WaveIntervalSeconds = getEnvInt("MATCH_WAVE_INTERVAL_SECONDS", 12)
-	cfg.Matching.GiveUpSeconds = getEnvInt("MATCH_GIVE_UP_SECONDS", 60)
+	cfg.Matching.GiveUpSeconds = getEnvInt("MATCH_GIVE_UP_SECONDS", 45)
+	cfg.Matching.TierRadiiM = getEnvIntList("MATCH_TIER_RADII_M", nil)
+	cfg.Matching.TierETAMinutes = getEnvIntList("MATCH_TIER_ETA_MINUTES", []int{3, 6, 10})
+	cfg.Matching.RoadDetourFactor = getEnvFloat("MATCH_ROAD_DETOUR_FACTOR", 1.4)
+	cfg.Matching.VehicleSpeedKmh = map[string]float64{
+		"MOTO_BIKE":   getEnvFloat("MATCH_SPEED_KMH_MOTO_BIKE", 22),
+		"TUK_TUK":     getEnvFloat("MATCH_SPEED_KMH_TUK_TUK", 18),
+		"LIGHT_HILUX": getEnvFloat("MATCH_SPEED_KMH_LIGHT_HILUX", 16),
+		"CAB_TAXI":    getEnvFloat("MATCH_SPEED_KMH_CAB_TAXI", 16),
+		"HEAVY_FUSO":  getEnvFloat("MATCH_SPEED_KMH_HEAVY_FUSO", 14),
+	}
+	cfg.Matching.BatchSize = getEnvInt("MATCH_BATCH_SIZE", 3)
+	cfg.Matching.TierWindowSeconds = getEnvInt("MATCH_TIER_WINDOW_SECONDS", 10)
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
@@ -408,6 +446,83 @@ func requireEnv(key string) string {
 		panic(fmt.Sprintf("required environment variable %q is not set", key))
 	}
 	return v
+}
+
+// getEnvIntList parses a comma-separated list of ints, e.g. "800,1500,3000".
+// Falls back wholesale on any malformed entry rather than silently dropping one:
+// a half-parsed tier list would change matching behaviour in a way nobody would
+// notice until pickups got slow.
+// TierRadiiForVehicle returns the broadcast bands, in metres, for one vehicle
+// type — derived from the ETA promise and that vehicle's effective speed.
+//
+// The bands used to be a single metre list shared by every vehicle, which meant
+// the SAME distance implied a different wait depending on what the customer
+// ordered: 800m is a ~3 minute moto pickup but a ~4.5 minute Fuso one. Deriving
+// from ETA keeps the promise constant and lets the distance vary, which is the way
+// round that matters to a passenger.
+//
+// Pure arithmetic on values fixed at load time — call it per search without
+// touching Redis or Postgres.
+//
+// An explicit TierRadiiM wins, for when someone needs to pin exact metres.
+func (m MatchingConfig) TierRadiiForVehicle(vehicleTypeCode string) []int {
+	if len(m.TierRadiiM) > 0 {
+		return m.TierRadiiM
+	}
+	etas := m.TierETAMinutes
+	if len(etas) == 0 {
+		etas = []int{3, 6, 10}
+	}
+	speed, ok := m.VehicleSpeedKmh[vehicleTypeCode]
+	if !ok || speed <= 0 {
+		// Unknown vehicle type: fall back to the slowest configured speed rather
+		// than the fastest, so an unrecognised code cannot silently promise a
+		// 3-minute pickup it has no chance of meeting.
+		speed = 0
+		for _, v := range m.VehicleSpeedKmh {
+			if speed == 0 || (v > 0 && v < speed) {
+				speed = v
+			}
+		}
+		if speed <= 0 {
+			speed = 14
+		}
+	}
+	detour := m.RoadDetourFactor
+	if detour < 1 {
+		detour = 1.4
+	}
+
+	out := make([]int, 0, len(etas))
+	for _, eta := range etas {
+		if eta <= 0 {
+			continue
+		}
+		roadM := speed * 1000.0 / 60.0 * float64(eta)
+		straightM := roadM / detour
+		out = append(out, int(straightM))
+	}
+	return out
+}
+
+func getEnvIntList(key string, fallback []int) []int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil || n <= 0 {
+			return fallback
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 func getEnvInt(key string, fallback int) int {

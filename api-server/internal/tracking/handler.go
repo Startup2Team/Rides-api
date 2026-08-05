@@ -169,6 +169,12 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
+				// Refresh the cross-replica presence marker on the same beat as
+				// the ping. Its TTL deliberately outlives pingPeriod, so a live
+				// socket is never momentarily seen as absent by matching, while a
+				// hard-killed process lets the key expire instead of leaving the
+				// driver marked present forever.
+				h.hub.MarkDriverPresent(context.Background(), driverProfile.ID)
 			case <-client.done:
 				return
 			}

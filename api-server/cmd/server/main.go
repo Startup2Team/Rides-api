@@ -367,9 +367,25 @@ func main() {
 	// Customer-managed payment methods (Flow F) + driver manual package-payment
 	// claims (Flow J) — the two mobile payment contracts.
 	payMethodsH := paymentmethods.NewHandler(paymentmethods.NewService(paymentmethods.NewRepository(db)))
+	// Package payment mode: automatic (MoMo RequestToPay) as soon as MoMo is
+	// fully provisioned and payments are on, else manual. PACKAGE_PAYMENT_MODE
+	// overrides for a deliberate rollback without pulling credentials.
+	packagePaymentMode := os.Getenv("PACKAGE_PAYMENT_MODE")
+	if packagePaymentMode == "" {
+		momoReady := cfg.MoMo.APIUser != "" && cfg.MoMo.APIKey != "" && cfg.MoMo.SubscriptionKey != ""
+		if cfg.Payments.Enabled && momoReady {
+			packagePaymentMode = "automatic"
+		} else {
+			packagePaymentMode = "manual"
+		}
+	}
+	log.Info().Str("mode", packagePaymentMode).Msg("package payments: resolved mode")
 	pkgPaymentsSvc := packagepayments.NewService(
 		packagepayments.NewRepository(db),
-		packagepayments.Config{MTNMerchantCode: cfg.Payments.ManualMomoCode},
+		packagepayments.Config{
+			MTNMerchantCode: cfg.Payments.ManualMomoCode,
+			Mode:            packagePaymentMode,
+		},
 	)
 	// On approval, grant the claim's package rides via the SAME entitlement
 	// ledger path as a real MoMo settlement, and persist the driver's in-app
@@ -1555,12 +1571,6 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 		claims := mw.GetClaims(r)
 		rideID := chi.URLParam(r, "ride_id")
 
-		pendingDriverID, valid := engine.ValidateAcceptTTL(r.Context(), rideID)
-		if !valid {
-			respond.Error(w, apperrors.ErrAcceptExpired)
-			return
-		}
-
 		// Identity check: this ride must currently be offered to THIS driver.
 		// Without it, any authenticated driver who learns a ride_id with a live
 		// offer could accept it (and be assigned the ride). We need the profile
@@ -1570,7 +1580,12 @@ func driverAcceptHandler(engine *matching.Engine, rideRepo *ride.Repository, dri
 			respond.Error(w, apperrors.ErrAcceptExpired)
 			return
 		}
-		if profile.ID != pendingDriverID {
+		// Set membership, not equality against a single stored id. Offers are now
+		// broadcast to a batch of nearby drivers who race to accept, so comparing
+		// against one value would have rejected two of every three with
+		// NOT_YOUR_OFFER. IsOfferedTo also covers the expiry case the old
+		// ValidateAcceptTTL handled: an absent set means no live offer.
+		if !engine.IsOfferedTo(r.Context(), rideID, profile.ID) {
 			respond.Error(w, apperrors.New(http.StatusForbidden, "NOT_YOUR_OFFER", "this ride is not currently offered to you"))
 			return
 		}
