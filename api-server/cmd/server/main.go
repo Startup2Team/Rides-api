@@ -367,9 +367,25 @@ func main() {
 	// Customer-managed payment methods (Flow F) + driver manual package-payment
 	// claims (Flow J) — the two mobile payment contracts.
 	payMethodsH := paymentmethods.NewHandler(paymentmethods.NewService(paymentmethods.NewRepository(db)))
+	// Package payment mode: automatic (MoMo RequestToPay) as soon as MoMo is
+	// fully provisioned and payments are on, else manual. PACKAGE_PAYMENT_MODE
+	// overrides for a deliberate rollback without pulling credentials.
+	packagePaymentMode := os.Getenv("PACKAGE_PAYMENT_MODE")
+	if packagePaymentMode == "" {
+		momoReady := cfg.MoMo.APIUser != "" && cfg.MoMo.APIKey != "" && cfg.MoMo.SubscriptionKey != ""
+		if cfg.Payments.Enabled && momoReady {
+			packagePaymentMode = "automatic"
+		} else {
+			packagePaymentMode = "manual"
+		}
+	}
+	log.Info().Str("mode", packagePaymentMode).Msg("package payments: resolved mode")
 	pkgPaymentsSvc := packagepayments.NewService(
 		packagepayments.NewRepository(db),
-		packagepayments.Config{MTNMerchantCode: cfg.Payments.ManualMomoCode},
+		packagepayments.Config{
+			MTNMerchantCode: cfg.Payments.ManualMomoCode,
+			Mode:            packagePaymentMode,
+		},
 	)
 	// On approval, grant the claim's package rides via the SAME entitlement
 	// ledger path as a real MoMo settlement, and persist the driver's in-app

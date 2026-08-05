@@ -17,6 +17,15 @@ import (
 type Config struct {
 	MTNMerchantCode    string
 	AirtelMerchantCode string
+	// Mode is what GET /configuration reports to the mobile app: "automatic"
+	// (MoMo RequestToPay prompt), "manual" (driver pays out-of-band and submits
+	// a claim for admin approval) or "disabled". It was hardcoded to "manual",
+	// so provisioning real MoMo credentials had no effect whatsoever — the app
+	// kept showing the manual claim flow. Derived in main from the MoMo
+	// credentials + PAYMENTS_ENABLED, overridable with PACKAGE_PAYMENT_MODE.
+	// Empty means "manual", preserving the old behaviour for any caller that
+	// does not set it (tests included).
+	Mode string
 }
 
 const (
@@ -138,8 +147,14 @@ func (s *Service) merchantCodeFor(provider string) (string, bool) {
 }
 
 func (s *Service) Configuration() *Configuration {
+	mode := s.cfg.Mode
+	if mode == "" {
+		mode = "manual"
+	}
 	return &Configuration{
-		Mode: "manual",
+		// Manual stays populated in every mode: it is the fallback the app
+		// falls back to when an automatic prompt fails, and it costs nothing.
+		Mode: mode,
 		Manual: &ManualConfig{
 			Providers:                    s.providers(),
 			ClaimExpiresAfterMinutes:     claimExpiresAfterMinutes,
