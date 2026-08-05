@@ -459,7 +459,7 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 			Latitude:   pickup.Lat,
 			Radius:     float64(radiusM) / 1000.0,
 			RadiusUnit: "km",
-			Sort: "ASC",
+			Sort:       "ASC",
 			// Raised from 10. With tiered batching the loop needs enough of the
 			// sorted list to fill several bands; capping at 10 meant widening the
 			// radius usually returned the very same ten drivers, which is why
