@@ -343,10 +343,16 @@ func (h *Handler) UpdateLocationsBatch(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) UploadDocument(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
+	// document_type is deliberately NOT validated by a `oneof` tag here. The set
+	// of types and which of them require a vehicle live in pkg/documents, checked
+	// in the service — a tag would be a second copy that silently drifts, which is
+	// exactly how SELFIE and PROFILE_SELFIE came to mean the same document under
+	// two names.
 	var body struct {
-		DocumentType string `json:"document_type" validate:"required,oneof=LICENCE_FRONT LICENCE_BACK NATIONAL_ID_FRONT NATIONAL_ID_BACK VEHICLE_INSURANCE VEHICLE_AUTHORIZATION SELFIE"`
-		FileURL      string `json:"file_url"      validate:"required,url"`
-		SHA256       string `json:"sha256"        validate:"omitempty,len=64,hexadecimal"`
+		DocumentType string  `json:"document_type" validate:"required"`
+		FileURL      string  `json:"file_url"      validate:"required,url"`
+		SHA256       string  `json:"sha256"        validate:"omitempty,len=64,hexadecimal"`
+		VehicleID    *string `json:"vehicle_id"    validate:"omitempty,uuid4"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
@@ -357,7 +363,7 @@ func (h *Handler) UploadDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.UploadDocument(r.Context(), claims.UserID, body.DocumentType, body.FileURL, body.SHA256); err != nil {
+	if err := h.svc.UploadDocument(r.Context(), claims.UserID, body.DocumentType, body.FileURL, body.SHA256, body.VehicleID); err != nil {
 		// 409: the request was well-formed and authorised, but the document is
 		// locked. Distinct from a validation error so the app can render "ask
 		// support to reopen this" rather than "your input was wrong".

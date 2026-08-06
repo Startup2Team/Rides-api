@@ -181,7 +181,7 @@ func (m *mockSvc) ListLiveRides(ctx context.Context, status, district, search st
 func (m *mockSvc) GetLiveRide(ctx context.Context, rideID string) (map[string]interface{}, error) {
 	return m.getLiveRideFn(ctx, rideID)
 }
-func (m *mockSvc) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error {
+func (m *mockSvc) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string, vehicleID *string) error {
 	return nil
 }
 func (m *mockSvc) LaunchReadiness(ctx context.Context) (map[string]interface{}, error) {
