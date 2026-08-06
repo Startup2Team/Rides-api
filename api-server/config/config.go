@@ -106,8 +106,16 @@ type JWTConfig struct {
 	AdminIdleExpiry      time.Duration
 	AdminSessionMaxHours int
 	AdminSessionMax      time.Duration
-	AccessExpiry         time.Duration
-	RefreshExpiry        time.Duration
+	/**
+	 * How long the login 2FA step stays valid — the window to open an
+	 * authenticator, scan a QR on first enrolment, and type a code. Separate from
+	 * the dashboard session because it is a different job: this one is about
+	 * finishing a sign-in, not staying signed in.
+	 */
+	AdminPreAuthMinutes int
+	AdminPreAuthExpiry  time.Duration
+	AccessExpiry        time.Duration
+	RefreshExpiry       time.Duration
 }
 
 type ATConfig struct {
@@ -311,10 +319,16 @@ func Load() (*Config, error) {
 	// Hard ceiling on a renewed session, no matter how active: a stolen token
 	// must not be renewable forever.
 	cfg.JWT.AdminSessionMaxHours = getEnvInt("JWT_ADMIN_SESSION_MAX_HOURS", 12)
+	// The login 2FA window. Was a hardcoded 15 minutes, which is tight for a
+	// first-time enrolment: install an authenticator, scan the QR, wait for a
+	// fresh code. Running out mid-setup surfaced as "your sign-in session
+	// expired", which reads like a bug rather than a timer.
+	cfg.JWT.AdminPreAuthMinutes = getEnvInt("JWT_ADMIN_PREAUTH_MINUTES", 30)
 	cfg.JWT.RefreshExpiryDays = getEnvInt("JWT_REFRESH_EXPIRY_DAYS", 30)
 	cfg.JWT.AccessExpiry = time.Duration(cfg.JWT.AccessExpiryMinutes) * time.Minute
 	cfg.JWT.AdminIdleExpiry = time.Duration(cfg.JWT.AdminIdleMinutes) * time.Minute
 	cfg.JWT.AdminSessionMax = time.Duration(cfg.JWT.AdminSessionMaxHours) * time.Hour
+	cfg.JWT.AdminPreAuthExpiry = time.Duration(cfg.JWT.AdminPreAuthMinutes) * time.Minute
 	cfg.JWT.RefreshExpiry = time.Duration(cfg.JWT.RefreshExpiryDays) * 24 * time.Hour
 
 	cfg.AT.APIKey = getEnv("AT_API_KEY", "")

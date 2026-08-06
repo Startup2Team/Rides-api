@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/pquerna/otp/totp"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -206,6 +208,8 @@ func testCfg() *config.Config {
 			RefreshExpiryDays:   30,
 			AccessExpiry:        15 * time.Minute,
 			RefreshExpiry:       30 * 24 * time.Hour,
+			AdminPreAuthMinutes: 30,
+			AdminPreAuthExpiry:  30 * time.Minute,
 		},
 	}
 }
@@ -421,7 +425,12 @@ func TestLogin_WrongPassword(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestLogin_No2FA_ReturnsAccessToken(t *testing.T) {
+// A 2FA-off admin must NOT receive an access token. This test previously
+// asserted the opposite, which is what made 2FA a UI convention: the login
+// response carried a fully-privileged token and only the console's own wall
+// stood between it and the dashboard. Login now hands back a setup token, whose
+// single power is to complete enrolment.
+func TestLogin_No2FA_ReturnsSetupTokenNotAccess(t *testing.T) {
 	hash, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
 	hashStr := string(hash)
 	repo := &mockRepo{
@@ -433,10 +442,122 @@ func TestLogin_No2FA_ReturnsAccessToken(t *testing.T) {
 		},
 	}
 	svc := newTestService(repo, newTestRedis(t))
+
 	result, err := svc.Login(context.Background(), "admin@test.com", "secret")
+
 	require.NoError(t, err)
-	assert.NotEmpty(t, result.AccessToken)
+	assert.Empty(t, result.AccessToken, "login must never issue an access token before 2FA is enrolled")
+	assert.NotEmpty(t, result.SetupToken)
+	assert.True(t, result.TwoFactorSetupRequired)
 	assert.False(t, result.TwoFactorRequired)
+}
+
+// The setup token must be useless as a session credential. The admin middleware
+// admits only token_type "access"; this asserts the claim it inspects, so a
+// future change to issueSetupToken cannot quietly widen its reach.
+func TestSetupToken_IsNotAnAccessToken(t *testing.T) {
+	svc := newTestService(&mockRepo{}, newTestRedis(t))
+
+	tok, err := svc.issueSetupToken("a1")
+	require.NoError(t, err)
+
+	parsed, _, err := jwt.NewParser().ParseUnverified(tok, jwt.MapClaims{})
+	require.NoError(t, err)
+	claims, ok := parsed.Claims.(jwt.MapClaims)
+	require.True(t, ok)
+
+	assert.Equal(t, "totp_setup", claims["token_type"])
+	assert.NotEqual(t, "access", claims["token_type"])
+	assert.Nil(t, claims["jti"], "a setup token is not a session and must carry no jti")
+
+	// It must also be rejected where a pre-auth token is expected.
+	_, preAuthErr := svc.validatePreAuthToken(tok)
+	require.Error(t, preAuthErr)
+}
+
+// The whole point of the exchange: a valid code turns a setup token into a real
+// session, and an invalid one turns it into nothing.
+func TestEnrollTOTPComplete_ValidCodeIssuesAccessToken(t *testing.T) {
+	const secret = "JBSWY3DPEHPK3PXP"
+	repo := &mockRepo{
+		findByIDFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
+			return &AdminAccount{ID: "a1", Email: "a@test.com", RoleName: "Super Admin", TwoFactor: false}, nil, nil
+		},
+		saveTOTPFn:        func(_ context.Context, _, _ string) error { return nil },
+		saveBackupCodesFn: func(_ context.Context, _ string, _ []BackupCode) error { return nil },
+	}
+	svc := newTestService(repo, newTestRedis(t))
+	setupTok, err := svc.issueSetupToken("a1")
+	require.NoError(t, err)
+
+	code, err := totp.GenerateCode(secret, time.Now().UTC())
+	require.NoError(t, err)
+
+	result, backupCodes, err := svc.EnrollTOTPComplete(context.Background(), setupTok, secret, code)
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, result.AccessToken, "a verified enrolment is where the session begins")
+	assert.Len(t, backupCodes, backupCodeCount)
+}
+
+func TestEnrollTOTPComplete_InvalidCodeIssuesNothing(t *testing.T) {
+	stored := false
+	repo := &mockRepo{
+		findByIDFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
+			return &AdminAccount{ID: "a1", Email: "a@test.com", RoleName: "Super Admin"}, nil, nil
+		},
+		saveTOTPFn: func(_ context.Context, _, _ string) error {
+			stored = true
+			return nil
+		},
+	}
+	svc := newTestService(repo, newTestRedis(t))
+	setupTok, err := svc.issueSetupToken("a1")
+	require.NoError(t, err)
+
+	result, backupCodes, err := svc.EnrollTOTPComplete(context.Background(), setupTok, "JBSWY3DPEHPK3PXP", "000000")
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Nil(t, backupCodes)
+	assert.False(t, stored, "a failed enrolment must not store a secret")
+}
+
+// An already-enrolled admin must not be able to re-enrol through the login path,
+// which would replace a working authenticator without proving they hold it.
+func TestEnrollTOTPBegin_RefusesWhenAlreadyEnrolled(t *testing.T) {
+	repo := &mockRepo{
+		findByIDFn: func(_ context.Context, _ string) (*AdminAccount, *string, error) {
+			return &AdminAccount{ID: "a1", Email: "a@test.com", TwoFactor: true}, nil, nil
+		},
+	}
+	svc := newTestService(repo, newTestRedis(t))
+	setupTok, err := svc.issueSetupToken("a1")
+	require.NoError(t, err)
+
+	_, err = svc.EnrollTOTPBegin(context.Background(), setupTok)
+	require.Error(t, err)
+}
+
+// A setup token may not be replayed as a pre-auth token, and vice versa.
+func TestSetupToken_AndPreAuthToken_AreNotInterchangeable(t *testing.T) {
+	svc := newTestService(&mockRepo{}, newTestRedis(t))
+
+	setupTok, err := svc.issueSetupToken("a1")
+	require.NoError(t, err)
+	preAuthTok, err := svc.issuePreAuthToken("a1")
+	require.NoError(t, err)
+
+	_, err = svc.validateSetupToken(preAuthTok)
+	assert.Error(t, err, "a pre-auth token must not pass as a setup token")
+
+	_, err = svc.validatePreAuthToken(setupTok)
+	assert.Error(t, err, "a setup token must not pass as a pre-auth token")
+
+	// Each still validates as itself.
+	id, err := svc.validateSetupToken(setupTok)
+	require.NoError(t, err)
+	assert.Equal(t, "a1", id)
 }
 
 func TestLogin_With2FA_ReturnsPreAuthToken(t *testing.T) {
@@ -492,6 +613,43 @@ func TestEnable2FA_InvalidTOTPCode(t *testing.T) {
 	// "000000" will not match any valid TOTP for a fresh secret
 	_, err := svc.Enable2FA(context.Background(), "a1", "JBSWY3DPEHPK3PXP", "000000")
 	require.Error(t, err)
+}
+
+// Enrolment must verify the code OUTSIDE production too. This was gated on
+// cfg.Env == "production", so on staging any six digits enrolled successfully —
+// storing a secret for a QR that was never scanned, which locks the admin out
+// permanently because no code they can generate will ever match it.
+func TestEnable2FA_RejectsInvalidCode_OutsideProduction(t *testing.T) {
+	saved := false
+	repo := &mockRepo{
+		saveTOTPFn: func(_ context.Context, _, _ string) error {
+			saved = true
+			return nil
+		},
+	}
+	svc := newTestService(repo, newTestRedis(t)) // cfg.Env is "" — not production
+
+	_, err := svc.Enable2FA(context.Background(), "a1", "JBSWY3DPEHPK3PXP", "000000")
+
+	require.Error(t, err)
+	assert.False(t, saved, "a secret must never be stored for an unverified code")
+}
+
+// A valid code still enrols outside production — the check is strict, not broken.
+func TestEnable2FA_AcceptsValidCode_OutsideProduction(t *testing.T) {
+	const secret = "JBSWY3DPEHPK3PXP"
+	repo := &mockRepo{
+		saveTOTPFn:        func(_ context.Context, _, _ string) error { return nil },
+		saveBackupCodesFn: func(_ context.Context, _ string, _ []BackupCode) error { return nil },
+	}
+	svc := newTestService(repo, newTestRedis(t))
+
+	code, err := totp.GenerateCode(secret, time.Now().UTC())
+	require.NoError(t, err)
+
+	codes, err := svc.Enable2FA(context.Background(), "a1", secret, code)
+	require.NoError(t, err)
+	assert.Len(t, codes, backupCodeCount)
 }
 
 // ── Disable2FA ────────────────────────────────────────────────────────────
@@ -654,6 +812,32 @@ func TestResetTOTP_NoExistingSecret(t *testing.T) {
 	svc := newTestService(repo, newTestRedis(t))
 	_, _, _, err := svc.ResetTOTP(context.Background(), "a1", "123456")
 	require.Error(t, err)
+}
+
+// Rotating your own second factor requires proving you hold the current one,
+// outside production too. Both guards were gated on cfg.Env == "production", so
+// on staging an empty code rotated the secret — meaning a stolen session could
+// take over the second factor and lock the real owner out. An admin who truly
+// lost their device goes through ResetMember2FA, which needs a second person.
+func TestResetTOTP_RequiresCurrentCode_OutsideProduction(t *testing.T) {
+	const existing = "JBSWY3DPEHPK3PXP"
+	rotated := false
+	repo := &mockRepo{
+		getTOTPSecretFn: func(_ context.Context, _ string) (*string, error) {
+			s := existing
+			return &s, nil
+		},
+		saveTOTPFn: func(_ context.Context, _, _ string) error {
+			rotated = true
+			return nil
+		},
+	}
+	svc := newTestService(repo, newTestRedis(t)) // cfg.Env is "" — not production
+
+	_, _, _, err := svc.ResetTOTP(context.Background(), "a1", "")
+
+	require.Error(t, err)
+	assert.False(t, rotated, "an empty code must never rotate an existing secret")
 }
 
 func TestTOTPEncryption_RoundTripAndFallback(t *testing.T) {

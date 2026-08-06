@@ -1042,14 +1042,22 @@ func main() {
 
 	// ── Admin auth (public — no admin JWT required) ───────────────────────────
 	// Rate limit administrative endpoints to prevent brute-force credential stuffing.
+	// Each of these was registered twice — once with cfg.Security.AdminLoginRateLimit
+	// and again with a hardcoded 5. chi does not complain about a duplicate
+	// method+pattern, it just lets the last registration win, so the hardcoded
+	// limit was silently overriding the configured one and RATE_LIMIT_ADMIN_LOGIN
+	// did nothing. Same default (5), so behaviour is unchanged today — but the env
+	// var now actually works.
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_login", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
-	r.With(mw.IPRateLimit(cfg, rdb, "admin_login", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/login", teamH.Login)
-	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/verify", teamH.Verify2FA)
-	r.With(mw.IPRateLimit(cfg, rdb, "admin_2fa_backup", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/2fa/backup", teamH.VerifyBackupCode)
-	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_reset", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/reset-login", teamH.ResetTOTPLogin)
+
+	// Login-time TOTP enrolment. Public because the setup token IS the credential
+	// and it can do nothing but enrol — the admin middleware only admits
+	// token_type "access", which a setup token never is.
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_enroll", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/enroll-begin", teamH.EnrollTOTPBegin)
+	r.With(mw.IPRateLimit(cfg, rdb, "admin_totp_enroll", cfg.Security.AdminLoginRateLimit, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/totp/enroll-complete", teamH.EnrollTOTPComplete)
 
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_forgot_password", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/forgot-password", teamH.ForgotPassword)
 	r.With(mw.IPRateLimit(cfg, rdb, "admin_verify_reset_otp", 5, 5*time.Minute)).Post(apiV1Prefix+"/admin/auth/verify-reset-otp", teamH.VerifyResetOTP)
