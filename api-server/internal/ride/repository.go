@@ -765,6 +765,38 @@ func (repo *Repository) BanUserUntil(ctx context.Context, userID string, until t
 }
 
 // SuspendUserIndefinitely applies a suspension with no expiry (admin must lift).
+// BookingSuspension reports whether the user is currently barred from booking,
+// and until when. `until == nil` with suspended == true means an indefinite
+// (admin-lifted) suspension. An elapsed window is reported as not suspended and
+// cleared, so a temp ban ends on its own without an admin or a login round-trip.
+func (repo *Repository) BookingSuspension(ctx context.Context, userID string) (suspended bool, until *time.Time, reason string, err error) {
+	var isSuspended bool
+	var suspendedUntil *time.Time
+	var suspensionReason *string
+	err = repo.db.QueryRow(ctx, `
+		SELECT is_suspended, suspension_until, suspension_reason FROM users WHERE id = $1
+	`, userID).Scan(&isSuspended, &suspendedUntil, &suspensionReason)
+	if err != nil {
+		return false, nil, "", err
+	}
+	if !isSuspended {
+		return false, nil, "", nil
+	}
+	if suspendedUntil != nil && !suspendedUntil.After(time.Now()) {
+		if _, cErr := repo.db.Exec(ctx, `
+			UPDATE users SET is_suspended = FALSE, suspension_until = NULL, suspension_reason = NULL, updated_at = NOW()
+			WHERE id = $1
+		`, userID); cErr != nil {
+			return false, nil, "", cErr
+		}
+		return false, nil, "", nil
+	}
+	if suspensionReason != nil {
+		reason = *suspensionReason
+	}
+	return true, suspendedUntil, reason, nil
+}
+
 func (repo *Repository) SuspendUserIndefinitely(ctx context.Context, userID, reason string) error {
 	_, err := repo.db.Exec(ctx, `
 		UPDATE users SET is_suspended = TRUE, suspension_until = NULL, suspension_reason = $1, updated_at = NOW()
