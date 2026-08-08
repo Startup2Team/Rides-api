@@ -589,7 +589,7 @@ func TestListRides_EmptyDB(t *testing.T) {
 			return &emptyRows{}, nil
 		},
 	})
-	rides, total, err := svc.ListRides(context.Background(), "", "", "", 20, 0)
+	rides, total, err := svc.ListRides(context.Background(), "", "", "", "", "", 20, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 0, total)
 	assert.Empty(t, rides)
@@ -1155,7 +1155,8 @@ func TestListRides_WithOneRow(t *testing.T) {
 					// Scan order: id, status, tType, custID, custPhone,
 					//   custName(*str), driverID(*str), driverPhone(*str), driverName(*str),
 					//   pickupAddr, destAddr, agreedFare(*f64), initialFare(*f64), distKm(*f64),
-					//   createdAt, completedAt(*time.Time)
+					//   createdAt, completedAt(*time.Time), startedAt(*time.Time),
+					//   durationMin(*f64)
 					*dest[0].(*string) = "ride-id"
 					*dest[1].(*string) = "COMPLETED"
 					*dest[2].(*string) = "MOTO_BIKE"
@@ -1166,13 +1167,14 @@ func TestListRides_WithOneRow(t *testing.T) {
 					*dest[10].(*string) = "Kimironko"
 					// dest[11..13] are **float64 (nullable) — leave nil
 					*dest[14].(*time.Time) = now
-					// dest[15] = **time.Time (nullable) — leave nil
+					// dest[15..16] are **time.Time (nullable) — leave nil
+					// dest[17] = **float64 (nullable) — leave nil
 					return nil
 				},
 			}}, nil
 		},
 	})
-	rides, total, err := svc.ListRides(context.Background(), "COMPLETED", "", "", 20, 0)
+	rides, total, err := svc.ListRides(context.Background(), "COMPLETED", "", "", "", "", 20, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 1, total)
 	assert.Len(t, rides, 1)

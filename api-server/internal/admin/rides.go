@@ -15,7 +15,7 @@ import (
 
 // Admin ride oversight: history, detail, live rides and intervention.
 
-func (s *Service) ListRides(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error) {
+func (s *Service) ListRides(ctx context.Context, status, transportType, search, from, to string, limit, offset int) ([]map[string]interface{}, int, error) {
 	var wheres []string
 	var args []interface{}
 	n := 1
@@ -31,8 +31,25 @@ func (s *Service) ListRides(ctx context.Context, status, transportType, search s
 		n++
 	}
 	if search != "" {
-		wheres = append(wheres, fmt.Sprintf("(cu.phone_number ILIKE $%d OR du.phone_number ILIKE $%d)", n, n))
+		// Phone alone was too narrow for the console's one search box — support
+		// staff paste a ride id or type a name far more often than a number.
+		wheres = append(wheres, fmt.Sprintf(
+			"(cu.phone_number ILIKE $%d OR du.phone_number ILIKE $%d OR cu.full_name ILIKE $%d OR du.full_name ILIKE $%d OR r.id::text ILIKE $%d)",
+			n, n, n, n, n))
 		args = append(args, "%"+search+"%")
+		n++
+	}
+	// The window is on completion time for finished rides, falling back to
+	// creation time for the ones that never completed, so a date range means
+	// "rides that happened then" on both the completed and all-status views.
+	if from != "" {
+		wheres = append(wheres, fmt.Sprintf("COALESCE(r.completed_at, r.created_at) >= $%d", n))
+		args = append(args, from)
+		n++
+	}
+	if to != "" {
+		wheres = append(wheres, fmt.Sprintf("COALESCE(r.completed_at, r.created_at) <= $%d", n))
+		args = append(args, to)
 		n++
 	}
 
@@ -52,7 +69,9 @@ func (s *Service) ListRides(ctx context.Context, status, transportType, search s
 		       r.driver_id, du.phone_number, du.full_name,
 		       r.pickup_address, r.destination_address,
 		       r.agreed_fare, r.customer_initial_fare,
-		       r.estimated_distance_km, r.created_at, r.completed_at
+		       r.estimated_distance_km, r.created_at, r.completed_at,
+		       r.started_at,
+		       EXTRACT(EPOCH FROM (r.completed_at - COALESCE(r.started_at, r.created_at))) / 60
 		%s %s ORDER BY r.created_at DESC LIMIT $%d OFFSET $%d
 	`, base, where, n, n+1), args...)
 	if err != nil {
@@ -64,15 +83,16 @@ func (s *Service) ListRides(ctx context.Context, status, transportType, search s
 	for rows.Next() {
 		var id, status2, tType, custID, custPhone, pickupAddr, destAddr string
 		var custName, driverID, driverPhone, driverName *string
-		var agreedFare, initialFare, distKm *float64
+		var agreedFare, initialFare, distKm, durationMin *float64
 		var createdAt time.Time
-		var completedAt *time.Time
+		var completedAt, startedAt *time.Time
 		if err := rows.Scan(&id, &status2, &tType,
 			&custID, &custPhone, &custName,
 			&driverID, &driverPhone, &driverName,
 			&pickupAddr, &destAddr,
 			&agreedFare, &initialFare, &distKm,
-			&createdAt, &completedAt); err != nil {
+			&createdAt, &completedAt,
+			&startedAt, &durationMin); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, map[string]interface{}{
@@ -82,6 +102,7 @@ func (s *Service) ListRides(ctx context.Context, status, transportType, search s
 			"pickup_address": pickupAddr, "destination_address": destAddr,
 			"agreed_fare": agreedFare, "initial_fare": initialFare,
 			"distance_km": distKm, "created_at": createdAt, "completed_at": completedAt,
+			"started_at": startedAt, "duration_minutes": durationMin,
 		})
 	}
 	return result, total, nil

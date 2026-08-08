@@ -42,7 +42,7 @@ type mockSvc struct {
 	reinstateUserFn              func(ctx context.Context, userID string) error
 	updateCustomerFn             func(ctx context.Context, userID, status, notes string) error
 	banCustomerFn                func(ctx context.Context, userID, reason string) error
-	listRidesFn                  func(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error)
+	listRidesFn                  func(ctx context.Context, status, transportType, search, from, to string, limit, offset int) ([]map[string]interface{}, int, error)
 	getRideFn                    func(ctx context.Context, rideID string) (map[string]interface{}, error)
 	listNegotiationsFn           func(ctx context.Context, status, search string, limit, offset int) ([]map[string]interface{}, int, error)
 	getNegotiationFn             func(ctx context.Context, rideID string) (map[string]interface{}, error)
@@ -145,8 +145,8 @@ func (m *mockSvc) UpdateCustomer(ctx context.Context, userID, status, notes stri
 func (m *mockSvc) BanCustomer(ctx context.Context, userID, reason string) error {
 	return m.banCustomerFn(ctx, userID, reason)
 }
-func (m *mockSvc) ListRides(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error) {
-	return m.listRidesFn(ctx, status, transportType, search, limit, offset)
+func (m *mockSvc) ListRides(ctx context.Context, status, transportType, search, from, to string, limit, offset int) ([]map[string]interface{}, int, error) {
+	return m.listRidesFn(ctx, status, transportType, search, from, to, limit, offset)
 }
 func (m *mockSvc) GetRide(ctx context.Context, rideID string) (map[string]interface{}, error) {
 	return m.getRideFn(ctx, rideID)
@@ -867,7 +867,7 @@ func TestBanCustomer_MissingReason(t *testing.T) {
 
 func TestListRides_HappyPath(t *testing.T) {
 	mock := &mockSvc{
-		listRidesFn: func(_ context.Context, _, _, _ string, _, _ int) ([]map[string]interface{}, int, error) {
+		listRidesFn: func(_ context.Context, _, _, _, _, _ string, _, _ int) ([]map[string]interface{}, int, error) {
 			return []map[string]interface{}{{"id": "r1"}, {"id": "r2"}, {"id": "r3"}}, 3, nil
 		},
 	}
