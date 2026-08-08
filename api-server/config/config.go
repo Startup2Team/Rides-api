@@ -310,7 +310,12 @@ func Load() (*Config, error) {
 	cfg.JWT.AdminIdleMinutes = getEnvInt("JWT_ADMIN_IDLE_MINUTES", 60)
 	// Hard ceiling on a renewed session, no matter how active: a stolen token
 	// must not be renewable forever.
-	cfg.JWT.AdminSessionMaxHours = getEnvInt("JWT_ADMIN_SESSION_MAX_HOURS", 12)
+	// Absolute cap on a renewed admin session, counted from the original login.
+	// 12h bounced admins mid-shift: with an 8h idle window, someone working a
+	// normal day hit the ceiling and was thrown to the login screen with work in
+	// progress. 24h keeps the idle timeout doing the real security work (plus
+	// mandatory 2FA) while surviving a full day at the console.
+	cfg.JWT.AdminSessionMaxHours = getEnvInt("JWT_ADMIN_SESSION_MAX_HOURS", 24)
 	cfg.JWT.RefreshExpiryDays = getEnvInt("JWT_REFRESH_EXPIRY_DAYS", 30)
 	cfg.JWT.AccessExpiry = time.Duration(cfg.JWT.AccessExpiryMinutes) * time.Minute
 	cfg.JWT.AdminIdleExpiry = time.Duration(cfg.JWT.AdminIdleMinutes) * time.Minute
