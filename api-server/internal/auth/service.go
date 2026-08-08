@@ -258,7 +258,7 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 	// Reject suspended accounts before issuing tokens (auto-lifting any temp-ban
 	// whose window has already elapsed).
 	s.liftExpiredSuspension(ctx, user)
-	if user.IsSuspended {
+	if user.IsSuspended && user.SuspensionUntil == nil {
 		return nil, nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
 	}
 
@@ -310,7 +310,7 @@ func (s *Service) Login(ctx context.Context, phone, deviceID, platform, appVersi
 	// Reject suspended accounts before issuing tokens (auto-lifting an elapsed
 	// temp-ban first), exactly like VerifyOTP.
 	s.liftExpiredSuspension(ctx, user)
-	if user.IsSuspended {
+	if user.IsSuspended && user.SuspensionUntil == nil {
 		return nil, nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")
 	}
 
@@ -451,11 +451,12 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (*Toke
 		return nil, err
 	}
 
-	// Suspended users cannot refresh — catches suspension that happened after last
-	// login. Auto-lift an expired temp-ban first so a 24h cancellation ban ends
-	// on its own without admin intervention.
+	// Only an INDEFINITE suspension kills the session. A timed ban (excessive
+	// cancellations) is a booking restriction, not an account lockout — the user
+	// keeps browsing, keeps their history, and CreateRide is what refuses them.
+	// Auto-lift an elapsed temp ban first so it ends without admin intervention.
 	s.liftExpiredSuspension(ctx, user)
-	if user.IsSuspended {
+	if user.IsSuspended && user.SuspensionUntil == nil {
 		// Revoke the session so further refresh attempts also fail immediately.
 		_ = s.redis.Set(ctx, key, "revoked", s.cfg.JWT.RefreshExpiry).Err()
 		return nil, apperrors.New(403, "ACCOUNT_SUSPENDED", "Your account has been suspended. Contact support.")

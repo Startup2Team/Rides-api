@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,6 +93,13 @@ func (s *Service) SetFareRepository(repo FareConfigRepository) {
 
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
 func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64, idempotencyKey string) (*Ride, error) {
+	// A cancellation ban blocks BOOKING, not the account. The user keeps their
+	// trips, profile and support access — they just can't request a ride until
+	// the window elapses. Barring them at login instead (which is what we used
+	// to do) told them nothing and left them with a dead app.
+	if err := s.assertCanBook(ctx, customerID); err != nil {
+		return nil, err
+	}
 	if idempotencyKey != "" {
 		if existing, err := s.repo.FindRideByIdempotency(ctx, customerID, idempotencyKey); err != nil {
 			return nil, err
@@ -301,6 +310,10 @@ func (s *Service) recordCancelPenalty(ctx context.Context, userID, role string) 
 				"reason": "excessive_cancellations", "ban_count": bans, "role": role,
 			})
 			s.log.Warn().Str("user_id", userID).Str("role", role).Int("ban_count", bans).Msg("penalty: user SUSPENDED (max bans reached)")
+			// Only a permanent suspension ends the session. A timed ban leaves the
+			// user signed in — CreateRide refuses the booking and tells them how
+			// long is left, which is far more useful than a silent logout.
+			s.revokeUserSessions(ctx, userID)
 		} else {
 			until := time.Now().Add(time.Duration(s.cfg.Penalty.BanHours) * time.Hour)
 			_ = s.repo.BanUserUntil(ctx, userID, until, "excessive_cancellations")
@@ -309,10 +322,57 @@ func (s *Service) recordCancelPenalty(ctx context.Context, userID, role string) 
 			})
 			s.log.Warn().Str("user_id", userID).Str("role", role).Int("ban_count", bans).Int("hours", s.cfg.Penalty.BanHours).Msg("penalty: user TEMP-BANNED")
 		}
-		// Kick active sessions so the ban applies immediately (the middleware
-		// rejects requests whose session key is gone).
-		s.revokeUserSessions(ctx, userID)
 	}
+}
+
+// assertCanBook rejects a booking attempt from a suspended user, telling them
+// how long is left rather than a bare refusal — "try again later" with no
+// number is indistinguishable from a bug, and support ends up fielding it.
+func (s *Service) assertCanBook(ctx context.Context, userID string) error {
+	suspended, until, reason, err := s.repo.BookingSuspension(ctx, userID)
+	if err != nil {
+		// Never let a lookup failure block a legitimate booking.
+		s.log.Warn().Err(err).Str("user_id", userID).Msg("ride: booking suspension check failed")
+		return nil
+	}
+	if !suspended {
+		return nil
+	}
+	cause := "too many cancelled rides"
+	if reason != "" && reason != "excessive_cancellations" {
+		cause = strings.ReplaceAll(reason, "_", " ")
+	}
+	if until == nil {
+		return apperrors.New(http.StatusForbidden, "BOOKING_SUSPENDED",
+			fmt.Sprintf("You can't book rides right now because of %s. Contact support to restore booking.", cause))
+	}
+	return apperrors.New(http.StatusForbidden, "BOOKING_SUSPENDED",
+		fmt.Sprintf("You can't book rides for another %s because of %s. You can still use the rest of the app.",
+			humanizeDuration(time.Until(*until)), cause))
+}
+
+// humanizeDuration renders a remaining ban as something a person would say.
+func humanizeDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "less than a minute"
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		return fmt.Sprintf("%d minute%s", m, plural(m))
+	}
+	h := int(d.Hours())
+	if h < 24 {
+		return fmt.Sprintf("%d hour%s", h, plural(h))
+	}
+	days := h / 24
+	return fmt.Sprintf("%d day%s", days, plural(days))
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // revokeUserSessions deletes every active session key for a user so a ban or
