@@ -65,6 +65,11 @@ type Document struct {
 	// API will reject.
 	Editable bool    `json:"editable"`
 	SHA256   *string `json:"sha256,omitempty"`
+	// VehicleID is set for vehicle-level documents (insurance, authorization) and
+	// nil for person-level ones (licence, ID, selfie). The app groups by this to
+	// show each vehicle its own paperwork; before it existed a driver's second
+	// vehicle silently superseded the first vehicle's documents.
+	VehicleID *string `json:"vehicle_id,omitempty"`
 }
 
 // ErrDocumentLocked is returned when a driver tries to replace a document that
@@ -283,7 +288,29 @@ func (r *Repository) SetPolicyAccepted(ctx context.Context, profileID string) er
 // acting on the driver's behalf always may, since they are the ones who would
 // have opened that window. Both run in one transaction: superseding without
 // inserting would leave the driver with no live document at all.
-func (r *Repository) UpsertDocument(ctx context.Context, driverProfileID, documentType, fileURL, sha256 string, asAdmin bool) error {
+// VehicleBelongsToDriver reports whether vehicleID is one of this driver's
+// vehicles. Guards vehicle-scoped writes so a driver cannot attach documents to
+// a vehicle they do not own. Deleted/inactive vehicles still count as owned —
+// is_active governs which vehicle they are driving, not whose paperwork it is.
+func (r *Repository) VehicleBelongsToDriver(ctx context.Context, driverProfileID, vehicleID string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM driver_vehicles WHERE id = $1 AND driver_id = $2
+		)
+	`, vehicleID, driverProfileID).Scan(&exists)
+	return exists, err
+}
+
+// UpsertDocument stores a new version of one document, superseding the live one.
+//
+// vehicleID scopes the document: nil for person-level types (licence, ID,
+// selfie), the owning vehicle for vehicle-level types (insurance,
+// authorization). It participates in the uniqueness lookup below, which is what
+// lets a driver hold insurance for two vehicles at once — previously the second
+// vehicle's upload superseded the first vehicle's, because the live-row query
+// matched on (driver_id, document_type) alone.
+func (r *Repository) UpsertDocument(ctx context.Context, driverProfileID, documentType, fileURL, sha256 string, vehicleID *string, asAdmin bool) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -293,14 +320,21 @@ func (r *Repository) UpsertDocument(ctx context.Context, driverProfileID, docume
 	// Lock the live row so two concurrent uploads cannot both supersede it and
 	// then both insert, which the partial unique index would reject anyway — but
 	// with a confusing constraint error rather than a clean serialisation.
+	//
+	// `vehicle_id IS NOT DISTINCT FROM $3` rather than `=` because vehicle_id is
+	// NULL for person-level documents and `NULL = NULL` is NULL, not true — with
+	// `=` the lookup would never find an existing licence row, so every upload
+	// would insert a duplicate and hit the unique index instead of superseding.
 	var liveID, liveStatus string
 	var reuploadOpen bool
 	err = tx.QueryRow(ctx, `
 		SELECT id, review_status, (reupload_requested_at IS NOT NULL)
 		  FROM driver_documents
-		 WHERE driver_id = $1 AND document_type = $2 AND superseded_at IS NULL
+		 WHERE driver_id = $1 AND document_type = $2
+		   AND vehicle_id IS NOT DISTINCT FROM $3
+		   AND superseded_at IS NULL
 		 FOR UPDATE
-	`, driverProfileID, documentType).Scan(&liveID, &liveStatus, &reuploadOpen)
+	`, driverProfileID, documentType, vehicleID).Scan(&liveID, &liveStatus, &reuploadOpen)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -326,9 +360,9 @@ func (r *Repository) UpsertDocument(ctx context.Context, driverProfileID, docume
 		hash = sha256
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO driver_documents (driver_id, document_type, file_url, sha256, review_status)
-		VALUES ($1, $2, $3, $4, 'PENDING')
-	`, driverProfileID, documentType, fileURL, hash); err != nil {
+		INSERT INTO driver_documents (driver_id, document_type, file_url, sha256, vehicle_id, review_status)
+		VALUES ($1, $2, $3, $4, $5, 'PENDING')
+	`, driverProfileID, documentType, fileURL, hash, vehicleID); err != nil {
 		return err
 	}
 
@@ -399,11 +433,11 @@ func (r *Repository) SetDocumentReview(ctx context.Context, documentID, status, 
 // app renders and the rule the API enforces come from one place.
 func (r *Repository) ListDocuments(ctx context.Context, driverProfileID string) ([]*Document, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, document_type, file_url, uploaded_at, review_status, sha256,
+		SELECT id, document_type, file_url, uploaded_at, review_status, sha256, vehicle_id,
 		       (review_status <> 'APPROVED' OR reupload_requested_at IS NOT NULL) AS editable
 		FROM driver_documents
 		WHERE driver_id = $1 AND superseded_at IS NULL
-		ORDER BY uploaded_at ASC
+		ORDER BY vehicle_id NULLS FIRST, uploaded_at ASC
 	`, driverProfileID)
 	if err != nil {
 		return nil, err
@@ -414,7 +448,7 @@ func (r *Repository) ListDocuments(ctx context.Context, driverProfileID string) 
 	for rows.Next() {
 		d := &Document{}
 		if err := rows.Scan(&d.ID, &d.DocumentType, &d.FileURL, &d.UploadedAt,
-			&d.ReviewStatus, &d.SHA256, &d.Editable); err != nil {
+			&d.ReviewStatus, &d.SHA256, &d.VehicleID, &d.Editable); err != nil {
 			return nil, err
 		}
 		docs = append(docs, d)

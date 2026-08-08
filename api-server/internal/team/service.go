@@ -27,17 +27,36 @@ import (
 const (
 	totpIssuer       = "Rides Admin"
 	preAuthTokenType = "pre_auth"
-	preAuthExpiry    = 15 * time.Minute
-	backupCodeCount  = 10
+	// setupTokenType marks a token that may ONLY complete TOTP enrolment.
+	// Deliberately distinct from "access": the admin middleware accepts nothing
+	// but "access", so this is unusable against every /admin endpoint.
+	setupTokenType  = "totp_setup"
+	backupCodeCount = 10
+	// Fallback for the login 2FA window when config carries no value.
+	// The configured default lives in config.go as JWT_ADMIN_PREAUTH_MINUTES.
+	defaultPreAuthExpiry = 30 * time.Minute
 )
 
-// LoginResult is returned by Login. When TwoFactorRequired is true, the
-// caller must call Verify2FA or VerifyBackupCode using PreAuthToken.
+// LoginResult is returned by Login. Exactly one of three shapes comes back:
+//
+//   - TwoFactorRequired  → enrolled admin; call Verify2FA with PreAuthToken.
+//   - TwoFactorSetupRequired → not enrolled; call EnrollTOTPBegin / …Complete
+//     with SetupToken. AccessToken is deliberately empty — see issueSetupToken.
+//   - AccessToken        → nothing further needed (no path produces this today,
+//     since 2FA is mandatory; kept so a future exemption has somewhere to go).
 type LoginResult struct {
-	AccessToken       string        `json:"access_token,omitempty"`
-	PreAuthToken      string        `json:"pre_auth_token,omitempty"`
-	TwoFactorRequired bool          `json:"two_factor_required"`
-	Admin             *AdminAccount `json:"admin,omitempty"`
+	AccessToken            string        `json:"access_token,omitempty"`
+	PreAuthToken           string        `json:"pre_auth_token,omitempty"`
+	SetupToken             string        `json:"setup_token,omitempty"`
+	TwoFactorRequired      bool          `json:"two_factor_required"`
+	TwoFactorSetupRequired bool          `json:"two_factor_setup_required"`
+	Admin                  *AdminAccount `json:"admin,omitempty"`
+}
+
+// TOTPEnrollment is returned when a login-time enrolment begins.
+type TOTPEnrollment struct {
+	Secret     string `json:"secret"`
+	OTPAuthURL string `json:"otpauth_url"`
 }
 
 type Service struct {
@@ -221,15 +240,22 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResu
 		}, nil
 	}
 
-	token, err := s.issueAccessToken(ctx, admin.ID, admin.RoleName)
+	// Not enrolled yet: hand back a token that can ONLY enrol, never an access
+	// token.
+	//
+	// This used to mint a real access token here and rely on the admin console to
+	// withhold it and show the QR wall instead. That made 2FA a UI convention: the
+	// token was in the login response either way, so anyone reading it out of the
+	// network tab — or calling this endpoint directly — had a full admin session
+	// without ever touching an authenticator. The wall was in front of the door,
+	// not on it.
+	setupToken, err := s.issueSetupToken(admin.ID)
 	if err != nil {
 		return nil, apperrors.ErrInternal
 	}
-	go s.repo.TouchLastActive(context.Background(), admin.ID)
 	return &LoginResult{
-		AccessToken:       token,
-		TwoFactorRequired: false,
-		Admin:             admin,
+		SetupToken:             setupToken,
+		TwoFactorSetupRequired: true,
 	}, nil
 }
 
@@ -356,10 +382,16 @@ func (s *Service) Generate2FASetup(ctx context.Context, adminID string) (secret,
 }
 
 func (s *Service) Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error) {
-	if s.cfg.Env == "production" {
-		if !validateTOTP(code, secret) {
-			return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code does not match — check the secret and try again")
-		}
+	// Always prove the scan worked before storing the secret.
+	//
+	// This check used to run only when cfg.Env == "production", so on staging any
+	// six digits enrolled successfully. That is worse than a weak control: the
+	// secret gets saved for a QR the admin never actually scanned, and from then
+	// on no code they can produce will ever validate — a silent self-lockout that
+	// only an admin reset can undo. Verifying one live code is the entire point of
+	// the enable step.
+	if !validateTOTP(code, secret) {
+		return nil, apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code does not match — check the secret and try again")
 	}
 
 	plain, hashed, err := generateBackupCodes()
@@ -392,27 +424,28 @@ func (s *Service) Disable2FA(ctx context.Context, adminID, password string) erro
 
 // ResetTOTP verifies the current TOTP code, clears the existing secret, and
 // returns a fresh secret + QR URI for re-enrollment.
-// In non-production environments an empty currentCode bypasses verification,
-// allowing re-enrollment when the authenticator app is lost.
+//
+// Rotating a second factor requires proving you still hold the current one, in
+// every environment. Both checks below were gated on cfg.Env == "production",
+// which on staging let an authenticated session rotate its own TOTP secret with
+// no code at all — so stealing a session was enough to take over the second
+// factor and lock the real owner out.
+//
+// An admin who genuinely lost their authenticator does NOT come through here:
+// another Super Admin clears it via ResetMember2FA, which is the auditable path
+// and requires a second person. That is the escape hatch, not a weaker check.
 func (s *Service) ResetTOTP(ctx context.Context, adminID, currentCode string) (secret, otpauthURL string, backupCodes []string, err error) {
 	existing, repoErr := s.repo.GetTOTPSecret(ctx, adminID)
 
-	hasSecret := repoErr == nil && existing != nil && *existing != ""
-
-	if !hasSecret && s.cfg.Env == "production" {
-		// Production requires an existing secret to reset against.
+	if repoErr != nil || existing == nil || *existing == "" {
 		err = apperrors.New(http.StatusConflict, "2FA_NOT_SETUP", "2FA is not configured")
 		return
 	}
 
-	// Validate current code only if a secret exists AND (production OR user provided a code).
-	if hasSecret && (s.cfg.Env == "production" || currentCode != "") {
-		if !validateTOTP(currentCode, *existing) {
-			err = apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid")
-			return
-		}
+	if !validateTOTP(currentCode, *existing) {
+		err = apperrors.New(http.StatusUnauthorized, "INVALID_2FA_CODE", "authenticator code is invalid")
+		return
 	}
-	// In development with no secret, fall through and generate a fresh one.
 
 	admin, _, findErr := s.repo.FindByID(ctx, adminID)
 	if findErr != nil {
@@ -534,14 +567,137 @@ func (s *Service) RenewSession(ctx context.Context, adminID, jti string, loginAt
 }
 
 func (s *Service) issuePreAuthToken(adminID string) (string, error) {
+	// A zero value here would mint tokens that expire the instant they are issued,
+	// turning every 2FA login into "your sign-in session expired" with no way
+	// through. LoadConfig always sets this, but a Config built directly — in a
+	// test, or a future caller — would not, so the failure mode is closed here
+	// rather than trusted to every construction site.
+	expiry := s.cfg.JWT.AdminPreAuthExpiry
+	if expiry <= 0 {
+		expiry = defaultPreAuthExpiry
+	}
 	claims := jwt.MapClaims{
 		"user_id":    adminID,
 		"token_type": preAuthTokenType,
-		"exp":        time.Now().Add(preAuthExpiry).Unix(),
+		"exp":        time.Now().Add(expiry).Unix(),
 		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(s.cfg.JWT.AdminAccessSecret))
+}
+
+// issueSetupToken mints a token whose ONLY power is to complete TOTP enrolment.
+//
+// token_type is not "access", and the admin middleware admits nothing else
+// (internal/middleware/auth.go), so this cannot reach a single /admin endpoint.
+// It carries no jti and gets no Redis session, because it is not a session — it
+// is a one-purpose ticket that expires with the login attempt that created it.
+func (s *Service) issueSetupToken(adminID string) (string, error) {
+	expiry := s.cfg.JWT.AdminPreAuthExpiry
+	if expiry <= 0 {
+		expiry = defaultPreAuthExpiry
+	}
+	claims := jwt.MapClaims{
+		"user_id":    adminID,
+		"token_type": setupTokenType,
+		"exp":        time.Now().Add(expiry).Unix(),
+		"iat":        time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(s.cfg.JWT.AdminAccessSecret))
+}
+
+func (s *Service) validateSetupToken(tokenStr string) (string, error) {
+	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, apperrors.ErrTokenInvalid
+		}
+		return []byte(s.cfg.JWT.AdminAccessSecret), nil
+	})
+	if err != nil || !token.Valid {
+		return "", apperrors.New(http.StatusUnauthorized, "INVALID_SETUP_TOKEN", "setup token is invalid or expired")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", apperrors.ErrTokenInvalid
+	}
+	// Checked explicitly so a pre-auth or access token cannot be replayed here.
+	if claims["token_type"] != setupTokenType {
+		return "", apperrors.New(http.StatusUnauthorized, "INVALID_SETUP_TOKEN", "token type mismatch")
+	}
+
+	adminID, _ := claims["user_id"].(string)
+	if adminID == "" {
+		return "", apperrors.ErrTokenInvalid
+	}
+	return adminID, nil
+}
+
+// EnrollTOTPBegin returns a fresh secret + QR URI for an admin who is signing in
+// without 2FA configured. Generates only — nothing is stored until Complete
+// verifies a live code, so an abandoned enrolment leaves no trace.
+func (s *Service) EnrollTOTPBegin(ctx context.Context, setupToken string) (*TOTPEnrollment, error) {
+	adminID, err := s.validateSetupToken(setupToken)
+	if err != nil {
+		return nil, err
+	}
+	admin, _, findErr := s.repo.FindByID(ctx, adminID)
+	if findErr != nil {
+		return nil, apperrors.ErrNotFound
+	}
+	if admin.TwoFactor {
+		// Already enrolled — this path would silently replace a working secret.
+		return nil, apperrors.New(http.StatusConflict, "2FA_ALREADY_SET", "2FA is already configured; sign in with your authenticator")
+	}
+
+	key, genErr := totp.Generate(totp.GenerateOpts{
+		Issuer:      s.totpIssuerLabel(),
+		AccountName: admin.Email,
+	})
+	if genErr != nil {
+		return nil, apperrors.ErrInternal
+	}
+	return &TOTPEnrollment{Secret: key.Secret(), OTPAuthURL: key.URL()}, nil
+}
+
+// EnrollTOTPComplete verifies the code against the secret the admin just scanned,
+// stores it, and only then issues a real session. This is the single point where
+// a setup token becomes an access token.
+//
+// The secret is passed back in rather than re-generated, because generating again
+// would produce a DIFFERENT secret from the QR on screen and no code would ever
+// match — the same trap the console hit and documented in login-form.tsx.
+func (s *Service) EnrollTOTPComplete(ctx context.Context, setupToken, secret, code string) (*LoginResult, []string, error) {
+	adminID, err := s.validateSetupToken(setupToken)
+	if err != nil {
+		return nil, nil, err
+	}
+	admin, _, findErr := s.repo.FindByID(ctx, adminID)
+	if findErr != nil {
+		return nil, nil, apperrors.ErrNotFound
+	}
+	if admin.TwoFactor {
+		return nil, nil, apperrors.New(http.StatusConflict, "2FA_ALREADY_SET", "2FA is already configured; sign in with your authenticator")
+	}
+	if secret == "" {
+		return nil, nil, apperrors.New(http.StatusBadRequest, "BAD_REQUEST", "secret is required")
+	}
+
+	// Enable2FA validates the code, stores the secret and returns backup codes.
+	backupCodes, enableErr := s.Enable2FA(ctx, adminID, secret, code)
+	if enableErr != nil {
+		return nil, nil, enableErr
+	}
+
+	token, tokErr := s.issueAccessToken(ctx, adminID, admin.RoleName)
+	if tokErr != nil {
+		return nil, nil, apperrors.ErrInternal
+	}
+	go s.repo.TouchLastActive(context.Background(), adminID)
+
+	admin.TwoFactor = true
+	return &LoginResult{AccessToken: token, Admin: admin}, backupCodes, nil
 }
 
 func (s *Service) validatePreAuthToken(tokenStr string) (string, error) {

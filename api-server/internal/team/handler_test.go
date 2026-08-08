@@ -31,6 +31,8 @@ type mockSvc struct {
 	logoutFn           func(ctx context.Context, adminID, jti string) error
 	setup2FAFn         func(ctx context.Context, adminID string) (string, string, error)
 	enable2FAFn        func(ctx context.Context, adminID, secret, code string) ([]string, error)
+	enrollBeginFn      func(ctx context.Context, setupToken string) (*team.TOTPEnrollment, error)
+	enrollCompleteFn   func(ctx context.Context, setupToken, secret, code string) (*team.LoginResult, []string, error)
 	disable2FAFn       func(ctx context.Context, adminID, password string) error
 	resetTOTPFn        func(ctx context.Context, adminID, currentCode string) (string, string, []string, error)
 	resetTOTPPreAuthFn func(ctx context.Context, preAuthToken, currentCode string) (string, string, []string, error)
@@ -79,6 +81,18 @@ func (m *mockSvc) Generate2FASetup(ctx context.Context, adminID string) (string,
 }
 func (m *mockSvc) Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error) {
 	return m.enable2FAFn(ctx, adminID, secret, code)
+}
+func (m *mockSvc) EnrollTOTPBegin(ctx context.Context, setupToken string) (*team.TOTPEnrollment, error) {
+	if m.enrollBeginFn != nil {
+		return m.enrollBeginFn(ctx, setupToken)
+	}
+	return &team.TOTPEnrollment{}, nil
+}
+func (m *mockSvc) EnrollTOTPComplete(ctx context.Context, setupToken, secret, code string) (*team.LoginResult, []string, error) {
+	if m.enrollCompleteFn != nil {
+		return m.enrollCompleteFn(ctx, setupToken, secret, code)
+	}
+	return &team.LoginResult{}, nil, nil
 }
 func (m *mockSvc) Disable2FA(ctx context.Context, adminID, password string) error {
 	return m.disable2FAFn(ctx, adminID, password)

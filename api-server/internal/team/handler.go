@@ -99,6 +99,51 @@ func (h *Handler) Reissue2FAChallenge(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/auth/2fa/verify
 // Step 2a: complete login with a TOTP authenticator code.
 // Body: { "pre_auth_token": "...", "code": "123456" }
+// POST /api/v1/admin/auth/totp/enroll-begin
+// Unauthenticated by design: the setup token IS the credential, and it can do
+// nothing else. Returns the secret + QR URI; stores nothing.
+func (h *Handler) EnrollTOTPBegin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SetupToken string `json:"setup_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SetupToken == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "setup_token is required")
+		return
+	}
+	enrollment, err := h.svc.EnrollTOTPBegin(r.Context(), body.SetupToken)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, enrollment)
+}
+
+// POST /api/v1/admin/auth/totp/enroll-complete
+// Verifies a live code against the scanned secret, stores it, and returns the
+// first real access token for the session. The only place a setup token is
+// exchanged for an access token.
+func (h *Handler) EnrollTOTPComplete(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SetupToken string `json:"setup_token"`
+		Secret     string `json:"secret"`
+		Code       string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+		body.SetupToken == "" || body.Secret == "" || body.Code == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "setup_token, secret and code are required")
+		return
+	}
+	result, backupCodes, err := h.svc.EnrollTOTPComplete(r.Context(), body.SetupToken, body.Secret, body.Code)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, struct {
+		*LoginResult
+		BackupCodes []string `json:"backup_codes"`
+	}{LoginResult: result, BackupCodes: backupCodes})
+}
+
 func (h *Handler) Verify2FA(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PreAuthToken string `json:"pre_auth_token"`

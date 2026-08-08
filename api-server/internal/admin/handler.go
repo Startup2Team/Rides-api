@@ -756,12 +756,16 @@ func (h *Handler) UploadDriverDocument(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DocumentType string `json:"document_type"`
 		FileURL      string `json:"file_url"`
+		// Optional. Vehicle-level documents (insurance, authorization) belong to one
+		// vehicle; when omitted the service resolves the driver's active vehicle, so
+		// existing admin callers that never sent it keep working.
+		VehicleID *string `json:"vehicle_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
 		return
 	}
-	if err := h.svc.UpsertDriverDocument(r.Context(), profileID, body.DocumentType, body.FileURL); err != nil {
+	if err := h.svc.UpsertDriverDocument(r.Context(), profileID, body.DocumentType, body.FileURL, body.VehicleID); err != nil {
 		respond.Error(w, err)
 		return
 	}

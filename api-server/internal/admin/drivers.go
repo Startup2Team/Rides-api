@@ -9,12 +9,23 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/workspace/ride-platform/pkg/documents"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
 // Admin driver management: approval lifecycle, listing, documents,
 // admin-created drivers, referrals and force-offline.
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint failure.
+// Matches on the SQLSTATE code rather than substring-searching the message,
+// which the copies in internal/driver and internal/auth do — a message
+// containing "unique" for any other reason would fool those.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID string) error {
 	var driverUserID, transportType string
@@ -479,8 +490,86 @@ func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]
 	return result, nil
 }
 
-func (s *Service) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string) error {
-	if !allowedDriverDocumentTypes[documentType] {
+// resolveVehicleForDocument decides which vehicle a vehicle-level document
+// belongs to.
+//
+// Explicit wins, and must belong to this driver. Otherwise we take the driver's
+// active vehicle, then any vehicle. If they have none, one is created from the
+// legacy fields on driver_profiles: admin registration writes vehicle_plate and
+// transport_type onto the PROFILE and never created a driver_vehicles row, so
+// admin-registered drivers had no vehicle to attach paperwork to at all — while
+// the self-service apply path has always mirrored one via CreateVehicleFromApply.
+// That gap is why per-vehicle documents needed backfilling here rather than just
+// a new column.
+func (s *Service) resolveVehicleForDocument(ctx context.Context, profileID string, requested *string) (*string, error) {
+	if requested != nil && *requested != "" {
+		var owned bool
+		if err := s.db.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM driver_vehicles WHERE id = $1 AND driver_id = $2)`,
+			*requested, profileID).Scan(&owned); err != nil {
+			return nil, err
+		}
+		if !owned {
+			return nil, apperrors.New(http.StatusBadRequest, "VALIDATION", "vehicle does not belong to this driver")
+		}
+		return requested, nil
+	}
+
+	var id string
+	err := s.db.QueryRow(ctx, `
+		SELECT id FROM driver_vehicles
+		 WHERE driver_id = $1
+		 ORDER BY is_active DESC, created_at ASC
+		 LIMIT 1
+	`, profileID).Scan(&id)
+	if err == nil {
+		return &id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	// No vehicle row at all — build one from the profile's legacy fields.
+	err = s.db.QueryRow(ctx, `
+		INSERT INTO driver_vehicles (
+			driver_id, vehicle_type_id, plate_number,
+			passenger_seats, load_capacity_kg, is_active
+		)
+		SELECT dp.id, vt.id, dp.vehicle_plate,
+		       dp.passenger_seats, dp.load_capacity_kg, TRUE
+		  FROM driver_profiles dp
+		  JOIN vehicle_types vt ON vt.code = dp.transport_type
+		 WHERE dp.id = $1
+		RETURNING id
+	`, profileID).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// transport_type matched no vehicle_types row, or the plate is missing.
+			return nil, apperrors.New(http.StatusConflict, "NO_VEHICLE",
+				"this driver has no vehicle on record — add a vehicle before attaching vehicle documents")
+		}
+		if isUniqueViolation(err) {
+			// Plate already registered to someone else; do not silently reassign it.
+			return nil, apperrors.New(http.StatusConflict, "DUPLICATE_PLATE",
+				"the plate on this driver's profile is already registered to another vehicle")
+		}
+		return nil, err
+	}
+	s.log.Info().Str("driver_profile_id", profileID).Str("vehicle_id", id).
+		Msg("admin: created a driver_vehicles row from legacy profile fields so vehicle documents can attach")
+	return &id, nil
+}
+
+// UpsertDriverDocument stores an admin-supplied document for a driver.
+//
+// vehicleID is optional. Vehicle-level types (insurance, authorization) must end
+// up attached to a vehicle — enforced by driver_documents_type_scope_chk — so
+// when the caller omits it we resolve the driver's vehicle. That keeps every
+// existing admin client working, which matters because admin registration is how
+// most drivers on this platform were created and none of those calls send it.
+func (s *Service) UpsertDriverDocument(ctx context.Context, profileID, documentType, fileURL string, vehicleID *string) error {
+	documentType = documents.Normalize(documentType)
+	if !documents.IsValid(documentType) {
 		return apperrors.New(http.StatusBadRequest, "VALIDATION", "unsupported document_type")
 	}
 	if fileURL == "" {
@@ -489,6 +578,17 @@ func (s *Service) UpsertDriverDocument(ctx context.Context, profileID, documentT
 	var exists bool
 	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE id = $1)`, profileID).Scan(&exists); err != nil || !exists {
 		return apperrors.ErrNotFound
+	}
+
+	if documents.RequiresVehicle(documentType) {
+		resolved, err := s.resolveVehicleForDocument(ctx, profileID, vehicleID)
+		if err != nil {
+			return err
+		}
+		vehicleID = resolved
+	} else {
+		// Person-level documents must carry no vehicle, or the CHECK rejects them.
+		vehicleID = nil
 	}
 	// Append-only, matching the driver-side path: supersede the live version and
 	// insert a new one rather than overwriting file_url in place. The old
@@ -504,16 +604,21 @@ func (s *Service) UpsertDriverDocument(ctx context.Context, profileID, documentT
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// IS NOT DISTINCT FROM, not `=`: vehicle_id is NULL for person-level documents
+	// and `NULL = NULL` yields NULL, so `=` would supersede nothing and the insert
+	// would collide with the partial unique index instead.
 	if _, err := tx.Exec(ctx, `
 		UPDATE driver_documents SET superseded_at = NOW()
-		 WHERE driver_id = $1 AND document_type = $2 AND superseded_at IS NULL
-	`, profileID, documentType); err != nil {
+		 WHERE driver_id = $1 AND document_type = $2
+		   AND vehicle_id IS NOT DISTINCT FROM $3
+		   AND superseded_at IS NULL
+	`, profileID, documentType, vehicleID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO driver_documents (driver_id, document_type, file_url, review_status)
-		VALUES ($1, $2, $3, 'PENDING')
-	`, profileID, documentType, fileURL); err != nil {
+		INSERT INTO driver_documents (driver_id, document_type, file_url, vehicle_id, review_status)
+		VALUES ($1, $2, $3, $4, 'PENDING')
+	`, profileID, documentType, fileURL, vehicleID); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -602,18 +707,12 @@ type AdminCreateDriverInput struct {
 	Documents       []DriverDocumentInput
 }
 
-// Allowed driver document types (aligned with mobile onboarding + admin registration).
-var allowedDriverDocumentTypes = map[string]bool{
-	"NATIONAL_ID_FRONT":          true,
-	"NATIONAL_ID_BACK":           true,
-	"LICENCE_FRONT":              true,
-	"LICENCE_BACK":               true,
-	"VEHICLE_INSURANCE":          true,
-	"VEHICLE_INSURANCE_BACK":     true,
-	"VEHICLE_AUTHORIZATION":      true,
-	"VEHICLE_AUTHORIZATION_BACK": true,
-	"PROFILE_SELFIE":             true,
-}
+// Document types now come from pkg/documents, which also records whether each
+// one belongs to a person or a vehicle. This map used to be the admin-side copy
+// and it disagreed with the driver-side `oneof` tag — admin accepted
+// PROFILE_SELFIE and the two *_BACK vehicle types that the driver API rejected,
+// so the same document had different names depending on who uploaded it and
+// neither side could reliably find the other's rows.
 
 // CreateDriverFromAdmin registers a new driver (user + profile) from the admin panel.
 // If a user with the phone already exists, reuse their account.
@@ -697,9 +796,18 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 	}
 
 	// Attach documents — mirrors mobile step 2 (license, insurance, authorization)
+	// vehicleID is nil: UpsertDriverDocument resolves it for vehicle-level types,
+	// creating the driver_vehicles row from this profile's plate on the first one.
 	for _, doc := range in.Documents {
-		if err := s.UpsertDriverDocument(ctx, profileID, doc.DocumentType, doc.FileURL); err != nil {
-			s.log.Warn().Err(err).Str("document_type", doc.DocumentType).Msg("admin: failed to attach document during driver registration")
+		if err := s.UpsertDriverDocument(ctx, profileID, doc.DocumentType, doc.FileURL, nil); err != nil {
+			// Logged, not fatal — the driver record itself is already committed and
+			// failing here would leave a registered driver with no way to retry. But
+			// a dropped KYC document must be visible, since the driver is created
+			// pre-APPROVED and would otherwise be approved on missing paperwork.
+			s.log.Error().Err(err).
+				Str("driver_profile_id", profileID).
+				Str("document_type", doc.DocumentType).
+				Msg("admin: driver registered but a document could not be attached — driver is approved on incomplete papers")
 		}
 	}
 

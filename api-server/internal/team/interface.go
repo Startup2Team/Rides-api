@@ -12,6 +12,8 @@ type TeamService interface {
 	Logout(ctx context.Context, adminID, jti string) error
 	Generate2FASetup(ctx context.Context, adminID string) (secret, otpauthURL string, err error)
 	Enable2FA(ctx context.Context, adminID, secret, code string) ([]string, error)
+	EnrollTOTPBegin(ctx context.Context, setupToken string) (*TOTPEnrollment, error)
+	EnrollTOTPComplete(ctx context.Context, setupToken, secret, code string) (*LoginResult, []string, error)
 	Disable2FA(ctx context.Context, adminID, password string) error
 	ResetTOTP(ctx context.Context, adminID, currentCode string) (secret, qr string, backupCodes []string, err error)
 	ResetTOTPFromPreAuth(ctx context.Context, preAuthToken, currentCode string) (secret, qr string, backupCodes []string, err error)

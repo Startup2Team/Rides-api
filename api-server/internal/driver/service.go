@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/workspace/ride-platform/config"
+	"github.com/workspace/ride-platform/pkg/documents"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
@@ -218,12 +219,50 @@ func (s *Service) AcceptPolicy(ctx context.Context, userID string) error {
 // approved on genuine documents and then substitute anything while staying
 // APPROVED — the hole this closes. It is enforced here, server-side, because
 // hiding the button in the app is not enforcement.
-func (s *Service) UploadDocument(ctx context.Context, userID, documentType, fileURL, sha256 string) error {
+// UploadDocument records one KYC document for the calling driver.
+//
+// vehicleID must be supplied for vehicle-level types and omitted for
+// person-level ones. Both directions are enforced: a mismatch is a 400 here
+// rather than a constraint violation surfacing as a 500, and the vehicle must
+// belong to this driver — without that check a driver could attach paperwork to
+// someone else's vehicle and push a stranger's account back into review.
+func (s *Service) UploadDocument(ctx context.Context, userID, documentType, fileURL, sha256 string, vehicleID *string) error {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		return err
 	}
-	if err := s.repo.UpsertDocument(ctx, profile.ID, documentType, fileURL, sha256, false); err != nil {
+
+	documentType = documents.Normalize(documentType)
+	if !documents.IsValid(documentType) {
+		return apperrors.New(http.StatusBadRequest, "UNSUPPORTED_DOCUMENT_TYPE",
+			"unsupported document type: "+documentType)
+	}
+
+	needsVehicle := documents.RequiresVehicle(documentType)
+	switch {
+	case needsVehicle && (vehicleID == nil || *vehicleID == ""):
+		return apperrors.New(http.StatusBadRequest, "VEHICLE_REQUIRED",
+			documentType+" belongs to a specific vehicle — vehicle_id is required")
+	case !needsVehicle && vehicleID != nil && *vehicleID != "":
+		return apperrors.New(http.StatusBadRequest, "VEHICLE_NOT_APPLICABLE",
+			documentType+" describes the driver, not a vehicle — omit vehicle_id")
+	}
+
+	if needsVehicle {
+		owned, ownErr := s.repo.VehicleBelongsToDriver(ctx, profile.ID, *vehicleID)
+		if ownErr != nil {
+			return ownErr
+		}
+		if !owned {
+			// 404 rather than 403: the caller should not learn whether a vehicle id
+			// they do not own exists.
+			return apperrors.New(http.StatusNotFound, "VEHICLE_NOT_FOUND", "vehicle not found")
+		}
+	} else {
+		vehicleID = nil // normalise "" to NULL so the CHECK constraint holds
+	}
+
+	if err := s.repo.UpsertDocument(ctx, profile.ID, documentType, fileURL, sha256, vehicleID, false); err != nil {
 		return err
 	}
 

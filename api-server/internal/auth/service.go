@@ -89,7 +89,6 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 	if s.cfg.Env != "production" {
 		s.log.Warn().
 			Str("phone", logger.MaskMSISDN(phone)).
-			Str("phone", phone).
 			Str("otp", otp).
 			Msg("⚠️  DEV MODE — OTP (not sent via SMS)")
 		devOTP = otp
@@ -97,7 +96,6 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 
 	if err := s.telephony.SendOTP(ctx, phone, otp); err != nil {
 		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: sms send failed")
-		s.log.Error().Err(err).Str("phone", phone).Msg("otp: sms send failed")
 		if s.cfg.Env == "production" {
 			return "", fmt.Errorf("sms send: %w", err)
 		}
@@ -124,7 +122,6 @@ func (s *Service) initiateWithPindoVerify(ctx context.Context, phone, purpose, f
 	reqID, err := s.telephony.StartVerify(ctx, phone)
 	if err != nil {
 		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: pindo verify start failed")
-		s.log.Error().Err(err).Str("phone", phone).Msg("otp: pindo verify start failed")
 		return fmt.Errorf("verify start: %w", err)
 	}
 	s.redis.Set(ctx, "otp:verify:"+phone, reqID, otpExpiryMinutes*time.Minute)
@@ -152,7 +149,6 @@ func (s *Service) verifyWithPindo(ctx context.Context, phone, code string) error
 	ok, err := s.telephony.CheckVerify(ctx, reqID, code)
 	if err != nil {
 		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: pindo verify check failed")
-		s.log.Error().Err(err).Str("phone", phone).Msg("otp: pindo verify check failed")
 		return apperrors.New(502, "VERIFY_UNAVAILABLE", "Verification service is unavailable. Try again shortly.")
 	}
 	if !ok {
