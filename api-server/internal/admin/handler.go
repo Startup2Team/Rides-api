@@ -245,6 +245,7 @@ func (h *Handler) ListRides(w http.ResponseWriter, r *http.Request) {
 	limit, offset := paginate(r)
 	rides, total, err := h.svc.ListRides(r.Context(),
 		q.Get("status"), q.Get("transport_type"), q.Get("search"),
+		q.Get("from"), q.Get("to"),
 		limit, offset)
 	if err != nil {
 		respond.Error(w, err)

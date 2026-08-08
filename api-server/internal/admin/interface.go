@@ -32,7 +32,7 @@ type AdminService interface {
 	ClearOTPLockout(ctx context.Context, userID string) error
 	ClearDeviceCollisionFlag(ctx context.Context, userID, deviceID string) error
 	GetAccountTimeline(ctx context.Context, userID string, limit int) (map[string]interface{}, error)
-	ListRides(ctx context.Context, status, transportType, search string, limit, offset int) ([]map[string]interface{}, int, error)
+	ListRides(ctx context.Context, status, transportType, search, from, to string, limit, offset int) ([]map[string]interface{}, int, error)
 	GetRide(ctx context.Context, rideID string) (map[string]interface{}, error)
 	ListNegotiations(ctx context.Context, status, search string, limit, offset int) ([]map[string]interface{}, int, error)
 	GetNegotiation(ctx context.Context, rideID string) (map[string]interface{}, error)
