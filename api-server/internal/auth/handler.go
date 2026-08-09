@@ -107,12 +107,36 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respond.OK(w, map[string]interface{}{
+	respond.OK(w, sessionResponse(tokens, user))
+}
+
+// sessionResponse is what a client learns the moment it authenticates.
+//
+// This used to carry only the tokens, role_state and user_id — no name, no
+// phone. The mobile app therefore had no idea WHO had just signed in: it set
+// the display name to the literal string "User" and fired a second
+// GET /customer/profile to find out. When that call failed (offline, a token
+// race, an error swallowed by the client) the app kept whatever name was in
+// local storage, so the previous account's name stayed on screen. Identity is
+// not a follow-up question — the response that grants a session states whose
+// session it is.
+func sessionResponse(tokens *TokenPair, user *User) map[string]interface{} {
+	return map[string]interface{}{
 		"access_token":  tokens.AccessToken,
 		"refresh_token": tokens.RefreshToken,
 		"role_state":    user.RoleState,
 		"user_id":       user.ID,
-	})
+		"phone_number":  user.PhoneNumber,
+		"full_name":     derefOrEmpty(user.FullName),
+		"email":         derefOrEmpty(user.Email),
+	}
+}
+
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // POST /api/v1/auth/login
@@ -142,12 +166,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respond.OK(w, map[string]interface{}{
-		"access_token":  tokens.AccessToken,
-		"refresh_token": tokens.RefreshToken,
-		"role_state":    user.RoleState,
-		"user_id":       user.ID,
-	})
+	respond.OK(w, sessionResponse(tokens, user))
 }
 
 // POST /api/v1/customer/phone/change/request  (authenticated)
