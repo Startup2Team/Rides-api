@@ -684,7 +684,7 @@ func (e *Engine) onDeclined(ctx context.Context, rideID string, c *candidate) {
 	e.log.Info().Str("ride_id", rideID).Str("driver_id", c.profileID).Msg("matching: driver declined/timeout")
 	key := rkeys.K.DriverDailyDeclines(c.profileID)
 	e.redis.Incr(ctx, key)
-	e.redis.ExpireAt(ctx, key, endOfDay())
+	e.redis.ExpireAt(ctx, key, e.endOfDay())
 }
 
 func sortCandidates(cs []*candidate) {
@@ -695,5 +695,8 @@ func sortCandidates(cs []*candidate) {
 	}
 }
 
-// endOfDay is kept as a package-level alias for readability at call sites.
-func endOfDay() time.Time { return timeutil.EndOfDay() }
+// endOfDay is when today's decline counter stops counting — local midnight in
+// the platform timezone, matching the driver and ride services.
+func (e *Engine) endOfDay() time.Time {
+	return timeutil.EndOfLocalDay(time.Now(), e.cfg.Location())
+}

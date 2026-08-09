@@ -660,19 +660,32 @@ func (r *Repository) UpdateUserRoleState(ctx context.Context, userID, roleState 
 	return err
 }
 
-// GetEarnings returns the gross fare total AND the number of completed rides for
-// the driver within the interval (e.g. "1 day", "7 days").
-func (r *Repository) GetEarnings(ctx context.Context, driverUserID string, interval string) (float64, int, error) {
+// GetEarnings returns the gross fare total AND the number of completed rides the
+// driver finished within the half-open window [start, end).
+//
+// The window is passed in as explicit instants rather than derived here, because
+// "today" is a local-calendar concept: callers build it with timeutil.DayWindow
+// in the configured platform timezone. This used to be a rolling
+// `completed_at >= NOW() - '1 day'` interval labelled "today", which meant a
+// driver's morning total still carried the previous evening's rides and then
+// shrank through the day as those rides aged past the 24-hour mark.
+//
+// The fare column matches the owner digest (internal/digest/repository.go) —
+// final_fare_rwf when the fare engine has settled one, otherwise the agreed
+// fare. Summing agreed_fare alone made the driver's app and the digest report
+// different money for identical rides.
+func (r *Repository) GetEarnings(ctx context.Context, driverUserID string, start, end time.Time) (float64, int, error) {
 	var total float64
 	var count int
 	err := r.db.QueryRow(ctx, `
-		SELECT COALESCE(SUM(r.agreed_fare), 0), COUNT(*)
+		SELECT COALESCE(SUM(COALESCE(r.final_fare_rwf, r.agreed_fare, 0)), 0), COUNT(*)
 		FROM rides r
 		JOIN driver_profiles dp ON dp.id = r.driver_id
 		WHERE dp.user_id = $1
 		  AND r.status = 'COMPLETED'
-		  AND r.completed_at >= NOW() - ($2 || '')::INTERVAL
-	`, driverUserID, interval).Scan(&total, &count)
+		  AND r.completed_at >= $2
+		  AND r.completed_at < $3
+	`, driverUserID, start, end).Scan(&total, &count)
 	return total, count, err
 }
 

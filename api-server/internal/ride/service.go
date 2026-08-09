@@ -287,7 +287,7 @@ func (s *Service) recordCancelPenalty(ctx context.Context, userID, role string) 
 	if err != nil {
 		return
 	}
-	s.redis.ExpireAt(ctx, dailyKey, endOfDay())
+	s.redis.ExpireAt(ctx, dailyKey, s.endOfDay())
 	n := int(count)
 
 	if warnAt > 0 && n == warnAt {
@@ -1094,7 +1094,13 @@ func (s *Service) NotifyNegotiationOffer(ctx context.Context, rideID, customerID
 	s.notify.SendToAllDevices(ctx, customerID, "New fare offer", body, "ride", data)
 }
 
-func endOfDay() time.Time { return timeutil.EndOfDay() }
+// endOfDay is when today's cancellation counter stops counting — local midnight
+// in the platform timezone. On UTC midnight (02:00 in Kigali) a driver's fourth
+// cancel at 01:55 local counted against the previous day and tripped the ban
+// threshold, on what their own calendar called a new day's first cancel.
+func (s *Service) endOfDay() time.Time {
+	return timeutil.EndOfLocalDay(time.Now(), s.cfg.Location())
+}
 
 // withinRadius checks whether a driver is within radiusM of target.
 //

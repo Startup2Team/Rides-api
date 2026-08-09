@@ -11,6 +11,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// Embed the IANA timezone database in the binary. Every daily figure — driver
+	// earnings, penalty counters, the ops digest — is defined in Africa/Kigali,
+	// and time.LoadLocation silently falls back to UTC when the runtime image has
+	// no /usr/share/zoneinfo (debian-slim ships without it). A UTC fallback moves
+	// every day boundary to 02:00 local, which is the failure this whole package
+	// exists to prevent, so the data comes with us rather than being assumed.
+	_ "time/tzdata"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"

@@ -8,12 +8,21 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/workspace/ride-platform/pkg/timeutil"
 )
 
 type Config struct {
 	Port        string
 	Env         string
 	AdminOrigin string // CORS allowed origin for admin frontend (production URL)
+	// Timezone is the IANA name defining a calendar "day" platform-wide —
+	// driver daily earnings, daily penalty counters, digests. Rwanda is UTC+2,
+	// so leaving this at UTC would roll every daily figure over at 02:00 local.
+	// PLATFORM_TIMEZONE — default Africa/Kigali.
+	Timezone string
+	// location caches the parsed Timezone; read it via Location().
+	location *time.Location
 
 	Database DatabaseConfig
 	Redis    RedisConfig
@@ -42,6 +51,19 @@ type Config struct {
 	Analytics struct {
 		BatchSize int
 	}
+}
+
+// Location returns the platform timezone that defines a calendar day. Load()
+// resolves it once; a Config built directly in a test resolves on demand. Never
+// nil, so callers can pass the result straight to timeutil.
+func (c *Config) Location() *time.Location {
+	if c == nil {
+		return timeutil.Location("")
+	}
+	if c.location != nil {
+		return c.location
+	}
+	return timeutil.Location(c.Timezone)
 }
 
 // SecurityConfig holds API-protection tunables.
@@ -355,7 +377,11 @@ func Load() (*Config, error) {
 	cfg.Telegram.ChatID = getEnv("TELEGRAM_CHAT_ID", "")
 	cfg.Telegram.DigestEnabled = getEnvBool("DIGEST_ENABLED", true)
 	cfg.Telegram.DigestHour = getEnvInt("DIGEST_HOUR", 7)
-	cfg.Telegram.DigestTimezone = getEnv("DIGEST_TIMEZONE", "Africa/Kigali")
+	// DIGEST_TIMEZONE predates the platform-wide setting and stays honoured so
+	// existing deployments keep working; PLATFORM_TIMEZONE is the one to set now.
+	cfg.Timezone = getEnv("PLATFORM_TIMEZONE", timeutil.FallbackTimezone)
+	cfg.location = timeutil.Location(cfg.Timezone)
+	cfg.Telegram.DigestTimezone = getEnv("DIGEST_TIMEZONE", cfg.Timezone)
 
 	cfg.GMaps.APIKey = getEnv("GOOGLE_MAPS_API_KEY", "")
 

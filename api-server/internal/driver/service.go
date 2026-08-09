@@ -17,6 +17,7 @@ import (
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
+	"github.com/workspace/ride-platform/pkg/timeutil"
 
 	"github.com/workspace/ride-platform/internal/analytics"
 )
@@ -645,7 +646,7 @@ func (s *Service) RecordDecline(ctx context.Context, userID string) error {
 
 	key := rkeys.K.DriverDailyDeclines(profile.ID)
 	count, _ := s.redis.Incr(ctx, key).Result()
-	s.redis.ExpireAt(ctx, key, endOfDay())
+	s.redis.ExpireAt(ctx, key, s.endOfDay())
 
 	s.analytics.Publish(ctx, "driver.declined_request", "DRIVER", userID, nil, map[string]interface{}{
 		"driver_id":           profile.ID,
@@ -677,20 +678,24 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 	return s.repo.FindProfileByUserID(ctx, userID)
 }
 
-// GetDailyEarnings returns total fare revenue for today.
 // GetDailyEarnings returns today's driver payout and the number of rides
-// completed today.
+// completed today — "today" being the local calendar day in the platform
+// timezone, so the figure resets at local midnight and never counts a ride
+// twice or shrinks as rides age.
 func (s *Service) GetDailyEarnings(ctx context.Context, driverUserID string) (float64, int, error) {
-	gross, count, err := s.repo.GetEarnings(ctx, driverUserID, "1 day")
+	start, end := timeutil.DayWindow(time.Now(), s.cfg.Location())
+	gross, count, err := s.repo.GetEarnings(ctx, driverUserID, start, end)
 	if err != nil {
 		return 0, 0, err
 	}
 	return CalculateDriverPayout(gross), count, nil
 }
 
-// GetWeeklyEarnings returns total fare revenue for the last 7 days.
+// GetWeeklyEarnings returns the payout across the last 7 local calendar days,
+// today included.
 func (s *Service) GetWeeklyEarnings(ctx context.Context, driverUserID string) (float64, error) {
-	gross, _, err := s.repo.GetEarnings(ctx, driverUserID, "7 days")
+	start, end := timeutil.DaysWindow(time.Now(), s.cfg.Location(), 7)
+	gross, _, err := s.repo.GetEarnings(ctx, driverUserID, start, end)
 	if err != nil {
 		return 0, err
 	}
@@ -855,9 +860,11 @@ func contains(s, sub string) bool {
 	return false
 }
 
-func endOfDay() time.Time {
-	now := time.Now().UTC()
-	return time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
+// endOfDay is when the current day's counters stop counting — local midnight in
+// the platform timezone, not UTC midnight (which lands at 02:00 in Kigali and
+// would reset a night driver's counters mid-shift).
+func (s *Service) endOfDay() time.Time {
+	return timeutil.EndOfLocalDay(time.Now(), s.cfg.Location())
 }
 
 // jitter adds a small random offset to driver coordinates before sending them

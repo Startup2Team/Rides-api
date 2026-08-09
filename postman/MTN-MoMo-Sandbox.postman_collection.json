@@ -1,0 +1,240 @@
+{
+  "info": {
+    "name": "MTN MoMo — Sandbox (Rides)",
+    "_postman_id": "b1f7c0de-1a2b-4c3d-9e10-000000000001",
+    "description": "MTN MoMo Open API sandbox flow for Rides.\n\nRun the requests top-to-bottom the first time:\n1. **Create API User** — provisions an API user keyed on the UUID in `referenceId`.\n2. **Get API User** — confirms the user + callback host.\n3. **Create API Key** — returns the apiKey; a test script saves it to the `apiKey` collection variable automatically.\n4. **Create Access Token** — Basic auth (username=`referenceId`, password=`apiKey`); a test script saves `token` automatically.\n5. **Request to Pay / Status / Balance** — use the bearer token.\n\nGOTCHAS (sandbox):\n- Currency MUST be **EUR** in sandbox (production Rwanda uses RWF).\n- `X-Target-Environment` is **sandbox**.\n- Test payer MSISDN `46733123453` succeeds. Certain numbers/amounts force FAILED for testing.\n- The token expires (~1h); just re-run 'Create Access Token'.\n- Replace `callbackUrl` with your own https://webhook.site/<your-id> to see callbacks.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Provisioning (Sandbox)",
+      "item": [
+        {
+          "name": "Create API User",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Reference-Id", "value": "{{referenceId}}" },
+              { "key": "Ocp-Apim-Subscription-Key", "value": "{{subscriptionKey}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"providerCallbackHost\": \"{{providerCallbackHost}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1_0/apiuser",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1_0", "apiuser"]
+            },
+            "description": "Creates the API user. Reference-Id (a UUID v4) becomes the API user id. Expect 201 Created (empty body)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () { pm.response.to.have.status(201); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get API User",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Ocp-Apim-Subscription-Key", "value": "{{subscriptionKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1_0/apiuser/{{referenceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1_0", "apiuser", "{{referenceId}}"]
+            },
+            "description": "Returns providerCallbackHost + targetEnvironment. The API key itself is NOT retrievable — regenerate if lost."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create API Key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Ocp-Apim-Subscription-Key", "value": "{{subscriptionKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1_0/apiuser/{{referenceId}}/apikey",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1_0", "apiuser", "{{referenceId}}", "apikey"]
+            },
+            "description": "Returns { apiKey }. The test script saves it to the `apiKey` collection variable so the token request can use it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', function () { pm.response.to.have.status(201); });",
+                  "var body = pm.response.json();",
+                  "if (body && body.apiKey) {",
+                  "  pm.collectionVariables.set('apiKey', body.apiKey);",
+                  "  console.log('Saved apiKey to collection variable.');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Collection (Request to Pay)",
+      "item": [
+        {
+          "name": "Create Access Token",
+          "request": {
+            "auth": {
+              "type": "basic",
+              "basic": [
+                { "key": "username", "value": "{{referenceId}}" },
+                { "key": "password", "value": "{{apiKey}}" }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "Ocp-Apim-Subscription-Key", "value": "{{subscriptionKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/collection/token/",
+              "host": ["{{baseUrl}}"],
+              "path": ["collection", "token", ""]
+            },
+            "description": "OAuth2 client-credentials token. Basic auth: username=API user (referenceId), password=API key. The test script saves access_token to `token`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "var body = pm.response.json();",
+                  "if (body && body.access_token) {",
+                  "  pm.collectionVariables.set('token', body.access_token);",
+                  "  console.log('Saved bearer token to collection variable.');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Request to Pay",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "X-Reference-Id", "value": "{{transactionId}}" },
+              { "key": "X-Target-Environment", "value": "{{targetEnvironment}}" },
+              { "key": "Ocp-Apim-Subscription-Key", "value": "{{subscriptionKey}}" },
+              { "key": "X-Callback-Url", "value": "{{callbackUrl}}", "disabled": true },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": \"{{amount}}\",\n  \"currency\": \"{{currency}}\",\n  \"externalId\": \"{{$guid}}\",\n  \"payer\": {\n    \"partyIdType\": \"MSISDN\",\n    \"partyId\": \"{{partyId}}\"\n  },\n  \"payerMessage\": \"Rides trip payment\",\n  \"payeeNote\": \"Rides\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/collection/v1_0/requesttopay",
+              "host": ["{{baseUrl}}"],
+              "path": ["collection", "v1_0", "requesttopay"]
+            },
+            "description": "Asynchronous collection request. Returns 202 Accepted; status starts PENDING then SUCCESSFUL/FAILED. A fresh transaction UUID is generated per send (pre-request script). Enable X-Callback-Url to receive the callback at your webhook.site URL. Sandbox currency MUST be EUR."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh UUID per transaction; reused by the status GET below.",
+                  "pm.collectionVariables.set('transactionId', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted', function () { pm.response.to.have.status(202); });",
+                  "console.log('transactionId =', pm.collectionVariables.get('transactionId'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Request to Pay Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "X-Target-Environment", "value": "{{targetEnvironment}}" },
+              { "key": "Ocp-Apim-Subscription-Key", "value": "{{subscriptionKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/collection/v1_0/requesttopay/{{transactionId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["collection", "v1_0", "requesttopay", "{{transactionId}}"]
+            },
+            "description": "Polls the status of the last Request to Pay (SUCCESSFUL / PENDING / FAILED)."
+          }
+        },
+        {
+          "name": "Get Account Balance",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "X-Target-Environment", "value": "{{targetEnvironment}}" },
+              { "key": "Ocp-Apim-Subscription-Key", "value": "{{subscriptionKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/collection/v1_0/account/balance",
+              "host": ["{{baseUrl}}"],
+              "path": ["collection", "v1_0", "account", "balance"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "https://sandbox.momodeveloper.mtn.com" },
+    { "key": "subscriptionKey", "value": "2d9413185e9d48419db38afe6217a2fa" },
+    { "key": "referenceId", "value": "6d44b7ec-a0f9-4459-8f64-4e642ad6f806" },
+    { "key": "apiKey", "value": "1c843e57e11448779525ee9782d21b68" },
+    { "key": "token", "value": "" },
+    { "key": "targetEnvironment", "value": "sandbox" },
+    { "key": "providerCallbackHost", "value": "webhook.site" },
+    { "key": "callbackUrl", "value": "https://webhook.site/REPLACE-WITH-YOUR-ID" },
+    { "key": "transactionId", "value": "" },
+    { "key": "partyId", "value": "56733123450" },
+    { "key": "currency", "value": "EUR" },
+    { "key": "amount", "value": "100" }
+  ]
+}
