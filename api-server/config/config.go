@@ -316,8 +316,12 @@ type PenaltyConfig struct {
 }
 
 func Load() (*Config, error) {
-	// Load .env if present (no-op in production if file missing)
-	_ = godotenv.Load()
+	// Load .env or custom ENV_FILE if present
+	if envFile := os.Getenv("ENV_FILE"); envFile != "" {
+		_ = godotenv.Load(envFile)
+	} else {
+		_ = godotenv.Load()
+	}
 
 	cfg := &Config{}
 

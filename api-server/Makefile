@@ -39,6 +39,11 @@ db-down:
 dev: env
 	$(GO) run ./cmd/server
 
+dev-staging:
+	@ENV_FILE=$$(test -f .env.stage && echo .env.stage || echo .env.staging) ; \
+	echo "🚀 Starting server with $$ENV_FILE..." ; \
+	ENV_FILE=$$ENV_FILE $(GO) run ./cmd/server
+
 docker-up: env
 	docker compose up --build
 
