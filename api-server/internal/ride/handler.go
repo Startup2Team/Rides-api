@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
@@ -60,10 +61,21 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Expose the search budget so the app can show an honest countdown instead
+	// of hardcoding its own guess. Mirrors the matching engine's fallback for a
+	// non-positive config value. The deadline is anchored on the ride's DB
+	// creation time, which is when StartSearch fires.
+	giveUpSeconds := h.svc.cfg.Matching.GiveUpSeconds
+	if giveUpSeconds <= 0 {
+		giveUpSeconds = 90
+	}
+
 	respond.Created(w, map[string]interface{}{
-		"ride_id":      ride.ID,
-		"status":       ride.Status,
-		"ride_version": ride.RideVersion,
+		"ride_id":            ride.ID,
+		"status":             ride.Status,
+		"ride_version":       ride.RideVersion,
+		"give_up_seconds":    giveUpSeconds,
+		"search_deadline_at": ride.CreatedAt.Add(time.Duration(giveUpSeconds) * time.Second).UTC().Format(time.RFC3339),
 	})
 }
 

@@ -457,10 +457,34 @@ func (repo *Repository) Transition(ctx context.Context, rideID string, from, to 
 	return nil
 }
 
+// AssignDriver attaches the accepting driver — but only while the ride is still
+// SEARCHING. Without the status guard an accept that raced a customer cancel
+// (or another resolution path) stamped a driver onto a dead ride, and the
+// matching loop then marched that driver into ON_TRIP on a ride that no longer
+// existed for the customer.
 func (repo *Repository) AssignDriver(ctx context.Context, rideID, driverProfileID string) error {
-	_, err := repo.db.Exec(ctx,
-		`UPDATE rides SET driver_id = $1, updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $2`,
+	tag, err := repo.db.Exec(ctx,
+		`UPDATE rides SET driver_id = $1, updated_at = NOW(), ride_version = ride_version + 1
+		 WHERE id = $2 AND status = 'SEARCHING'`,
 		driverProfileID, rideID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrInvalidTransition
+	}
+	return nil
+}
+
+// UnassignDriver clears driver_id from a ride that got cancelled between
+// AssignDriver and the MATCHED transition, so a ride the customer cancelled
+// before anyone truly took it doesn't record a driver in its history.
+func (repo *Repository) UnassignDriver(ctx context.Context, rideID string) error {
+	_, err := repo.db.Exec(ctx,
+		`UPDATE rides SET driver_id = NULL, updated_at = NOW(), ride_version = ride_version + 1
+		 WHERE id = $1 AND status = 'CANCELLED'`,
+		rideID,
 	)
 	return err
 }
@@ -678,6 +702,10 @@ type StaleRide struct {
 	DriverUserID    string
 	TransportType   string
 	AgreedFare      *float64
+	// DestinationPoint lets the finalizer check whether the driver's last known
+	// position is anywhere near where the trip was supposed to end before it
+	// pays out the full fare.
+	DestinationPoint geo.Point
 }
 
 // FindStaleInProgress returns rides stuck IN_PROGRESS longer than
@@ -685,7 +713,9 @@ type StaleRide struct {
 // killed the app, etc.).
 func (repo *Repository) FindStaleInProgress(ctx context.Context, olderThanMinutes int) ([]*StaleRide, error) {
 	rows, err := repo.db.Query(ctx, `
-		SELECT r.id, r.customer_id, r.driver_id, dp.user_id, r.transport_type, r.agreed_fare
+		SELECT r.id, r.customer_id, r.driver_id, dp.user_id, r.transport_type, r.agreed_fare,
+		       ST_Y(r.destination_point::geometry) AS dest_lat,
+		       ST_X(r.destination_point::geometry) AS dest_lng
 		FROM rides r
 		JOIN driver_profiles dp ON dp.id = r.driver_id
 		WHERE r.status = 'IN_PROGRESS'
@@ -699,10 +729,56 @@ func (repo *Repository) FindStaleInProgress(ctx context.Context, olderThanMinute
 	var out []*StaleRide
 	for rows.Next() {
 		sr := &StaleRide{}
-		if err := rows.Scan(&sr.ID, &sr.CustomerID, &sr.DriverProfileID, &sr.DriverUserID, &sr.TransportType, &sr.AgreedFare); err != nil {
+		var destLat, destLng float64
+		if err := rows.Scan(&sr.ID, &sr.CustomerID, &sr.DriverProfileID, &sr.DriverUserID, &sr.TransportType, &sr.AgreedFare, &destLat, &destLng); err != nil {
 			continue
 		}
+		sr.DestinationPoint = geo.Point{Lat: destLat, Lng: destLng}
 		out = append(out, sr)
+	}
+	return out, rows.Err()
+}
+
+// AbandonCandidate is the projection the abandonment watchdog scans: a live
+// ride whose driver may have gone dark. The Redis/socket silence checks happen
+// in the service — this query only pre-filters on how long the ride has sat
+// without any state change.
+type AbandonCandidate struct {
+	ID              string
+	CustomerID      string
+	DriverProfileID string
+	DriverUserID    string
+	TransportType   string
+	Status          Status
+	UpdatedAt       time.Time
+}
+
+// FindAbandonCandidates returns rides that have not changed state for at least
+// activeMinutes (CONFIRMED / DRIVER_EN_ROUTE / DRIVER_ARRIVED) or
+// onboardMinutes (IN_PROGRESS). rides.updated_at is bumped on every transition
+// but never by GPS pings, so "old updated_at" means the ride itself has
+// stalled — whether the DRIVER is gone is decided by the caller.
+func (repo *Repository) FindAbandonCandidates(ctx context.Context, activeMinutes, onboardMinutes int) ([]*AbandonCandidate, error) {
+	rows, err := repo.db.Query(ctx, `
+		SELECT r.id, r.customer_id, r.driver_id, dp.user_id, r.transport_type, r.status, r.updated_at
+		FROM rides r
+		JOIN driver_profiles dp ON dp.id = r.driver_id
+		WHERE (r.status IN ('CONFIRMED','DRIVER_EN_ROUTE','DRIVER_ARRIVED')
+		       AND r.updated_at < NOW() - make_interval(mins => $1))
+		   OR (r.status = 'IN_PROGRESS'
+		       AND r.updated_at < NOW() - make_interval(mins => $2))
+	`, activeMinutes, onboardMinutes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*AbandonCandidate
+	for rows.Next() {
+		c := &AbandonCandidate{}
+		if err := rows.Scan(&c.ID, &c.CustomerID, &c.DriverProfileID, &c.DriverUserID, &c.TransportType, &c.Status, &c.UpdatedAt); err != nil {
+			continue
+		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

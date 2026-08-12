@@ -424,13 +424,55 @@ func (s *Service) ChargeForAgreedFare(ctx context.Context, rideID string) {
 	s.log.Info().Str("ride_id", rideID).Str("driver_user_id", driverUserID).Msg("ride: credit charged on fare agreement")
 }
 
-// FinalizeStaleInProgressRides auto-completes rides stuck IN_PROGRESS past
+// finalizeNearDestinationM is how close (in metres) a vanished driver's last
+// known position must be to the destination for the dead-man finalizer to
+// settle the ride as COMPLETED at full fare. Wider than the 200m complete
+// geofence because the "last known" fix can predate the actual drop-off by a
+// couple of minutes of city driving.
+const finalizeNearDestinationM = 300
+
+// finalizeNearDestination is the finalizer's pure decision: settle as
+// COMPLETED only when we have a last-known position for the driver AND it is
+// within radiusM of the destination. No position at all means we cannot verify
+// the trip happened, and paying the full fare on no evidence is exactly the
+// abandoner's exploit — so that case cancels.
+func finalizeNearDestination(loc geo.Point, hasLoc bool, dest geo.Point, radiusM int) bool {
+	if !hasLoc {
+		return false
+	}
+	return geo.DistanceKM(loc, dest)*1000 <= float64(radiusM)
+}
+
+// staleRideDriverPoint returns the driver's freshest position we know for this
+// ride: the per-ride relay cache first (30-min TTL, written on every location
+// relay during the trip), then the driver's general last-known point.
+func (s *Service) staleRideDriverPoint(ctx context.Context, rideID, driverUserID, driverProfileID string) (geo.Point, bool) {
+	raw, err := s.redis.Get(ctx, rkeys.K.RideDriverLocation(rideID)).Result()
+	if err == nil {
+		var loc struct {
+			Lat float64 `json:"lat"`
+			Lng float64 `json:"lng"`
+		}
+		if json.Unmarshal([]byte(raw), &loc) == nil && (loc.Lat != 0 || loc.Lng != 0) {
+			return geo.Point{Lat: loc.Lat, Lng: loc.Lng}, true
+		}
+	}
+	return s.driverLastKnownPoint(ctx, driverUserID, &driverProfileID)
+}
+
+// FinalizeStaleInProgressRides settles rides stuck IN_PROGRESS past
 // cfg.Ride.MaxInProgressMinutes — a driver started a trip but never completed
 // it (went offline, killed the app). Without this the ride lingers forever as a
-// ghost AND keeps the driver locked ON_TRIP, unable to take new work. The credit
-// was charged at fare agreement, so there is nothing to charge or refund here —
-// we just settle the final fare and release both parties. Returns how many were
-// finalized. Designed to be called on a periodic background tick.
+// ghost AND keeps the driver locked ON_TRIP, unable to take new work.
+//
+// Which way it settles depends on where the driver was last seen. Near the
+// destination → the trip plainly happened, complete at the agreed fare (the
+// driver just never tapped Complete). Anywhere else, or nowhere at all →
+// driver-fault cancel: auto-completing unconditionally paid the FULL fare and
+// a rides-count bump to a driver who accepted, started, and vanished. The
+// credit was charged at fare agreement either way, so nothing is charged or
+// refunded here, and the customer pays nothing on the cancel path. Returns how
+// many rides were settled. Designed to be called on a periodic background tick.
 func (s *Service) FinalizeStaleInProgressRides(ctx context.Context) (int, error) {
 	stale, err := s.repo.FindStaleInProgress(ctx, s.cfg.Ride.MaxInProgressMinutes)
 	if err != nil {
@@ -438,6 +480,48 @@ func (s *Service) FinalizeStaleInProgressRides(ctx context.Context) (int, error)
 	}
 	finalized := 0
 	for _, r := range stale {
+		loc, hasLoc := s.staleRideDriverPoint(ctx, r.ID, r.DriverUserID, r.DriverProfileID)
+		profileID := r.DriverProfileID
+
+		if !finalizeNearDestination(loc, hasLoc, r.DestinationPoint, finalizeNearDestinationM) {
+			// Driver-fault cancel — atomic via repo.Cancel; skip if the ride
+			// changed underneath us.
+			didCancel, cerr := s.repo.Cancel(ctx, r.ID, "driver abandoned the ride", "SYSTEM")
+			if cerr != nil || !didCancel {
+				continue
+			}
+			// No IncrementDriverRides, no final fare, and the customer is charged
+			// nothing. The forfeited credit + the escalating penalty mirror
+			// DriverCancelRide.
+			s.recordCancelPenalty(ctx, r.DriverUserID, "DRIVER")
+			s.releaseRideRedisState(ctx, r.ID, r.CustomerID, &profileID, r.TransportType)
+			_ = s.repo.AppendEvent(ctx, r.ID, "ride.cancelled", "SYSTEM", r.ID, map[string]interface{}{
+				"reason":            "in_progress_timeout_abandoned",
+				"max_minutes":       s.cfg.Ride.MaxInProgressMinutes,
+				"has_last_location": hasLoc,
+			})
+			s.analytics.Publish(ctx, "ride.cancelled", "SYSTEM", r.ID, &r.ID, map[string]interface{}{
+				"ride_id": r.ID, "reason": "in_progress_timeout_abandoned",
+				"cancelled_by_role": "SYSTEM", "driver_id": r.DriverProfileID,
+			})
+			s.hub.SendToCustomer(r.ID, tracking.Message{
+				Type: "ride_cancelled", RideID: r.ID,
+				Payload: map[string]interface{}{"reason": "Your driver is no longer available — you can book again."},
+			})
+			s.notify.SendToAllDevices(ctx, r.CustomerID, "Ride cancelled",
+				"Your driver is no longer available — you can book again.", "ride",
+				map[string]string{"type": "ride_cancelled", "ride_id": r.ID})
+			s.hub.SendToDriver(r.DriverProfileID, tracking.Message{
+				Type: "ride_cancelled", RideID: r.ID,
+				Payload: map[string]interface{}{"reason": "Ride cancelled — trip abandoned before reaching the destination."},
+			})
+			s.log.Warn().Str("ride_id", r.ID).Str("driver_profile_id", r.DriverProfileID).
+				Bool("has_last_location", hasLoc).
+				Msg("ride: stale IN_PROGRESS ride cancelled as driver-fault (not near destination)")
+			finalized++
+			continue
+		}
+
 		// Atomic transition — skip if the ride changed underneath us.
 		if err := s.repo.Transition(ctx, r.ID, StatusInProgress, StatusCompleted); err != nil {
 			continue
@@ -454,7 +538,6 @@ func (s *Service) FinalizeStaleInProgressRides(ctx context.Context) (int, error)
 		})
 		// Release the driver (clears ON_TRIP, re-adds to geo) and the customer's
 		// active-ride pointer so both can move on.
-		profileID := r.DriverProfileID
 		s.releaseRideRedisState(ctx, r.ID, r.CustomerID, &profileID, r.TransportType)
 		s.hub.SendToCustomer(r.ID, tracking.Message{
 			Type: "ride_completed", RideID: r.ID,
@@ -495,8 +578,21 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 	if !CancellableStatuses[r.Status] {
 		return apperrors.ErrInvalidTransition
 	}
+
+	// Victim check: is the assigned driver dark? Same definition as the
+	// abandonment watchdog — no state change past the silence threshold, location
+	// key expired, no live socket. A customer bailing out of a ride whose driver
+	// has vanished is not misbehaving: charging her the late-cancel fee, counting
+	// it toward her ban, and refunding the abandoner's credit punished the victim
+	// three ways for the driver's exploit.
+	driverSilent := false
+	if r.DriverID != nil && creditCharged(r.Status) {
+		silence := time.Duration(s.cfg.Ride.AbandonSilenceMinutes) * time.Minute
+		driverSilent = time.Since(r.UpdatedAt) >= silence && s.driverSilent(ctx, *r.DriverID)
+	}
+
 	cancellationFee := 0.0
-	if r.Status == StatusDriverArrived && r.PricingConfigID != nil && s.fareRepo != nil {
+	if r.Status == StatusDriverArrived && !driverSilent && r.PricingConfigID != nil && s.fareRepo != nil {
 		cfg, ferr := s.fareRepo.GetConfigByID(ctx, *r.PricingConfigID)
 		if ferr == nil {
 			cancellationFee = fare.CancellationFee(cfg, true)
@@ -512,22 +608,43 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 	}
 
 	// The customer cancelled after the fare was agreed → the driver is blameless,
-	// so refund the credit charged at agreement.
-	if creditCharged(r.Status) {
+	// so refund the credit charged at agreement. Not when the driver is silent:
+	// an abandoner keeps the forfeit, exactly as if they had cancelled themselves.
+	if creditCharged(r.Status) && !driverSilent {
 		s.refundDriverCredit(ctx, rideID, r.DriverID, "customer_cancelled")
 	}
 
 	s.releaseRideRedisState(ctx, rideID, customerID, r.DriverID, r.TransportType)
 
+	// A cancel during SEARCHING may race a live broadcast: dismiss the offer
+	// cards of every driver the ride is currently offered to, and leave a
+	// short-lived CANCELLED marker (mirroring the matching give-up path) so the
+	// offer wait loop and a WS state replay both see the truth instead of a
+	// deleted key.
+	if r.DriverID == nil {
+		if pending, perr := s.redis.SMembers(ctx, rkeys.K.RidePendingDrivers(rideID)).Result(); perr == nil {
+			for _, pid := range pending {
+				s.hub.SendToDriver(pid, tracking.Message{
+					Type: "ride_taken", RideID: rideID,
+					Payload: map[string]interface{}{"reason": "The customer cancelled this request."},
+				})
+			}
+		}
+		s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusCancelled), 2*time.Minute)
+	}
+
 	_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", "CUSTOMER", customerID, map[string]interface{}{
-		"reason": reason, "status_at_cancel": string(r.Status),
+		"reason": reason, "status_at_cancel": string(r.Status), "driver_silent": driverSilent,
 	})
 
-	// Escalating cancellation penalty (warn → 24h ban → suspension).
-	s.recordCancelPenalty(ctx, customerID, "CUSTOMER")
+	// Escalating cancellation penalty (warn → 24h ban → suspension) — unless the
+	// driver abandoned first, in which case the cancel is blameless.
+	if !driverSilent {
+		s.recordCancelPenalty(ctx, customerID, "CUSTOMER")
+	}
 	s.analytics.Publish(ctx, "ride.cancelled", "CUSTOMER", customerID, &rideID, map[string]interface{}{
 		"ride_id": rideID, "status_at_cancel": string(r.Status),
-		"cancelled_by_role": "CUSTOMER", "reason": reason,
+		"cancelled_by_role": "CUSTOMER", "reason": reason, "driver_silent": driverSilent,
 	})
 	s.hub.SendToCustomer(rideID, tracking.Message{
 		Type: "ride_cancelled", RideID: rideID,

@@ -3,6 +3,7 @@ package negotiation
 import (
 	"context"
 	"fmt"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
@@ -279,6 +280,13 @@ func (s *Service) Accept(ctx context.Context, rideID, actorRole, actorUserID str
 		return err
 	}
 
+	// Keep the Redis state mirror truthful. Postgres alone moved to CONFIRMED
+	// here, so a WebSocket reconnect replayed the stale NEGOTIATING state and
+	// sent the app back to the bargaining screen of a ride that already had an
+	// agreed fare. 24h TTL: later transitions overwrite it, and a ride that
+	// somehow never advances shouldn't pin the key forever.
+	s.redis.Set(ctx, rkeys.K.RideState(rideID), string(ride.StatusConfirmed), 24*time.Hour)
+
 	_ = s.rideRepo.AppendEvent(ctx, rideID, "ride.fare_agreed", actorRole, actorUserID, map[string]interface{}{
 		"agreed_fare": latest.ProposedAmount,
 	})
@@ -332,6 +340,10 @@ func (s *Service) LockManualFare(ctx context.Context, rideID, driverUserID strin
 	if err := s.rideRepo.Transition(ctx, rideID, ride.StatusNegotiating, ride.StatusConfirmed); err != nil {
 		return err
 	}
+
+	// Same Redis mirror write as Accept — see the comment there. Both paths into
+	// CONFIRMED must update the replayed state or a reconnect lies to the app.
+	s.redis.Set(ctx, rkeys.K.RideState(rideID), string(ride.StatusConfirmed), 24*time.Hour)
 
 	_ = s.rideRepo.AppendEvent(ctx, rideID, "ride.fare_agreed_manual", "DRIVER", driverUserID, map[string]interface{}{
 		"agreed_fare": amount,

@@ -72,6 +72,13 @@ type CreditChecker interface {
 	HasCredits(ctx context.Context, driverUserID, vehicleType string) (bool, error)
 }
 
+// ActiveRideCanceller lets ForceOffline driver-fault cancel an active ride
+// before tearing down the driver's Redis state. Implemented by ride.Service and
+// injected in main (driver → ride would be an import cycle).
+type ActiveRideCanceller interface {
+	CancelActiveRideForDriverExit(ctx context.Context, driverUserID, reason string) error
+}
+
 // Service handles driver business logic.
 type Service struct {
 	repo           *Repository
@@ -81,6 +88,7 @@ type Service struct {
 	log            zerolog.Logger
 	creditChecker  CreditChecker
 	expiryNotifier expiryNotifier
+	rideCanceller  ActiveRideCanceller
 }
 
 func NewService(repo *Repository, rdb goredis.UniversalClient, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
@@ -89,6 +97,12 @@ func NewService(repo *Repository, rdb goredis.UniversalClient, ana *analytics.Se
 
 func (s *Service) SetCreditChecker(cc CreditChecker) {
 	s.creditChecker = cc
+}
+
+// SetActiveRideCanceller wires the ride service so logout can't strand (or
+// silently escape) an agreed ride — see ForceOffline.
+func (s *Service) SetActiveRideCanceller(c ActiveRideCanceller) {
+	s.rideCanceller = c
 }
 
 // DemandHeatmap returns bucketed pickup demand over the last windowMin minutes,
@@ -302,11 +316,23 @@ func (s *Service) ListDocuments(ctx context.Context, userID string) ([]*Document
 // ForceOffline sets a driver OFFLINE unconditionally, ignoring any active-ride
 // guard and cooldown. Used during logout so the driver is always cleanly removed
 // from the matching pool even if their Redis state is stale.
+//
+// It no longer skips the ride, though: before this teardown, any active ride in
+// CONFIRMED..IN_PROGRESS is driver-fault cancelled (penalty ladder, forfeited
+// credit, customer notified). Unconditionally deleting driver:<id>:active_ride
+// made Logout a one-tap penalty-free escape from an agreed ride. Cancel errors
+// are logged but never block the logout itself.
 func (s *Service) ForceOffline(ctx context.Context, userID string) error {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
 		// Not a driver — nothing to do.
 		return nil
+	}
+	if s.rideCanceller != nil {
+		if err := s.rideCanceller.CancelActiveRideForDriverExit(ctx, userID, "driver logged out during an active ride"); err != nil {
+			s.log.Error().Err(err).Str("driver_id", profile.ID).
+				Msg("driver: could not cancel active ride on force-offline — going offline anyway")
+		}
 	}
 	if err := s.redis.Del(ctx, rkeys.K.DriverActiveRide(profile.ID)).Err(); err != nil {
 		return err
