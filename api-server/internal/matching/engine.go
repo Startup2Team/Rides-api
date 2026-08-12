@@ -148,11 +148,21 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	}
 	window := time.Duration(e.cfg.Matching.TierWindowSeconds) * time.Second
 	if window <= 0 {
-		window = 10 * time.Second
+		// Match the config default (and the driver app's 15s offer countdown).
+		window = 15 * time.Second
 	}
 	waveInterval := time.Duration(e.cfg.Matching.WaveIntervalSeconds) * time.Second
 
 	tried := make(map[string]bool)
+	// declined tracks EXPLICIT "no" answers, separately from offered-but-silent.
+	// tried marks drivers at offer time, so before this split a driver whose
+	// phone was in a pocket for one 15s window was excluded for the whole search
+	// exactly like one who tapped Decline — and the loop then slept out the rest
+	// of its budget with a reachable driver it refused to ask again.
+	declined := make(map[string]bool)
+	// One second-chance pass per search: enough to re-ask the silent ones once,
+	// without turning the search into a nag loop against the same dead phones.
+	secondChanceUsed := false
 
 	for {
 		if ctx.Err() != nil {
@@ -219,13 +229,28 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 				Int("tier_radius_m", tierRadius).Int("batch", len(batch)).
 				Msg("matching: broadcasting offer to batch")
 
-			if winner := e.offerToBatch(ctx, rideID, batch, window); winner != nil {
+			if winner := e.offerToBatch(ctx, rideID, batch, window, declined); winner != nil {
 				e.onAccepted(ctx, rideID, winner)
 				return
 			}
 		}
 
 		if !offeredAnyone {
+			// Pool exhausted. Before sleeping out the budget, give the silent
+			// ones one more chance: clear offered-but-silent drivers from `tried`
+			// (explicit decliners stay excluded) and re-offer immediately —
+			// provided at least one full window of budget remains to hear back.
+			if !secondChanceUsed {
+				if dl, ok := ctx.Deadline(); ok && time.Until(dl) >= window {
+					if cleared := releaseSilentTried(tried, declined); cleared > 0 {
+						secondChanceUsed = true
+						e.log.Info().Str("ride_id", rideID).Int("cleared", cleared).
+							Msg("matching: pool exhausted — re-offering to silent drivers")
+						continue
+					}
+				}
+			}
+
 			// Nobody reachable at any distance. Waiting is the only lever left:
 			// a driver who comes online or finishes a trip in the next few seconds
 			// is invisible to a search that gives up immediately. The old loop did
@@ -242,6 +267,21 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	}
 }
 
+// releaseSilentTried removes offered-but-silent drivers from the tried set so
+// one more offering pass can reach them; explicit decliners stay excluded — a
+// spoken "no" is an answer, a missed window may just be a pocketed phone.
+// Returns how many drivers were freed for re-offer.
+func releaseSilentTried(tried, declined map[string]bool) int {
+	cleared := 0
+	for id := range tried {
+		if !declined[id] {
+			delete(tried, id)
+			cleared++
+		}
+	}
+	return cleared
+}
+
 // offerToBatch broadcasts one ride to several nearby drivers at once and returns
 // whoever accepts first, or nil if the window closes with nobody.
 //
@@ -256,7 +296,10 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 // winner is decided by a single SET NX on RideClaimedBy. Exactly one succeeds; the
 // rest are told the ride is taken. Without that atomic step two drivers could both
 // be assigned, or one could be assigned while the other's app believed it had won.
-func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candidate, window time.Duration) *candidate {
+// declined is the search-wide map of explicit "no" answers; offerToBatch marks
+// this batch's decliners in it so the second-chance pass can tell them apart
+// from drivers who simply never answered.
+func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candidate, window time.Duration, declined map[string]bool) *candidate {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -297,13 +340,22 @@ func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candi
 	inBatch := make(map[string]*candidate, len(offered))
 	for _, c := range offered {
 		inBatch[c.profileID] = c
-		e.sendOffer(ctx, rideID, c)
+		e.sendOffer(ctx, rideID, c, window)
 	}
 
 	timer := time.NewTimer(window)
 	defer timer.Stop()
 
-	declined := 0
+	// The ride can stop being offerable while we wait (customer cancelled the
+	// search, recovery resolved it). A cheap Redis poll on the state mirror ends
+	// the window early instead of holding drivers on a dead offer.
+	statusTick := time.NewTicker(2 * time.Second)
+	defer statusTick.Stop()
+
+	// responded tracks who answered this window at all — decliners and the
+	// winner — so the timeout path can charge the silent remainder.
+	responded := make(map[string]bool, len(offered))
+	declines := 0
 	for {
 		select {
 		case sig := <-acceptCh:
@@ -316,8 +368,10 @@ func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candi
 			}
 			if !sig.accepted {
 				e.onDeclined(ctx, rideID, c)
-				declined++
-				if declined >= len(offered) {
+				responded[c.profileID] = true
+				declined[c.profileID] = true
+				declines++
+				if declines >= len(offered) {
 					// Everyone said no; don't burn the rest of the window.
 					return nil
 				}
@@ -345,7 +399,22 @@ func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candi
 			}
 			return c
 		case <-timer.C:
+			// A silent miss costs the same daily-decline strike as an explicit
+			// "no". Only the explicit path was counted before, so the dominant
+			// way drivers actually duck offers — just not answering — was free,
+			// and cherry-pickers outscored honest decliners.
+			for _, c := range offered {
+				if !responded[c.profileID] {
+					e.onDeclined(ctx, rideID, c)
+				}
+			}
 			return nil
+		case <-statusTick.C:
+			if state, serr := e.redis.Get(ctx, rkeys.K.RideState(rideID)).Result(); serr == nil && state != string(ride.StatusSearching) {
+				// No decline strikes here: the offer died on them, not the
+				// other way round. CancelRide dismisses their offer cards.
+				return nil
+			}
 		case <-ctx.Done():
 			return nil
 		}
@@ -592,7 +661,7 @@ func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleT
 // app open, and the push wakes one whose app is backgrounded. A driver holding a
 // live socket is still worth pushing to, because "app in foreground" and "phone in
 // pocket" are not the same thing.
-func (e *Engine) sendOffer(ctx context.Context, rideID string, c *candidate) {
+func (e *Engine) sendOffer(ctx context.Context, rideID string, c *candidate, window time.Duration) {
 	e.notify.SendToAllDevices(ctx, c.userID, "New ride request",
 		fmt.Sprintf("A rider is %.0fm away. Tap to view the request.", c.distanceM),
 		"ride", map[string]string{"type": "ride_request", "ride_id": rideID})
@@ -600,6 +669,9 @@ func (e *Engine) sendOffer(ctx context.Context, rideID string, c *candidate) {
 	payload := map[string]interface{}{
 		"ride_id":    rideID,
 		"distance_m": c.distanceM,
+		// The server's real answer window, so the app can count down the truth
+		// instead of hardcoding its own guess.
+		"window_seconds": int(window.Seconds()),
 	}
 	if ridePayload, rpErr := e.rideRepo.GetRideRequestPayload(ctx, rideID); rpErr == nil && ridePayload != nil {
 		payload["transport_type"] = ridePayload.TransportType
@@ -629,9 +701,38 @@ func (e *Engine) sendOffer(ctx context.Context, rideID string, c *candidate) {
 }
 
 func (e *Engine) onAccepted(ctx context.Context, rideID string, c *candidate) {
-	_ = e.rideRepo.AssignDriver(ctx, rideID, c.profileID)
-	_ = e.rideRepo.Transition(ctx, rideID, ride.StatusSearching, ride.StatusMatched)
-	_ = e.rideRepo.Transition(ctx, rideID, ride.StatusMatched, ride.StatusNegotiating)
+	// These writes were fire-and-forget, which is how an accept that raced a
+	// customer cancel marched the driver into ON_TRIP on a dead ride: the DB
+	// rejected the transitions, the Redis writes below happened anyway, and the
+	// driver was stuck until something else reset them. The driver's Redis state
+	// is only touched after ALL DB steps succeed, so any failure leaves them
+	// AVAILABLE and still in the geo index — nothing to roll back.
+	rejected := func(step string, err error) {
+		e.log.Warn().Err(err).Str("ride_id", rideID).Str("driver_id", c.profileID).Str("step", step).
+			Msg("matching: accept lost the race with a ride resolution — driver stays AVAILABLE")
+		e.hub.SendToDriver(c.profileID, tracking.Message{
+			Type: "ride_taken", RideID: rideID,
+			Payload: map[string]interface{}{"reason": "This ride is no longer available."},
+		})
+	}
+	// AssignDriver is guarded on status = SEARCHING, so a cancelled ride refuses
+	// the driver here rather than recording one.
+	if err := e.rideRepo.AssignDriver(ctx, rideID, c.profileID); err != nil {
+		rejected("assign", err)
+		return
+	}
+	if err := e.rideRepo.Transition(ctx, rideID, ride.StatusSearching, ride.StatusMatched); err != nil {
+		// Assigned, then the ride resolved under us. Clear the assignment so the
+		// cancelled ride doesn't name a driver who never took it.
+		_ = e.rideRepo.UnassignDriver(ctx, rideID)
+		rejected("searching→matched", err)
+		return
+	}
+	if err := e.rideRepo.Transition(ctx, rideID, ride.StatusMatched, ride.StatusNegotiating); err != nil {
+		_ = e.rideRepo.UnassignDriver(ctx, rideID)
+		rejected("matched→negotiating", err)
+		return
+	}
 
 	e.redis.Set(ctx, rkeys.K.DriverState(c.profileID), driverStateOnTrip, 0)
 	e.redis.ZRem(ctx, rkeys.K.DriverGeoIndex(c.vehicleType), c.profileID)
