@@ -269,6 +269,17 @@ type RideConfig struct {
 	// they've driven off (toward the destination), the no-show is treated as
 	// unverified — no refund, and the ride is flagged.
 	NoShowVerifyRadiusM int
+	// AbandonSilenceMinutes is how long a ride may sit in CONFIRMED /
+	// DRIVER_EN_ROUTE / DRIVER_ARRIVED with a totally silent driver (location key
+	// expired AND no live WebSocket) before the abandonment watchdog cancels it
+	// as driver-fault. The location key's TTL is 120s, so 3 minutes means at
+	// least one full TTL plus a missed heartbeat — a driver merely between GPS
+	// ticks can't trip it.
+	AbandonSilenceMinutes int
+	// AbandonOnboardSilenceMinutes is the same threshold for IN_PROGRESS rides.
+	// Longer, because a passenger is (nominally) aboard and tunnels / dead zones
+	// mid-trip are normal; the dead-man finalizer remains the backstop.
+	AbandonOnboardSilenceMinutes int
 }
 
 type GPSConfig struct {
@@ -425,13 +436,18 @@ func Load() (*Config, error) {
 		"HEAVY_FUSO":  getEnvFloat("MATCH_SPEED_KMH_HEAVY_FUSO", 14),
 	}
 	cfg.Matching.BatchSize = getEnvInt("MATCH_BATCH_SIZE", 3)
-	cfg.Matching.TierWindowSeconds = getEnvInt("MATCH_TIER_WINDOW_SECONDS", 10)
+	// 15s to match the driver app's hardcoded 15-second offer countdown. At 10s
+	// the server moved on while the driver's screen still showed 5 seconds left,
+	// so a tap in that gap got NOT_YOUR_OFFER for no visible reason.
+	cfg.Matching.TierWindowSeconds = getEnvInt("MATCH_TIER_WINDOW_SECONDS", 15)
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
 	cfg.Ride.DevSkipGeofence = getEnvBool("DEV_SKIP_GEOFENCE", false)
 	cfg.Ride.MaxInProgressMinutes = getEnvInt("RIDE_MAX_IN_PROGRESS_MINUTES", 120)
 	cfg.Ride.NoShowVerifyRadiusM = getEnvInt("NO_SHOW_VERIFY_RADIUS_M", 400)
+	cfg.Ride.AbandonSilenceMinutes = getEnvInt("RIDE_ABANDON_SILENCE_MINUTES", 3)
+	cfg.Ride.AbandonOnboardSilenceMinutes = getEnvInt("RIDE_ABANDON_ONBOARD_SILENCE_MINUTES", 10)
 
 	cfg.GPS.MaxSpeedKMH = getEnvFloat("GPS_MAX_SPEED_KMH", 200.0)
 	cfg.GPS.StaleThresholdSeconds = getEnvFloat("GPS_STALE_THRESHOLD_SECONDS", 300.0)

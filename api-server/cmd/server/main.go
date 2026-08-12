@@ -243,6 +243,9 @@ func main() {
 	// driver_ride_credits table that the v4 cutover no longer populates.
 	// rideSvc needs hub for WS notifications; engine is set after construction
 	rideSvc := ride.NewService(rideRepo, rdb, notifySvc, anaSvc, hub, cfg, log)
+	// Logout guard: ForceOffline driver-fault cancels any active ride first, so
+	// signing out is no longer a penalty-free escape from an agreed ride.
+	driverSvc.SetActiveRideCanceller(rideSvc)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
 	engine := matching.NewEngine(rideRepo, driverRepo, rdb, notifySvc, anaSvc, hub, cfg, log, rideSvc)
 	negSvc := negotiation.NewService(negRepo, rideRepo, rdb, hub, telSvc, anaSvc, cfg, log)
@@ -453,6 +456,29 @@ func main() {
 					log.Error().Err(err).Msg("finalizer: failed to scan stale in-progress rides")
 				} else if n > 0 {
 					log.Warn().Int("count", n).Msg("finalizer: auto-finalized stale in-progress rides")
+				}
+			}
+		}
+	}()
+
+	// ── Abandonment watchdog ──────────────────────────────────────────────────
+	// CONFIRMED / DRIVER_EN_ROUTE / DRIVER_ARRIVED had no timeout at all: a
+	// driver who killed the app after the fare was agreed froze the ride forever
+	// with no penalty. Every minute, cancel (driver-fault) rides whose driver
+	// has been fully silent — location key expired AND no socket — past the
+	// configured threshold. IN_PROGRESS gets its own longer threshold.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := rideSvc.CancelAbandonedRides(bgCtx); err != nil {
+					log.Error().Err(err).Msg("abandonment: failed to scan for abandoned rides")
+				} else if n > 0 {
+					log.Warn().Int("count", n).Msg("abandonment: cancelled rides with silent drivers")
 				}
 			}
 		}
