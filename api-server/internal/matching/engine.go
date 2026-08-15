@@ -685,6 +685,9 @@ func (e *Engine) sendOffer(ctx context.Context, rideID string, c *candidate, win
 		payload["suggested_fare"] = ridePayload.SuggestedFare
 		payload["customer_name"] = ridePayload.CustomerName
 		payload["customer_phone"] = ridePayload.CustomerPhone
+		if ridePayload.CustomerImageURL != "" {
+			payload["customer_image_url"] = ridePayload.CustomerImageURL
+		}
 	}
 	e.hub.SendToDriver(c.profileID, tracking.Message{
 		Type:    "ride_request",
@@ -763,6 +766,10 @@ func (e *Engine) notifyCustomerDriverMatched(ctx context.Context, rideID string,
 		payload["driver_phone"] = info.Phone
 		payload["vehicle_plate"] = info.VehiclePlate
 		payload["transport_type"] = info.TransportType
+		payload["driver_rating"] = info.Rating
+		if info.ProfileImageURL != "" {
+			payload["driver_image_url"] = info.ProfileImageURL
+		}
 		if info.Lat != 0 || info.Lng != 0 {
 			payload["lat"] = info.Lat
 			payload["lng"] = info.Lng

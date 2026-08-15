@@ -690,6 +690,11 @@ func (s *Service) StartNegotiationTimeout(rideID string) {
 			Type: "ride_cancelled", RideID: rideID,
 			Payload: map[string]interface{}{"reason": "Negotiation timed out. Please request a new ride."},
 		})
+		// FCM too: the WebSocket only reaches an open app, and a customer whose
+		// app is closed would otherwise resume into a ride that no longer exists.
+		s.notify.SendToAllDevices(ctx, r.CustomerID, "Ride cancelled",
+			"Negotiation timed out. Please request a new ride.", "ride",
+			map[string]string{"type": "ride_cancelled", "ride_id": rideID})
 		if r.DriverID != nil {
 			s.hub.SendToDriver(*r.DriverID, tracking.Message{
 				Type: "ride_cancelled", RideID: rideID,
@@ -730,6 +735,60 @@ func (s *Service) CancelNegotiationTimeout(rideID string) {
 		default:
 		}
 		s.negTimers.Delete(rideID)
+	}
+}
+
+// CancelForNegotiationDecline terminates a NEGOTIATING ride because one party
+// walked away from the bargaining. Called by negotiation.Service.Decline.
+// Before this, a decline changed nothing server-side: the ride stayed
+// NEGOTIATING with the driver still assigned, so the other party (especially
+// one whose app was closed — the WS event dies with the app) resumed into a
+// zombie negotiation, and the driver stayed invisible to matching until the
+// 5-minute inactivity timer fired.
+//
+// Deliberately NO cancel penalty and NO credit refund: nothing is charged
+// before fare agreement, and walking away from an unagreed fare is legitimate
+// bargaining — same treatment as the inactivity timeout.
+func (s *Service) CancelForNegotiationDecline(ctx context.Context, rideID, declinedBy string) {
+	s.CancelNegotiationTimeout(rideID)
+	r, err := s.repo.FindByID(ctx, rideID)
+	if err != nil || r.Status != StatusNegotiating {
+		return
+	}
+	didCancel, err := s.repo.Cancel(ctx, rideID, "negotiation_declined", declinedBy)
+	if err != nil || !didCancel {
+		return
+	}
+	s.releaseRideRedisState(ctx, rideID, r.CustomerID, r.DriverID, r.TransportType)
+	_ = s.repo.AppendEvent(ctx, rideID, "ride.cancelled", declinedBy, rideID, map[string]interface{}{
+		"reason": "negotiation_declined", "declined_by": declinedBy,
+	})
+	s.analytics.Publish(ctx, "ride.cancelled", declinedBy, rideID, &rideID, map[string]interface{}{
+		"ride_id": rideID, "reason": "negotiation_declined", "declined_by": declinedBy,
+	})
+
+	// Tell the party who did NOT decline, over both transports: WS for an open
+	// app, FCM for a backgrounded/closed one.
+	if declinedBy == "DRIVER" {
+		s.hub.SendToCustomer(rideID, tracking.Message{
+			Type: "ride_cancelled", RideID: rideID,
+			Payload: map[string]interface{}{"reason": "The driver declined the negotiation. Please request a new ride."},
+		})
+		s.notify.SendToAllDevices(ctx, r.CustomerID, "Driver declined",
+			"The driver declined the negotiation. Please request a new ride.", "ride",
+			map[string]string{"type": "ride_cancelled", "ride_id": rideID})
+		return
+	}
+	if r.DriverID != nil {
+		s.hub.SendToDriver(*r.DriverID, tracking.Message{
+			Type: "ride_cancelled", RideID: rideID,
+			Payload: map[string]interface{}{"reason": "The customer declined the negotiation."},
+		})
+		if uid, err := s.repo.FindDriverUserIDByProfileID(ctx, *r.DriverID); err == nil {
+			s.notify.SendToAllDevices(ctx, uid, "Negotiation ended",
+				"The customer declined the negotiation.", "ride",
+				map[string]string{"type": "ride_cancelled", "ride_id": rideID})
+		}
 	}
 }
 
@@ -1209,6 +1268,29 @@ func (s *Service) NotifyNegotiationOffer(ctx context.Context, rideID, customerID
 		return
 	}
 	s.notify.SendToAllDevices(ctx, customerID, "New fare offer", body, "ride", data)
+}
+
+// NotifyNegotiationMessage pushes a chat-text notification to the party that
+// did NOT send it. Called by negotiation.Service on every SendTextMessage —
+// without it, texts only travel over the WebSocket and a backgrounded or
+// killed app never hears them. Best-effort, like the offer notification.
+func (s *Service) NotifyNegotiationMessage(ctx context.Context, rideID, customerID string, driverProfileID *string, senderRole, body string) {
+	// Keep the preview short — notification trays truncate anyway, and the full
+	// text is one tap away in the conversation.
+	preview := body
+	if len(preview) > 120 {
+		preview = preview[:117] + "..."
+	}
+	data := map[string]string{"type": "negotiation_message", "ride_id": rideID}
+	if senderRole == "CUSTOMER" {
+		if driverProfileID != nil {
+			if uid, err := s.repo.FindDriverUserIDByProfileID(ctx, *driverProfileID); err == nil {
+				s.notify.SendToAllDevices(ctx, uid, "New message", preview, "ride", data)
+			}
+		}
+		return
+	}
+	s.notify.SendToAllDevices(ctx, customerID, "New message", preview, "ride", data)
 }
 
 // endOfDay is when today's cancellation counter stops counting — local midnight

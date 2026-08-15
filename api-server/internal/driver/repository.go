@@ -170,12 +170,14 @@ func (r *Repository) FindProfileByID(ctx context.Context, profileID string) (*Pr
 
 // MatchNotificationInfo is sent to the customer when a driver accepts a ride request.
 type MatchNotificationInfo struct {
-	FullName      string
-	Phone         string
-	VehiclePlate  string
-	TransportType string
-	Lat           float64
-	Lng           float64
+	FullName        string
+	Phone           string
+	VehiclePlate    string
+	TransportType   string
+	Lat             float64
+	Lng             float64
+	Rating          float64
+	ProfileImageURL string
 }
 
 func (r *Repository) GetMatchNotificationInfo(ctx context.Context, profileID string) (*MatchNotificationInfo, error) {
@@ -186,7 +188,9 @@ func (r *Repository) GetMatchNotificationInfo(ctx context.Context, profileID str
 		       COALESCE(dp.vehicle_plate, ''),
 		       dp.transport_type,
 		       COALESCE(ST_Y(dl.location::geometry), 0),
-		       COALESCE(ST_X(dl.location::geometry), 0)
+		       COALESCE(ST_X(dl.location::geometry), 0),
+		       COALESCE(dp.rating, 5),
+		       COALESCE(u.profile_image_url, '')
 		FROM driver_profiles dp
 		JOIN users u ON u.id = dp.user_id
 		LEFT JOIN driver_locations dl ON dl.driver_id = dp.id
@@ -198,6 +202,8 @@ func (r *Repository) GetMatchNotificationInfo(ctx context.Context, profileID str
 		&info.TransportType,
 		&info.Lat,
 		&info.Lng,
+		&info.Rating,
+		&info.ProfileImageURL,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

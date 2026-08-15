@@ -56,6 +56,14 @@ type TimeoutManager interface {
 	// NotifyNegotiationOffer pushes a counter-offer notification to the party that
 	// did not propose it.
 	NotifyNegotiationOffer(ctx context.Context, rideID, customerID string, driverProfileID *string, proposerRole string, amount float64)
+	// NotifyNegotiationMessage pushes a chat-text notification to the party that
+	// did not send it, so a backgrounded/killed app still rings on new messages
+	// (the WebSocket only reaches a foregrounded app).
+	NotifyNegotiationMessage(ctx context.Context, rideID, customerID string, driverProfileID *string, senderRole, body string)
+	// CancelForNegotiationDecline terminates the ride when a party declines the
+	// negotiation: cancels the row, frees the driver for matching, and notifies
+	// the other party over WS + FCM. No penalty, no refund (nothing charged yet).
+	CancelForNegotiationDecline(ctx context.Context, rideID, declinedBy string)
 }
 
 // Service handles fare negotiation business logic.
@@ -416,6 +424,16 @@ func (s *Service) Decline(ctx context.Context, rideID, actorRole, actorUserID st
 		"declined_by": actorRole,
 	})
 
+	// A decline is terminal, not a bargaining move: cancel the ride, free the
+	// driver for matching, and reach the other party over WS + FCM. Without
+	// this the ride sat NEGOTIATING until the inactivity timer — a closed app
+	// resumed into a zombie negotiation, and the decliner could string the
+	// other party along (or take the deal off-platform) with the app still
+	// showing a live-looking negotiation.
+	if s.timeoutMgr != nil {
+		s.timeoutMgr.CancelForNegotiationDecline(ctx, rideID, actorRole)
+	}
+
 	return nil
 }
 
@@ -469,8 +487,12 @@ func (s *Service) SendTextMessage(ctx context.Context, rideID, actorRole, actorU
 		s.hub.SendToCustomer(rideID, wsMsg)
 	}
 
+	// A chat message is negotiation activity like an offer is — reset the
+	// inactivity clock, and push in-app + FCM to the recipient so a
+	// backgrounded app rings (offers already did this; texts silently didn't).
 	if s.timeoutMgr != nil {
 		s.timeoutMgr.ResetNegotiationTimeout(rideID)
+		s.timeoutMgr.NotifyNegotiationMessage(ctx, rideID, r.CustomerID, r.DriverID, actorRole, body)
 	}
 
 	return nil
