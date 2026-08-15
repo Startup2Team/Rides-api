@@ -1211,6 +1211,29 @@ func (s *Service) NotifyNegotiationOffer(ctx context.Context, rideID, customerID
 	s.notify.SendToAllDevices(ctx, customerID, "New fare offer", body, "ride", data)
 }
 
+// NotifyNegotiationMessage pushes a chat-text notification to the party that
+// did NOT send it. Called by negotiation.Service on every SendTextMessage —
+// without it, texts only travel over the WebSocket and a backgrounded or
+// killed app never hears them. Best-effort, like the offer notification.
+func (s *Service) NotifyNegotiationMessage(ctx context.Context, rideID, customerID string, driverProfileID *string, senderRole, body string) {
+	// Keep the preview short — notification trays truncate anyway, and the full
+	// text is one tap away in the conversation.
+	preview := body
+	if len(preview) > 120 {
+		preview = preview[:117] + "..."
+	}
+	data := map[string]string{"type": "negotiation_message", "ride_id": rideID}
+	if senderRole == "CUSTOMER" {
+		if driverProfileID != nil {
+			if uid, err := s.repo.FindDriverUserIDByProfileID(ctx, *driverProfileID); err == nil {
+				s.notify.SendToAllDevices(ctx, uid, "New message", preview, "ride", data)
+			}
+		}
+		return
+	}
+	s.notify.SendToAllDevices(ctx, customerID, "New message", preview, "ride", data)
+}
+
 // endOfDay is when today's cancellation counter stops counting — local midnight
 // in the platform timezone. On UTC midnight (02:00 in Kigali) a driver's fourth
 // cancel at 01:55 local counted against the previous day and tripped the ban

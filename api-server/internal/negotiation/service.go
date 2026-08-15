@@ -56,6 +56,10 @@ type TimeoutManager interface {
 	// NotifyNegotiationOffer pushes a counter-offer notification to the party that
 	// did not propose it.
 	NotifyNegotiationOffer(ctx context.Context, rideID, customerID string, driverProfileID *string, proposerRole string, amount float64)
+	// NotifyNegotiationMessage pushes a chat-text notification to the party that
+	// did not send it, so a backgrounded/killed app still rings on new messages
+	// (the WebSocket only reaches a foregrounded app).
+	NotifyNegotiationMessage(ctx context.Context, rideID, customerID string, driverProfileID *string, senderRole, body string)
 }
 
 // Service handles fare negotiation business logic.
@@ -469,8 +473,12 @@ func (s *Service) SendTextMessage(ctx context.Context, rideID, actorRole, actorU
 		s.hub.SendToCustomer(rideID, wsMsg)
 	}
 
+	// A chat message is negotiation activity like an offer is — reset the
+	// inactivity clock, and push in-app + FCM to the recipient so a
+	// backgrounded app rings (offers already did this; texts silently didn't).
 	if s.timeoutMgr != nil {
 		s.timeoutMgr.ResetNegotiationTimeout(rideID)
+		s.timeoutMgr.NotifyNegotiationMessage(ctx, rideID, r.CustomerID, r.DriverID, actorRole, body)
 	}
 
 	return nil

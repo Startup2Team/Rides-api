@@ -16,14 +16,18 @@ import (
 type Ride struct {
 	ID         string
 	CustomerID string
-	// CustomerName and CustomerPhone are populated by driver-side queries (JOIN with users).
-	CustomerName  string
-	CustomerPhone string
-	// DriverName, DriverPhone, DriverRating are populated by customer-side list queries.
+	// CustomerName, CustomerPhone and CustomerImageURL are populated by
+	// driver-side queries (JOIN with users).
+	CustomerName     string
+	CustomerPhone    string
+	CustomerImageURL string
+	// DriverName, DriverPhone, DriverRating, DriverImageURL are populated by
+	// customer-side list queries.
 	DriverName            string
 	DriverPhone           string
 	DriverRating          float64
 	DriverPlate           string
+	DriverImageURL        string
 	DriverID              *string
 	TransportType         string
 	Status                Status
@@ -60,11 +64,13 @@ type RideResponse struct {
 	CustomerID            string     `json:"customer_id"`
 	CustomerName          string     `json:"customer_name,omitempty"`
 	CustomerPhone         string     `json:"customer_phone,omitempty"`
+	CustomerImageURL      string     `json:"customer_image_url,omitempty"`
 	DriverID              *string    `json:"driver_id"`
 	DriverName            string     `json:"driver_name,omitempty"`
 	DriverPhone           string     `json:"driver_phone,omitempty"`
 	DriverRating          *float64   `json:"driver_rating,omitempty"`
 	DriverPlate           string     `json:"driver_plate,omitempty"`
+	DriverImageURL        string     `json:"driver_image_url,omitempty"`
 	TransportType         string     `json:"transport_type"`
 	Status                string     `json:"status"`
 	PickupLat             float64    `json:"pickup_lat"`
@@ -94,10 +100,11 @@ type RideResponse struct {
 }
 
 type driverInfo struct {
-	Name   string
-	Phone  string
-	Rating *float64
-	Plate  string
+	Name     string
+	Phone    string
+	Rating   *float64
+	Plate    string
+	ImageURL string
 }
 
 func (r *Ride) driverInfoOrEmpty() driverInfo {
@@ -106,10 +113,11 @@ func (r *Ride) driverInfoOrEmpty() driverInfo {
 	}
 	rating := r.DriverRating
 	return driverInfo{
-		Name:   r.DriverName,
-		Phone:  r.DriverPhone,
-		Rating: &rating,
-		Plate:  r.DriverPlate,
+		Name:     r.DriverName,
+		Phone:    r.DriverPhone,
+		Rating:   &rating,
+		Plate:    r.DriverPlate,
+		ImageURL: r.DriverImageURL,
 	}
 }
 
@@ -120,11 +128,13 @@ func (r *Ride) ToResponse() *RideResponse {
 		CustomerID:            r.CustomerID,
 		CustomerName:          r.CustomerName,
 		CustomerPhone:         r.CustomerPhone,
+		CustomerImageURL:      r.CustomerImageURL,
 		DriverID:              r.DriverID,
 		DriverName:            r.driverInfoOrEmpty().Name,
 		DriverPhone:           r.driverInfoOrEmpty().Phone,
 		DriverRating:          r.driverInfoOrEmpty().Rating,
 		DriverPlate:           r.driverInfoOrEmpty().Plate,
+		DriverImageURL:        r.driverInfoOrEmpty().ImageURL,
 		TransportType:         r.TransportType,
 		Status:                string(r.Status),
 		PickupLat:             r.PickupPoint.Lat,
@@ -167,6 +177,7 @@ type RideRequestPayload struct {
 	SuggestedFare      float64
 	CustomerName       string
 	CustomerPhone      string
+	CustomerImageURL   string
 }
 
 // Repository handles all ride DB operations.
@@ -221,7 +232,8 @@ const rideSelectColsWithCustomer = `
 	COALESCE(r.ride_version, 1),
 	r.created_at, r.updated_at,
 	COALESCE(u.full_name, 'Customer')  AS customer_name,
-	COALESCE(u.phone_number, '')       AS customer_phone
+	COALESCE(u.phone_number, '')       AS customer_phone,
+	COALESCE(u.profile_image_url, '')  AS customer_image_url
 `
 
 // rideSelectColsWithDriver extends rideSelectCols with driver identity fields.
@@ -248,7 +260,8 @@ const rideSelectColsWithDriver = `
 	COALESCE(du.full_name, '')         AS driver_name,
 	COALESCE(du.phone_number, '')      AS driver_phone,
 	COALESCE(dp.rating, 5.0)           AS driver_rating,
-	COALESCE(dp.vehicle_plate, '')     AS driver_plate
+	COALESCE(dp.vehicle_plate, '')     AS driver_plate,
+	COALESCE(du.profile_image_url, '') AS driver_image_url
 `
 
 func scanRideWithDriver(row pgx.Row) (*Ride, error) {
@@ -265,7 +278,7 @@ func scanRideWithDriver(row pgx.Row) (*Ride, error) {
 		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
 		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
 		&r.PickupExpired, &r.RideVersion, &r.CreatedAt, &r.UpdatedAt,
-		&r.DriverName, &r.DriverPhone, &r.DriverRating, &r.DriverPlate,
+		&r.DriverName, &r.DriverPhone, &r.DriverRating, &r.DriverPlate, &r.DriverImageURL,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -304,7 +317,7 @@ func scanRideWithCustomer(row pgx.Row) (*Ride, error) {
 		&r.PricingConfigID, &r.EstimatedFareRWF, &r.NightSurchargeApplied, &r.NightSurchargePct,
 		&r.WaitingSeconds, &r.WaitingChargeRWF, &r.CancellationFeeRWF, &r.FinalFareRWF,
 		&r.PickupExpired, &r.RideVersion, &r.CreatedAt, &r.UpdatedAt,
-		&r.CustomerName, &r.CustomerPhone,
+		&r.CustomerName, &r.CustomerPhone, &r.CustomerImageURL,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -397,7 +410,8 @@ func (repo *Repository) GetRideRequestPayload(ctx context.Context, rideID string
 		       r.destination_address,
 		       COALESCE(r.estimated_fare_rwf, r.customer_initial_fare, 0) AS suggested_fare,
 		       COALESCE(u.full_name, 'Customer') AS customer_name,
-		       COALESCE(u.phone_number, '') AS customer_phone
+		       COALESCE(u.phone_number, '') AS customer_phone,
+		       COALESCE(u.profile_image_url, '') AS customer_image_url
 		FROM rides r
 		JOIN users u ON u.id = r.customer_id
 		WHERE r.id = $1
@@ -417,6 +431,7 @@ func (repo *Repository) GetRideRequestPayload(ctx context.Context, rideID string
 		&payload.SuggestedFare,
 		&payload.CustomerName,
 		&payload.CustomerPhone,
+		&payload.CustomerImageURL,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperrors.ErrRideNotFound
@@ -686,12 +701,19 @@ func (repo *Repository) DriverLastLocation(ctx context.Context, driverUserID str
 }
 
 // FindActiveByCustomer returns the customer's current non-terminal ride.
+// Joins the driver like FindByIDAndCustomer does: this is the cold-resume
+// fallback when the Redis active-ride key is gone, and without the join the
+// resumed snapshot had no driver name/phone/rating/plate/photo at all.
 func (repo *Repository) FindActiveByCustomer(ctx context.Context, customerID string) (*Ride, error) {
-	row := repo.db.QueryRow(ctx,
-		`SELECT `+rideSelectCols+` FROM rides WHERE customer_id = $1 AND status NOT IN ('COMPLETED','CANCELLED') ORDER BY created_at DESC LIMIT 1`,
-		customerID,
-	)
-	return scanRide(row)
+	row := repo.db.QueryRow(ctx, `
+		SELECT `+rideSelectColsWithDriver+`
+		FROM rides r
+		LEFT JOIN driver_profiles dp ON dp.id = r.driver_id
+		LEFT JOIN users du ON du.id = dp.user_id
+		WHERE r.customer_id = $1 AND r.status NOT IN ('COMPLETED','CANCELLED')
+		ORDER BY r.created_at DESC LIMIT 1
+	`, customerID)
+	return scanRideWithDriver(row)
 }
 
 // StaleRide is the minimal projection the dead-man finalizer needs.
