@@ -871,7 +871,7 @@ func isUniqueViolation(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return contains(msg, "23505") || contains(msg, "unique")
+	return contains(msg, "23505") || contains(msg, "unique") || contains(msg, "DUPLICATE") || contains(msg, "duplicate")
 }
 
 func contains(s, sub string) bool {

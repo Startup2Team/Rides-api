@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/rs/zerolog"
 
@@ -122,7 +123,9 @@ func (s *Service) SendToAllDevices(ctx context.Context, userID, title, body, nTy
 			continue
 		}
 		if err := s.client.Send(ctx, tok, title, body, data); err != nil {
-			if errors.Is(err, ErrTokenUnregistered) {
+			errMsg := err.Error()
+			if errors.Is(err, ErrTokenUnregistered) || strings.Contains(errMsg, "SenderId mismatch") {
+				s.log.Info().Str("user_id", userID).Msg("notification: pruning mismatched / expired device token (e.g. Expo Go token)")
 				if pErr := s.repo.PruneDeviceToken(ctx, tok); pErr != nil {
 					s.log.Warn().Err(pErr).Msg("notification: prune dead token failed")
 				}
