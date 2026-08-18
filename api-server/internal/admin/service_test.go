@@ -958,7 +958,7 @@ func TestListCustomers_WithOneRow(t *testing.T) {
 		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
 			return &funcRows{scanFns: []func(...any) error{
 				func(dest ...any) error {
-					// Scan order: id, phone, email(**), fullName(**), roleState,
+					// Scan order: id, phone, email(**), fullName(**), roleState, profile_image_url(**),
 					//   isSuspended, suspensionUntil(**), createdAt, lastSeenAt(**),
 					//   rating, totalRides, totalSpend
 					*dest[0].(*string) = "user-id"
@@ -966,13 +966,14 @@ func TestListCustomers_WithOneRow(t *testing.T) {
 					// dest[2] = **string (email, nullable) - leave nil
 					// dest[3] = **string (fullName, nullable) - leave nil
 					*dest[4].(*string) = "CUSTOMER_ONLY"
-					*dest[5].(*bool) = false
-					// dest[6] = **time.Time (suspensionUntil, nullable) - leave nil
-					*dest[7].(*time.Time) = now
-					// dest[8] = **time.Time (lastSeenAt, nullable) - leave nil
-					*dest[9].(*float64) = 5.0
-					*dest[10].(*int) = 5
-					*dest[11].(*float64) = 25000.0
+					// dest[5] = **string (profileImageUrl, nullable) - leave nil
+					*dest[6].(*bool) = false
+					// dest[7] = **time.Time (suspensionUntil, nullable) - leave nil
+					*dest[8].(*time.Time) = now
+					// dest[9] = **time.Time (lastSeenAt, nullable) - leave nil
+					*dest[10].(*float64) = 5.0
+					*dest[11].(*int) = 5
+					*dest[12].(*float64) = 25000.0
 					return nil
 				},
 			}}, nil
@@ -995,7 +996,7 @@ func TestGetCustomer_Success(t *testing.T) {
 		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
 			call++
 			if call == 1 {
-				// Main user row: id, phone, email(**), fullName(**), roleState,
+				// Main user row: id, phone, email(**), fullName(**), roleState, profile_image_url(**),
 				// isSuspended, suspensionUntil(**), createdAt, lastSeenAt(**), rating
 				return &closureRow{scanFn: func(dest ...any) error {
 					*dest[0].(*string) = "user-id"
@@ -1003,11 +1004,12 @@ func TestGetCustomer_Success(t *testing.T) {
 					// dest[2] = **string (email, nullable) - leave nil
 					// dest[3] = **string (fullName, nullable) - leave nil
 					*dest[4].(*string) = "CUSTOMER_ONLY"
-					*dest[5].(*bool) = false
-					// dest[6] = **time.Time (suspensionUntil, nullable) - leave nil
-					*dest[7].(*time.Time) = now
-					// dest[8] = **time.Time (lastSeenAt, nullable) - leave nil
-					*dest[9].(*float64) = 5.0
+					// dest[5] = **string (profileImageUrl, nullable) - leave nil
+					*dest[6].(*bool) = false
+					// dest[7] = **time.Time (suspensionUntil, nullable) - leave nil
+					*dest[8].(*time.Time) = now
+					// dest[9] = **time.Time (lastSeenAt, nullable) - leave nil
+					*dest[10].(*float64) = 5.0
 					return nil
 				}}
 			}

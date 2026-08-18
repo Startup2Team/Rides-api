@@ -46,7 +46,7 @@ func (s *Service) ListCustomers(ctx context.Context, status, search, sort string
 
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
-		SELECT u.id, u.phone_number, u.email, u.full_name, u.role_state,
+		SELECT u.id, u.phone_number, u.email, u.full_name, u.role_state, u.profile_image_url,
 		       u.is_suspended, u.suspension_until, u.created_at, u.last_seen_at,
 		       COALESCE(cp.rating, 5.0) AS rating,
 		       (SELECT COUNT(*) FROM rides WHERE customer_id = u.id AND status = 'COMPLETED') AS total_rides,
@@ -61,19 +61,20 @@ func (s *Service) ListCustomers(ctx context.Context, status, search, sort string
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, phone, roleState string
-		var email, fullName *string
+		var email, fullName, profileImageUrl *string
 		var isSuspended bool
 		var suspensionUntil, lastSeenAt *time.Time
 		var createdAt time.Time
 		var rating float64
 		var totalRides int
 		var totalSpend float64
-		if err := rows.Scan(&id, &phone, &email, &fullName, &roleState, &isSuspended,
+		if err := rows.Scan(&id, &phone, &email, &fullName, &roleState, &profileImageUrl, &isSuspended,
 			&suspensionUntil, &createdAt, &lastSeenAt, &rating, &totalRides, &totalSpend); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, map[string]interface{}{
 			"id": id, "phone": phone, "email": email, "full_name": fullName,
+			"profile_image_url": profileImageUrl, "photo_url": profileImageUrl,
 			"role_state": roleState, "is_suspended": isSuspended,
 			"suspension_until": suspensionUntil, "created_at": createdAt,
 			"last_seen_at": lastSeenAt, "rating": rating,
@@ -102,19 +103,19 @@ func (s *Service) CustomerOverview(ctx context.Context) (map[string]interface{},
 
 func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]interface{}, error) {
 	var id, phone, roleState string
-	var email, fullName *string
+	var email, fullName, profileImageUrl *string
 	var isSuspended bool
 	var suspensionUntil, lastSeenAt *time.Time
 	var createdAt time.Time
 	var rating float64
 	err := s.db.QueryRow(ctx, `
-		SELECT u.id, u.phone_number, u.email, u.full_name, u.role_state,
+		SELECT u.id, u.phone_number, u.email, u.full_name, u.role_state, u.profile_image_url,
 		       u.is_suspended, u.suspension_until, u.created_at, u.last_seen_at,
 		       COALESCE(cp.rating, 5.0) AS rating
 		FROM users u
 		LEFT JOIN customer_profiles cp ON cp.user_id = u.id
 		WHERE u.id = $1
-	`, userID).Scan(&id, &phone, &email, &fullName, &roleState, &isSuspended, &suspensionUntil, &createdAt, &lastSeenAt, &rating)
+	`, userID).Scan(&id, &phone, &email, &fullName, &roleState, &profileImageUrl, &isSuspended, &suspensionUntil, &createdAt, &lastSeenAt, &rating)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperrors.ErrNotFound
@@ -164,6 +165,7 @@ func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]in
 
 	return map[string]interface{}{
 		"id": id, "phone": phone, "email": email, "full_name": fullName,
+		"profile_image_url": profileImageUrl, "photo_url": profileImageUrl,
 		"role_state": roleState, "is_suspended": isSuspended,
 		"suspension_until": suspensionUntil, "created_at": createdAt,
 		"last_seen_at": lastSeenAt, "rating": rating,
