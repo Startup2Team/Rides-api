@@ -997,7 +997,7 @@ func TestGetCustomer_Success(t *testing.T) {
 			call++
 			if call == 1 {
 				// Main user row: id, phone, email(**), fullName(**), roleState, profile_image_url(**),
-				// isSuspended, suspensionUntil(**), createdAt, lastSeenAt(**), rating
+				// isSuspended, suspensionUntil(**), createdAt, lastSeenAt(**), rating, emergencyContactName(**), emergencyContactPhone(**)
 				return &closureRow{scanFn: func(dest ...any) error {
 					*dest[0].(*string) = "user-id"
 					*dest[1].(*string) = "+250780000000"
@@ -1010,6 +1010,8 @@ func TestGetCustomer_Success(t *testing.T) {
 					*dest[8].(*time.Time) = now
 					// dest[9] = **time.Time (lastSeenAt, nullable) - leave nil
 					*dest[10].(*float64) = 5.0
+					// dest[11] = **string (emergencyContactName, nullable) - leave nil
+					// dest[12] = **string (emergencyContactPhone, nullable) - leave nil
 					return nil
 				}}
 			}
