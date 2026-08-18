@@ -579,32 +579,30 @@ func (s *Service) GetHistory(ctx context.Context, rideID, actorRole, actorUserID
 	return entries, nil
 }
 
-// InitiateCall logs the call timestamp and returns the Africa's Talking masking number.
-func (s *Service) InitiateCall(ctx context.Context, rideID, driverUserID string) (string, error) {
-	// Only the assigned driver may pull the masked number for this ride.
+// InitiateCall records that the assigned driver initiated a call for this ride
+// (timestamp + analytics). Number masking was removed with Africa's Talking; the
+// call itself is placed by the device dialer against the counterparty's real
+// number, so there is nothing to return.
+func (s *Service) InitiateCall(ctx context.Context, rideID, driverUserID string) error {
+	// Only the assigned driver may mark a call on this ride.
 	r, err := s.rideRepo.FindByIDAndDriver(ctx, rideID, driverUserID)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if r.Status != ride.StatusNegotiating {
-		return "", apperrors.ErrInvalidTransition
+		return apperrors.ErrInvalidTransition
 	}
 
 	if err := s.repo.MarkCallInitiated(ctx, rideID); err != nil {
-		return "", err
+		return err
 	}
 
 	s.redis.HSet(ctx, rkeys.K.RideNegotiation(rideID), "call_initiated_at", "true")
-
-	maskedNumber, err := s.telephony.GetMaskedNumber(ctx, rideID)
-	if err != nil {
-		return "", err
-	}
 
 	s.analytics.Publish(ctx, "ride.call_initiated", "DRIVER", driverUserID, &rideID, map[string]interface{}{
 		"ride_id":   rideID,
 		"driver_id": driverUserID,
 	})
 
-	return maskedNumber, nil
+	return nil
 }

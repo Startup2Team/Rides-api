@@ -102,17 +102,6 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 		// Non-production: log the failure but continue — OTP already printed above.
 	}
 
-	// Dev WhatsApp fallback — useful when AT SMS sandbox isn't configured but
-	// you have a registered AT_WHATSAPP_SENDER number.
-	if s.cfg.Env != "production" && s.cfg.AT.WhatsAppEnabled {
-		if err := s.telephony.SendOTPWhatsApp(ctx, phone, otp); err != nil {
-			// Non-fatal — the OTP is already in the dev logs.
-			s.log.Warn().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: whatsapp send failed (non-fatal in dev)")
-		} else {
-			s.log.Info().Str("phone", logger.MaskMSISDN(phone)).Msg("otp: sent via WhatsApp (dev mode)")
-		}
-	}
-
 	return devOTP, nil
 }
 
