@@ -1147,6 +1147,11 @@ func main() {
 			r.Get("/drivers/{id}/referrals", adminH.GetDriverReferrals)
 			r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
 			r.Patch("/drivers/{id}", adminH.UpdateDriver)
+			// DB-1: admin-only national ID set/correct. Same role gate as the other
+			// driver mutations below (SuperAdmin, OpsManager, SupportStaff) for now —
+			// flagged for senior-security to weigh in on whether national ID edits
+			// warrant a narrower gate (e.g. excluding SupportStaff).
+			r.Patch("/drivers/{id}/national-id", adminH.SetDriverNationalID)
 			// r.Delete("/drivers/{id}", adminH.DeleteDriver) REMOVED - suspend/reinstate only
 			r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 			r.Post("/drivers/{id}/reject", adminH.RejectDriver)

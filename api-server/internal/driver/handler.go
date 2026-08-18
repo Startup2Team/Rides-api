@@ -124,6 +124,12 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		LicenseExpiryDateCamel       string `json:"licenseExpiryDate"`
 		InsuranceExpiryDateCamel     string `json:"insuranceExpiryDate"`
 		AuthorizationExpiryDateCamel string `json:"authorizationExpiryDate"`
+		// National ID (DB-1) — OPTIONAL: older app builds that don't send these
+		// keep applying exactly as before. Country-aware format validation +
+		// normalization happens in Service.Apply (pkg/nationalid), not here, so
+		// there is exactly one place that decides what a valid ID looks like.
+		NationalIDNumber  string `json:"national_id_number"`
+		NationalIDCountry string `json:"national_id_country"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -203,6 +209,8 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		LicenseExpiryDate:       licenseExpiryDate,
 		InsuranceExpiryDate:     insuranceExpiryDate,
 		AuthorizationExpiryDate: authorizationExpiryDate,
+		NationalIDNumber:        body.NationalIDNumber,
+		NationalIDCountry:       body.NationalIDCountry,
 	})
 	if err != nil {
 		respond.Error(w, err)

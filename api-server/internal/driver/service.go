@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -16,6 +17,7 @@ import (
 	"github.com/workspace/ride-platform/pkg/documents"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
+	"github.com/workspace/ride-platform/pkg/nationalid"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 	"github.com/workspace/ride-platform/pkg/timeutil"
 
@@ -66,6 +68,15 @@ type ApplyInput struct {
 	LicenseExpiryDate       *time.Time
 	InsuranceExpiryDate     *time.Time
 	AuthorizationExpiryDate *time.Time
+	// NationalIDNumber/NationalIDCountry are OPTIONAL (additive: omitted by
+	// older app versions behaves exactly as before). When both are supplied,
+	// Apply normalizes+validates them (pkg/nationalid) before this reaches the
+	// repository, and the repository captures them onto users in the same
+	// transaction as the driver_profiles write — first-write-wins; a value
+	// already on file for this user is never overwritten here (admin-only
+	// correction, see internal/admin SetDriverNationalID).
+	NationalIDNumber  string
+	NationalIDCountry string
 }
 
 type CreditChecker interface {
@@ -123,16 +134,24 @@ func (s *Service) DemandHeatmap(ctx context.Context, windowMin int, center *geo.
 // approved and the user's role_state is promoted to DRIVER_ACTIVE so
 // they can go online without waiting for an admin action.
 func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
+	// National ID is optional (additive) but, when supplied, must be normalized
+	// and format-valid BEFORE any DB write — a bad format must never reach
+	// Postgres just to be caught by the lenient backstop CHECK there.
+	if in.NationalIDNumber != "" || in.NationalIDCountry != "" {
+		country, number := nationalid.Normalize(in.NationalIDCountry, in.NationalIDNumber)
+		if verr := nationalid.Validate(country, number); verr != nil {
+			return nil, apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+		}
+		in.NationalIDCountry, in.NationalIDNumber = country, number
+	}
+
 	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
 	if err == nil {
 		// Profile already exists.
 		if existing.ApprovalStatus == "REJECTED" {
 			// Profile was previously rejected; allow resubmission.
 			if rerr := s.repo.UpdateProfileForResubmission(ctx, in); rerr != nil {
-				if isUniqueViolation(rerr) {
-					return nil, apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
-				}
-				return nil, rerr
+				return nil, mapApplyErr(rerr)
 			}
 
 			if s.cfg.Driver.DevAutoApprove {
@@ -168,10 +187,7 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 
 	profile, err := s.repo.CreateProfile(ctx, in)
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
-		}
-		return nil, err
+		return nil, mapApplyErr(err)
 	}
 	// Mirror the application's vehicle into driver_vehicles (the multi-vehicle
 	// source of truth). Tolerate a duplicate plate: the profile row is already
@@ -872,6 +888,27 @@ func isUniqueViolation(err error) bool {
 	}
 	msg := err.Error()
 	return contains(msg, "23505") || contains(msg, "unique")
+}
+
+// mapApplyErr translates a driver_profiles/users write error from
+// CreateProfile or UpdateProfileForResubmission into the client-facing error
+// it represents. Shared by both call sites in Apply so the new-application
+// and resubmission paths can never drift on how they report a duplicate.
+//
+// ErrNationalIDTaken (uq_users_national_id, 23505) is checked FIRST and
+// specifically, ahead of the generic isUniqueViolation substring match — a
+// national ID collision must always get the "already registered" message,
+// never be swallowed by the generic "vehicle plate or license number already
+// registered" one meant for driver_profiles' own unique columns.
+func mapApplyErr(err error) error {
+	if errors.Is(err, ErrNationalIDTaken) {
+		return apperrors.New(http.StatusConflict, "NATIONAL_ID_ALREADY_REGISTERED",
+			"This national ID is already registered to another account.")
+	}
+	if isUniqueViolation(err) {
+		return apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
+	}
+	return err
 }
 
 func contains(s, sub string) bool {

@@ -369,6 +369,9 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 			DocumentType string `json:"document_type"`
 			FileURL      string `json:"file_url"`
 		} `json:"documents"`
+		// National ID (DB-1) — optional (additive).
+		NationalIDNumber  string `json:"national_id_number"`
+		NationalIDCountry string `json:"national_id_country"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
@@ -417,7 +420,9 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		MomoProvider: body.MomoProvider, MomoPayCode: body.MomoPayCode,
 		MerchantPayCode: body.MerchantPayCode, ProfileImageURL: body.ProfileImageURL,
 		PassengerSeats: body.PassengerSeats, LoadCapacityKg: body.LoadCapacityKg,
-		Documents: docs,
+		Documents:         docs,
+		NationalIDNumber:  body.NationalIDNumber,
+		NationalIDCountry: body.NationalIDCountry,
 	})
 	if err != nil {
 		respond.Error(w, err)
@@ -470,6 +475,40 @@ func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, err)
 		return
 	}
+	respond.NoContent(w)
+}
+
+// PATCH /api/v1/admin/drivers/:id/national-id
+//
+// Admin-only edit path for a driver's national ID (DB-1). Drivers cannot
+// self-edit a captured ID — this is the ONLY way to set or correct one after
+// onboarding, and every call is audited with the MASKED number (never the
+// full value) in the audit metadata.
+func (h *Handler) SetDriverNationalID(w http.ResponseWriter, r *http.Request) {
+	adminID, role := adminCtx(r)
+	profileID := chi.URLParam(r, "id")
+
+	var body struct {
+		NationalIDNumber  string `json:"national_id_number"  validate:"required"`
+		NationalIDCountry string `json:"national_id_country" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if body.NationalIDNumber == "" || body.NationalIDCountry == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "national_id_number and national_id_country are both required")
+		return
+	}
+
+	masked, country, err := h.svc.SetDriverNationalID(r.Context(), profileID, body.NationalIDCountry, body.NationalIDNumber)
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	h.audit.Record(r.Context(), adminID, role, "driver.set_national_id", "driver", profileID,
+		"Set driver national ID", map[string]any{"country": country, "national_id_masked": masked})
 	respond.NoContent(w)
 }
 

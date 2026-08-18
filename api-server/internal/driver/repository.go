@@ -6,10 +6,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
+	"github.com/workspace/ride-platform/pkg/nationalid"
 )
 
 // Profile is the driver_profiles view.
@@ -48,6 +50,12 @@ type Profile struct {
 	LicenseExpiryDate       *time.Time `json:"license_expiry_date,omitempty"`
 	InsuranceExpiryDate     *time.Time `json:"insurance_expiry_date,omitempty"`
 	AuthorizationExpiryDate *time.Time `json:"authorization_expiry_date,omitempty"`
+	// NationalIDNumber is MASKED (last 4 characters only) even in the driver's
+	// own profile — the unredacted number is exposed nowhere except the admin
+	// driver-detail payload (internal/admin GetDriver). See pkg/nationalid.Mask.
+	// DB-1: flagged for senior-security review (own-profile masking vs full).
+	NationalIDNumber  *string `json:"national_id_number,omitempty"`
+	NationalIDCountry *string `json:"national_id_country,omitempty"`
 }
 
 // Document is a driver_documents row.
@@ -81,6 +89,54 @@ type Document struct {
 // keeping their APPROVED status, because approval lives on driver_profiles and
 // nothing bound it to a specific file.
 var ErrDocumentLocked = errors.New("document is approved and view-only; ask an admin to request a re-upload")
+
+// ErrNationalIDTaken is returned when the submitted national_id_number is
+// already registered to a DIFFERENT account (the uq_users_national_id partial
+// unique index, Postgres 23505). This is the one-ID-one-account fraud guard
+// (ban evasion / registration-bonus farming) surfacing as a friendly error
+// instead of a raw constraint violation.
+var ErrNationalIDTaken = errors.New("this national ID is already registered to another account")
+
+// isNationalIDConflict reports whether err is specifically a 23505 violation
+// of uq_users_national_id — as opposed to any other unique constraint (vehicle
+// plate, license number) that a driver_profiles write might also hit. Matching
+// on the constraint name (not a message substring) is what lets the two be
+// told apart and mapped to different client-facing errors.
+func isNationalIDConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_users_national_id"
+}
+
+// setUserNationalIDTx captures a national ID onto users within an existing
+// transaction, but ONLY when the caller supplied one (empty country/number is
+// the additive "not provided" case — old app versions and admin flows that
+// omit the field must behave exactly as before) AND only when this user does
+// not already have one on file.
+//
+// The "already have one" guard is what makes this the driver-onboarding path
+// rather than the admin-edit path: a driver applying/resubmitting can never
+// overwrite a previously captured ID this way (silently a no-op instead of an
+// error, since resubmitting the same value they already have on file is the
+// common case and shouldn't fail). Correcting an existing value is
+// admin-only — see internal/admin SetDriverNationalID, which updates
+// unconditionally.
+func setUserNationalIDTx(ctx context.Context, tx pgx.Tx, userID, country, number string) error {
+	if number == "" || country == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE users
+		SET national_id_number = $1, national_id_country = $2, updated_at = NOW()
+		WHERE id = $3 AND national_id_number IS NULL
+	`, number, country, userID)
+	if err != nil {
+		if isNationalIDConflict(err) {
+			return ErrNationalIDTaken
+		}
+		return err
+	}
+	return nil
+}
 
 // NearbyDriver is the anonymised view returned to customers.
 type NearbyDriver struct {
@@ -128,11 +184,13 @@ const profileSelectCols = `
 	COALESCE(dp.policy_accepted, FALSE),
 	u.fcm_token,
 	dp.license_expiry_date, dp.insurance_expiry_date, dp.authorization_expiry_date,
-	dp.created_at, dp.updated_at
+	dp.created_at, dp.updated_at,
+	u.national_id_number, u.national_id_country
 `
 
 func scanProfile(row pgx.Row) (*Profile, error) {
 	p := &Profile{}
+	var rawNationalID *string
 	err := row.Scan(
 		&p.ID, &p.UserID, &p.TransportType, &p.VehiclePlate, &p.LicenseNumber,
 		&p.DateOfBirth, &p.City, &p.MomoPayCode,
@@ -148,12 +206,19 @@ func scanProfile(row pgx.Row) (*Profile, error) {
 		&p.FCMToken,
 		&p.LicenseExpiryDate, &p.InsuranceExpiryDate, &p.AuthorizationExpiryDate,
 		&p.CreatedAt, &p.UpdatedAt,
+		&rawNationalID, &p.NationalIDCountry,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperrors.ErrNotFound
 		}
 		return nil, err
+	}
+	// Mask at the point of exposure so the raw number never travels further
+	// than this scan, in either direction (own profile or session bootstrap).
+	if rawNationalID != nil {
+		masked := nationalid.Mask(*rawNationalID)
+		p.NationalIDNumber = &masked
 	}
 	return p, nil
 }
@@ -224,9 +289,22 @@ func (r *Repository) FindProfileByUserID(ctx context.Context, userID string) (*P
 	return scanProfile(row)
 }
 
+// CreateProfile inserts a new driver_profiles row and, when the applicant
+// supplied a national ID, captures it onto users in the SAME transaction.
+//
+// The national ID column lives on users (not driver_profiles) because it is
+// an attribute of the person, who already has a users row from auth — so this
+// can never be a separate, non-atomic write: either both the application and
+// the ID capture land, or neither does.
 func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var id string
-	err := r.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO driver_profiles (
 			user_id, transport_type, vehicle_plate, license_number, date_of_birth,
 			city, momo_pay_code, momo_provider,
@@ -245,6 +323,14 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 		in.Gender,
 	).Scan(&id)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := setUserNationalIDTx(ctx, tx, in.UserID, in.NationalIDCountry, in.NationalIDNumber); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return r.FindProfileByUserID(ctx, in.UserID)
@@ -719,8 +805,17 @@ func (r *Repository) HasActiveRide(ctx context.Context, driverUserID string) boo
 	return err == nil && count > 0
 }
 
+// UpdateProfileForResubmission updates a previously-REJECTED profile and, like
+// CreateProfile, captures the national ID (if supplied and not already set for
+// this user) onto users in the SAME transaction as the driver_profiles update.
 func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyInput) error {
-	_, err := r.db.Exec(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, err = tx.Exec(ctx, `
 		UPDATE driver_profiles
 		SET transport_type = $1,
 		    vehicle_plate = $2,
@@ -753,5 +848,13 @@ func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyI
 		in.Gender,
 		in.UserID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if err := setUserNationalIDTx(ctx, tx, in.UserID, in.NationalIDCountry, in.NationalIDNumber); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }

@@ -19,6 +19,11 @@ type AdminService interface {
 	SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
 	ReinstateDriver(ctx context.Context, profileID string) error
 	GetDriver(ctx context.Context, profileID string) (map[string]interface{}, error)
+	// SetDriverNationalID is the ONLY admin-facing path that can set or
+	// correct a driver's national ID after onboarding (DB-1). Returns the
+	// masked number + normalized country for the caller to write into the
+	// audit log — never the raw number.
+	SetDriverNationalID(ctx context.Context, profileID, country, number string) (maskedNumber, normCountry string, err error)
 	GetDriverReferrals(ctx context.Context, profileID string) ([]map[string]interface{}, error)
 	UpdateDriver(ctx context.Context, profileID string, fields map[string]interface{}) error
 	DeleteDriver(ctx context.Context, profileID string) error

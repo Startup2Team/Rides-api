@@ -65,6 +65,7 @@ type mockSvc struct {
 	notifyDriverFn               func(ctx context.Context, driverRef, title, body, reason, createdBy string) (map[string]interface{}, error)
 	listNotificationCampaignsFn  func(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error)
 	deleteNotificationCampaignFn func(ctx context.Context, id string) error
+	setDriverNationalIDFn        func(ctx context.Context, profileID, country, number string) (string, string, error)
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
@@ -123,6 +124,12 @@ func (m *mockSvc) GetDriver(ctx context.Context, profileID string) (map[string]i
 }
 func (m *mockSvc) UpdateDriver(ctx context.Context, profileID string, fields map[string]interface{}) error {
 	return m.updateDriverFn(ctx, profileID, fields)
+}
+func (m *mockSvc) SetDriverNationalID(ctx context.Context, profileID, country, number string) (string, string, error) {
+	if m.setDriverNationalIDFn != nil {
+		return m.setDriverNationalIDFn(ctx, profileID, country, number)
+	}
+	return "", "", nil
 }
 func (m *mockSvc) DeleteDriver(ctx context.Context, profileID string) error {
 	return m.deleteDriverFn(ctx, profileID)

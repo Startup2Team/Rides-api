@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/workspace/ride-platform/pkg/documents"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
+	"github.com/workspace/ride-platform/pkg/nationalid"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
 
@@ -25,6 +26,24 @@ import (
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// isNationalIDConflict reports whether err is specifically a 23505 violation
+// of uq_users_national_id, as opposed to any other unique constraint a users/
+// driver_profiles write might hit (phone, plate, license). This is what lets
+// "this national ID is already registered" be told apart from the generic
+// driver-registration conflicts in mapAdminCreateDriverError.
+func isNationalIDConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_users_national_id"
+}
+
+// errNationalIDAlreadyRegistered is the one client-facing error for a national
+// ID collision — the ban-evasion / bonus-farming guard (uq_users_national_id)
+// surfacing as a friendly message instead of a raw constraint violation.
+func errNationalIDAlreadyRegistered() error {
+	return apperrors.New(http.StatusConflict, "NATIONAL_ID_ALREADY_REGISTERED",
+		"This national ID is already registered to another account.")
 }
 
 func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID string) error {
@@ -355,6 +374,12 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 	var totalRides int
 	var isOnline bool
 	var createdAt time.Time
+	// National ID (DB-1): UNREDACTED here deliberately — this is the one
+	// payload allowed to carry the full number (an admin reviewing/approving a
+	// driver needs to check it against the physical document). Every other
+	// surface (driver's own profile, driver list) gets either the masked form
+	// or nothing at all. Flagged for senior-security review.
+	var nationalIDNumber, nationalIDCountry *string
 
 	err := s.db.QueryRow(ctx, `
 		SELECT dp.id, dp.user_id, u.phone_number, u.full_name, u.profile_image_url,
@@ -366,7 +391,8 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		       dp.approval_status, dp.suspension_reason, dp.rejection_reason,
 		       dp.acceptance_rate, dp.total_rides, dp.is_online,
 		       dp.license_expiry_date, dp.insurance_expiry_date, dp.authorization_expiry_date,
-		       dp.created_at
+		       dp.created_at,
+		       u.national_id_number, u.national_id_country
 		FROM driver_profiles dp JOIN users u ON u.id = dp.user_id
 		WHERE dp.id = $1
 	`, profileID).Scan(
@@ -380,6 +406,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		&acceptanceRate, &totalRides, &isOnline,
 		&licenseExpiryDate, &insuranceExpiryDate, &authorizationExpiryDate,
 		&createdAt,
+		&nationalIDNumber, &nationalIDCountry,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -411,7 +438,48 @@ func (s *Service) GetDriver(ctx context.Context, profileID string) (map[string]i
 		"authorization_expiry_date": authorizationExpiryDate,
 		"created_at":                createdAt,
 		"documents":                 docs,
+		"national_id_number":        nationalIDNumber,
+		"national_id_country":       nationalIDCountry,
 	}, nil
+}
+
+// SetDriverNationalID is the ONLY path that can set or change a driver's
+// national ID after onboarding — drivers cannot self-edit it once captured
+// (UpdateProfileFields has no such field, by design). The caller (handler
+// layer) is responsible for writing the admin_audit_log entry using the
+// masked number this returns; the raw number is never logged.
+//
+// Unlike the driver-onboarding capture (first-write-wins, see
+// setUserNationalIDTx in internal/driver), this write is UNCONDITIONAL — an
+// admin is explicitly authorised to correct an already-captured value, which
+// is the whole point of this endpoint existing.
+func (s *Service) SetDriverNationalID(ctx context.Context, profileID, country, number string) (maskedNumber, normCountry string, err error) {
+	var userID string
+	if err := s.db.QueryRow(ctx,
+		`SELECT user_id FROM driver_profiles WHERE id = $1`, profileID,
+	).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", apperrors.ErrNotFound
+		}
+		return "", "", err
+	}
+
+	normCountry, normNumber := nationalid.Normalize(country, number)
+	if verr := nationalid.Validate(normCountry, normNumber); verr != nil {
+		return "", "", apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	}
+
+	if _, err := s.db.Exec(ctx, `
+		UPDATE users SET national_id_number = $1, national_id_country = $2, updated_at = NOW()
+		WHERE id = $3
+	`, normNumber, normCountry, userID); err != nil {
+		if isNationalIDConflict(err) {
+			return "", "", errNationalIDAlreadyRegistered()
+		}
+		return "", "", err
+	}
+
+	return nationalid.Mask(normNumber), normCountry, nil
 }
 
 func (s *Service) GetDriverReferrals(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
@@ -705,6 +773,12 @@ type AdminCreateDriverInput struct {
 	PassengerSeats  *int
 	LoadCapacityKg  *int
 	Documents       []DriverDocumentInput
+	// NationalIDNumber/NationalIDCountry are OPTIONAL (additive) — admin
+	// registrations that omit them behave exactly as before. When both are
+	// supplied they are normalized + format-validated (pkg/nationalid) before
+	// any DB write.
+	NationalIDNumber  string
+	NationalIDCountry string
 }
 
 // Document types now come from pkg/documents, which also records whether each
@@ -717,25 +791,60 @@ type AdminCreateDriverInput struct {
 // CreateDriverFromAdmin registers a new driver (user + profile) from the admin panel.
 // If a user with the phone already exists, reuse their account.
 func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDriverInput) (map[string]interface{}, error) {
+	// National ID (DB-1) is optional — admin registrations that omit it behave
+	// exactly as before. When supplied, normalize + format-validate BEFORE any
+	// DB write, same as the driver-onboarding path.
+	var natCountry, natNumber string
+	if in.NationalIDNumber != "" || in.NationalIDCountry != "" {
+		natCountry, natNumber = nationalid.Normalize(in.NationalIDCountry, in.NationalIDNumber)
+		if verr := nationalid.Validate(natCountry, natNumber); verr != nil {
+			return nil, apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+		}
+	}
+
 	// 1. Find or create the user record
 	var userID string
 	err := s.db.QueryRow(ctx,
 		`SELECT id FROM users WHERE phone_number = $1`, in.Phone).Scan(&userID)
 	if err != nil {
-		// User not found — create one
+		// User not found — create one. NULLIF turns an empty (not supplied)
+		// national ID into a real NULL rather than a value that would collide
+		// with every other not-yet-captured user under the partial unique index
+		// (the index only applies WHERE national_id_number IS NOT NULL, so this
+		// matters: an empty string is NOT NULL and would immediately violate
+		// uniqueness with the second empty-string admin registration).
 		err = s.db.QueryRow(ctx, `
-			INSERT INTO users (phone_number, full_name, role_state)
-			VALUES ($1, $2, 'DRIVER_ACTIVE')
+			INSERT INTO users (phone_number, full_name, role_state, national_id_number, national_id_country)
+			VALUES ($1, $2, 'DRIVER_ACTIVE', NULLIF($3, ''), NULLIF($4, ''))
 			RETURNING id`,
-			in.Phone, in.FullName,
+			in.Phone, in.FullName, natNumber, natCountry,
 		).Scan(&userID)
 		if err != nil {
+			if isNationalIDConflict(err) {
+				return nil, errNationalIDAlreadyRegistered()
+			}
 			return nil, fmt.Errorf("create user: %w", err)
 		}
 	} else {
 		// User exists — promote to DRIVER_ACTIVE
 		_, _ = s.db.Exec(ctx,
 			`UPDATE users SET role_state = 'DRIVER_ACTIVE', updated_at = NOW() WHERE id = $1`, userID)
+
+		// Capture the national ID onto the existing account, but ONLY if it does
+		// not already have one on file (first-write-wins, same rule as driver
+		// onboarding) — an admin correcting an already-captured value must go
+		// through SetDriverNationalID, which is audited.
+		if natNumber != "" {
+			if _, uerr := s.db.Exec(ctx, `
+				UPDATE users SET national_id_number = $1, national_id_country = $2, updated_at = NOW()
+				WHERE id = $3 AND national_id_number IS NULL
+			`, natNumber, natCountry, userID); uerr != nil {
+				if isNationalIDConflict(uerr) {
+					return nil, errNationalIDAlreadyRegistered()
+				}
+				return nil, fmt.Errorf("capture national id: %w", uerr)
+			}
+		}
 	}
 
 	dob := in.DateOfBirth
@@ -837,6 +946,12 @@ func mapAdminCreateDriverError(err error, in AdminCreateDriverInput) error {
 	case strings.Contains(msg, "driver_profiles_license_number_key"):
 		return apperrors.Newf(http.StatusConflict, "LICENSE_ALREADY_EXISTS",
 			"Licence number %s is already registered to another driver", in.LicenseNumber)
+	case strings.Contains(msg, "uq_users_national_id"):
+		// Defense in depth: the national ID write actually happens earlier (on
+		// the users INSERT/UPDATE, before this driver_profiles insert), so this
+		// branch should be unreachable in practice — kept in case that ordering
+		// ever changes.
+		return errNationalIDAlreadyRegistered()
 	case strings.Contains(msg, "23505"):
 		return apperrors.Newf(http.StatusConflict, "CONFLICT",
 			"A driver with this phone, plate, or licence number already exists")
