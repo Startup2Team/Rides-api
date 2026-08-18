@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/rs/zerolog/log"
 	"github.com/workspace/ride-platform/internal/middleware"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/respond"
@@ -112,8 +113,13 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		EmergencyContactName:  body.EmergencyContactName,
 		EmergencyContactPhone: body.EmergencyContactPhone,
 	}); err != nil {
+		log.Error().Err(err).Str("user_id", claims.UserID).Msg("customer: failed to update profile")
 		respond.Error(w, err)
 		return
+	}
+
+	if body.ProfileImageURL != nil {
+		log.Info().Str("user_id", claims.UserID).Str("profile_image_url", *body.ProfileImageURL).Msg("customer: profile_image_url updated successfully")
 	}
 
 	respond.NoContent(w)
