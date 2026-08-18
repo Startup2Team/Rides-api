@@ -81,7 +81,7 @@ func NewHandler(cfg *appcfg.Config) (*Handler, error) {
 		cfg:       cfg,
 		client:    s3Client,
 		presigner: s3.NewPresignClient(s3Client),
-		proxy:     strings.EqualFold(cfg.Storage.Provider, "minio"),
+		proxy:     strings.EqualFold(cfg.Storage.Provider, "minio") || cfg.Storage.Endpoint != "",
 	}
 	if h.proxy {
 		go h.SeedDevMockFiles()
