@@ -156,11 +156,13 @@ func (h *Handler) InitiateCall(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 	rideID := chi.URLParam(r, "ride_id")
 
-	maskedNumber, err := h.svc.InitiateCall(r.Context(), rideID, claims.UserID)
-	if err != nil {
+	// Records the call + fires analytics. Number masking was removed with Africa's
+	// Talking, so there is no body to return — the app dials the real number and
+	// already ignores this response.
+	if err := h.svc.InitiateCall(r.Context(), rideID, claims.UserID); err != nil {
 		respond.Error(w, err)
 		return
 	}
 
-	respond.OK(w, map[string]string{"masked_number": maskedNumber})
+	respond.NoContent(w)
 }

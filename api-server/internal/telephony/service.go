@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 	"github.com/workspace/ride-platform/config"
 )
 
-// Service wraps Africa's Talking SMS and masked-number APIs.
+// Service wraps the Pindo (pindo.io) SMS and Verify (2FA) APIs.
 type Service struct {
 	cfg    *config.Config
 	client *http.Client
@@ -32,8 +31,6 @@ func New(cfg *config.Config, log zerolog.Logger) *Service {
 }
 
 const (
-	atSMSEndpoint         = "https://api.africastalking.com/version1/messaging"
-	atWhatsAppEndpoint    = "https://content.africastalking.com/version1/messaging/whatsapp"
 	pindoSMSEndpoint      = "https://api.pindo.io/v1/sms/"
 	pindoVerifyEndpoint   = "https://api.pindo.io/v1/sms/verify"
 	pindoVerifyCheckPoint = "https://api.pindo.io/v1/sms/verify/check"
@@ -121,8 +118,7 @@ func (s *Service) CheckVerify(ctx context.Context, requestID, code string) (ok b
 	return strings.EqualFold(strings.TrimSpace(out.Message), "success"), nil
 }
 
-// SendOTP sends a 6-digit OTP to the given E.164 phone number, via whichever SMS
-// provider is configured (SMS_PROVIDER: "pindo" or "africastalking").
+// SendOTP sends a 6-digit OTP to the given E.164 phone number via Pindo SMS.
 func (s *Service) SendOTP(ctx context.Context, phone, otp string) error {
 	// Bilingual (Kinyarwanda + English). GSM-7-safe; ~153 chars = 1 SMS segment.
 	message := fmt.Sprintf(
@@ -132,12 +128,9 @@ func (s *Service) SendOTP(ctx context.Context, phone, otp string) error {
 	return s.sendSMS(ctx, phone, message)
 }
 
-// sendSMS routes a plain SMS to the active provider.
+// sendSMS delivers a plain SMS via Pindo, the only supported gateway.
 func (s *Service) sendSMS(ctx context.Context, phone, message string) error {
-	if strings.EqualFold(s.cfg.SMSProvider, "pindo") {
-		return s.sendPindoSMS(ctx, phone, message)
-	}
-	return s.sendAfricasTalkingSMS(ctx, phone, message)
+	return s.sendPindoSMS(ctx, phone, message)
 }
 
 // sendPindoSMS sends an SMS via Pindo (pindo.io) — the Rwanda-local gateway.
@@ -176,110 +169,4 @@ func (s *Service) sendPindoSMS(ctx context.Context, phone, message string) error
 		return fmt.Errorf("telephony: pindo error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
-}
-
-// sendAfricasTalkingSMS sends an SMS via the Africa's Talking messaging API.
-func (s *Service) sendAfricasTalkingSMS(ctx context.Context, phone, message string) error {
-	if s.cfg.AT.APIKey == "" || s.cfg.AT.Username == "" {
-		s.log.Warn().Msg("Africa's Talking credentials not configured — skipping SMS send")
-		if s.cfg.Env == "production" {
-			return fmt.Errorf("telephony: Africa's Talking credentials not configured")
-		}
-		return nil
-	}
-
-	form := url.Values{}
-	form.Set("username", s.cfg.AT.Username)
-	form.Set("to", phone)
-	form.Set("message", message)
-	if s.cfg.AT.SenderID != "" {
-		form.Set("from", s.cfg.AT.SenderID)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, atSMSEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return fmt.Errorf("telephony: build request: %w", err)
-	}
-	req.Header.Set("apiKey", s.cfg.AT.APIKey)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("telephony: send sms: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telephony: AT error %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// SendOTPWhatsApp delivers an OTP message via Africa's Talking WhatsApp Business API.
-// Only used as a dev-mode fallback — requires AT_WHATSAPP_ENABLED=true and a
-// registered AT_WHATSAPP_SENDER number. Failures are non-fatal in non-production.
-func (s *Service) SendOTPWhatsApp(ctx context.Context, phone, otp string) error {
-	if s.cfg.AT.APIKey == "" || s.cfg.AT.Username == "" {
-		s.log.Warn().Msg("Africa's Talking credentials not configured — skipping WhatsApp OTP")
-		return nil
-	}
-
-	message := fmt.Sprintf("Your Taravelis verification code is: *%s*\n\nValid for 10 minutes. Do not share it.", otp)
-
-	// AT WhatsApp API uses JSON body, not form-encoded.
-	type waBody struct {
-		Username    string `json:"username"`
-		PhoneNumber string `json:"phoneNumber"`
-		Message     string `json:"message"`
-		From        string `json:"from,omitempty"`
-	}
-	body := waBody{
-		Username:    s.cfg.AT.Username,
-		PhoneNumber: phone,
-		Message:     message,
-	}
-	if s.cfg.AT.WhatsAppSender != "" {
-		body.From = s.cfg.AT.WhatsAppSender
-	}
-
-	jsonBytes, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("telephony: marshal whatsapp body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, atWhatsAppEndpoint, bytes.NewReader(jsonBytes))
-	if err != nil {
-		return fmt.Errorf("telephony: build whatsapp request: %w", err)
-	}
-	req.Header.Set("apiKey", s.cfg.AT.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("telephony: send whatsapp: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telephony: AT WhatsApp error %d: %s", resp.StatusCode, string(b))
-	}
-
-	return nil
-}
-
-// GetMaskedNumber returns the Africa's Talking masking number for a ride.
-// This is a static number from config — AT routes the call through it
-// so neither party sees the other's real phone number.
-func (s *Service) GetMaskedNumber(ctx context.Context, rideID string) (string, error) {
-	if s.cfg.AT.MaskingNumber == "" {
-		return "", fmt.Errorf("telephony: masking number not configured")
-	}
-	// In production: call AT Phone Number Masking API to create a session.
-	// For v1, the masking number is a shared number per region.
-	return s.cfg.AT.MaskingNumber, nil
 }
