@@ -112,7 +112,7 @@ func (s *Service) GetCustomer(ctx context.Context, userID string) (map[string]in
 		SELECT u.id, u.phone_number, u.email, u.full_name, u.role_state, u.profile_image_url,
 		       u.is_suspended, u.suspension_until, u.created_at, u.last_seen_at,
 		       COALESCE(cp.rating, 5.0) AS rating,
-		       cp.emergency_contact_name, cp.emergency_contact_phone
+		       u.emergency_contact_name, u.emergency_contact_phone
 		FROM users u
 		LEFT JOIN customer_profiles cp ON cp.user_id = u.id
 		WHERE u.id = $1
