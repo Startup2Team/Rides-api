@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
 
+	"github.com/rs/zerolog/log"
 	"github.com/workspace/ride-platform/internal/middleware"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
@@ -102,13 +104,19 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		TransportType           string `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
-		VehiclePlate            string `json:"vehicle_plate"    validate:"required"`
-		LicenseNumber           string `json:"license_number"   validate:"required"`
-		DateOfBirth             string `json:"date_of_birth"    validate:"required"` // YYYY-MM-DD
+		TransportType           string `json:"transport_type"`
+		TransportTypeCamel      string `json:"vehicleType"`
+		VehiclePlate            string `json:"vehicle_plate"`
+		VehiclePlateCamel       string `json:"vehiclePlate"`
+		LicenseNumber           string `json:"license_number"`
+		LicenseNumberCamel      string `json:"licenseNumber"`
+		DateOfBirth             string `json:"date_of_birth"`
+		DateOfBirthCamel        string `json:"dateOfBirth"`
 		City                    string `json:"city"             validate:"required"`
-		MomoPayCode             string `json:"momo_pay_code"    validate:"required"`
-		MomoProvider            string `json:"momo_provider"    validate:"required,oneof=mtn airtel"`
+		MomoPayCode             string `json:"momo_pay_code"`
+		MomoPayCodeCamel        string `json:"momoPayCode"`
+		MomoProvider            string `json:"momo_provider"`
+		MomoProviderCamel       string `json:"momoProvider"`
 		Province                string `json:"province"         validate:"required"`
 		District                string `json:"district"         validate:"required"`
 		Sector                  string `json:"sector"           validate:"required"`
@@ -130,8 +138,65 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-	if err := validate.Struct(body); err != nil {
-		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+
+	// Resolve camelCase fallbacks
+	if body.TransportType == "" {
+		body.TransportType = body.TransportTypeCamel
+	}
+	if body.VehiclePlate == "" {
+		body.VehiclePlate = body.VehiclePlateCamel
+	}
+	if body.LicenseNumber == "" {
+		body.LicenseNumber = body.LicenseNumberCamel
+	}
+	if body.DateOfBirth == "" {
+		body.DateOfBirth = body.DateOfBirthCamel
+	}
+	if body.MomoPayCode == "" {
+		body.MomoPayCode = body.MomoPayCodeCamel
+	}
+	if body.MomoProvider == "" {
+		body.MomoProvider = body.MomoProviderCamel
+	}
+
+	// Standardize transport_type to uppercase backend code
+	if body.TransportType != "" {
+		upper := strings.ToUpper(body.TransportType)
+		if upper == "CAB" || upper == "CAB_TAXI" {
+			body.TransportType = "CAB_TAXI"
+		} else if upper == "MOTO" || upper == "MOTO_BIKE" {
+			body.TransportType = "MOTO_BIKE"
+		} else if upper == "HILUX" || upper == "LIGHT_HILUX" {
+			body.TransportType = "LIGHT_HILUX"
+		} else if upper == "FUSO" || upper == "HEAVY_FUSO" {
+			body.TransportType = "HEAVY_FUSO"
+		} else if upper == "RIFANI" || upper == "TUK_TUK" {
+			body.TransportType = "TUK_TUK"
+		}
+	}
+
+	if body.TransportType == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "transport_type is required")
+		return
+	}
+	if body.VehiclePlate == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "vehicle_plate is required")
+		return
+	}
+	if body.LicenseNumber == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "license_number is required")
+		return
+	}
+	if body.DateOfBirth == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "date_of_birth is required")
+		return
+	}
+	if body.MomoPayCode == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "momo_pay_code is required")
+		return
+	}
+	if body.MomoProvider == "" {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "momo_provider is required")
 		return
 	}
 
@@ -205,6 +270,7 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		AuthorizationExpiryDate: authorizationExpiryDate,
 	})
 	if err != nil {
+		log.Error().Err(err).Str("user_id", claims.UserID).Msg("driver apply: failed to process application")
 		respond.Error(w, err)
 		return
 	}

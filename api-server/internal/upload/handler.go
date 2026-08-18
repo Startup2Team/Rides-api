@@ -77,11 +77,14 @@ func NewHandler(cfg *appcfg.Config) (*Handler, error) {
 			o.BaseEndpoint = aws.String(r2Endpoint)
 		}
 	})
+	isMinIO := strings.EqualFold(cfg.Storage.Provider, "minio")
+	isDevEnv := strings.EqualFold(cfg.Env, "development") || strings.EqualFold(cfg.Env, "local") || cfg.Env == ""
+
 	h := &Handler{
 		cfg:       cfg,
 		client:    s3Client,
 		presigner: s3.NewPresignClient(s3Client),
-		proxy:     strings.EqualFold(cfg.Storage.Provider, "minio"),
+		proxy:     isMinIO && isDevEnv,
 	}
 	if h.proxy {
 		go h.SeedDevMockFiles()

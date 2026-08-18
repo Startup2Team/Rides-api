@@ -119,7 +119,7 @@ const profileSelectCols = `
 	COALESCE(dp.momo_provider, ''),
 	COALESCE(dp.province, ''), COALESCE(dp.district, ''), COALESCE(dp.sector, ''),
 	COALESCE(dp.cell, ''), COALESCE(dp.village, ''),
-	COALESCE(dp.gender, ''),
+	''::text,
 	dp.passenger_seats, dp.load_capacity_kg,
 	dp.approval_status, dp.approved_by, dp.approved_at,
 	dp.rejection_reason, dp.suspension_reason,
@@ -232,9 +232,8 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 			city, momo_pay_code, momo_provider,
 			province, district, sector, cell, village,
 			passenger_seats, load_capacity_kg,
-			license_expiry_date, insurance_expiry_date, authorization_expiry_date,
-			gender
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+			license_expiry_date, insurance_expiry_date, authorization_expiry_date
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id
 	`,
 		in.UserID, in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
@@ -242,10 +241,12 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
-		in.Gender,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
+	}
+	if in.Gender != "" {
+		_, _ = r.db.Exec(ctx, `UPDATE users SET gender = $1 WHERE id = $2`, in.Gender, in.UserID)
 	}
 	return r.FindProfileByUserID(ctx, in.UserID)
 }
@@ -739,19 +740,23 @@ func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyI
 		    license_expiry_date = $15,
 		    insurance_expiry_date = $16,
 		    authorization_expiry_date = $17,
-		    gender = COALESCE(NULLIF($18, ''), gender),
 		    approval_status = 'PENDING_REVIEW',
 		    rejection_reason = NULL,
 		    updated_at = NOW()
-		WHERE user_id = $19
+		WHERE user_id = $18
 	`,
 		in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
 		in.City, in.MomoPayCode, in.MomoProvider,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
-		in.Gender,
 		in.UserID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if in.Gender != "" {
+		_, _ = r.db.Exec(ctx, `UPDATE users SET gender = $1 WHERE id = $2`, in.Gender, in.UserID)
+	}
+	return nil
 }
