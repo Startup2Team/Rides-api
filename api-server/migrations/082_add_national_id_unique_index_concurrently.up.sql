@@ -1,0 +1,31 @@
+-- DB-1 round 2 (lock review), step 3 of 3: the one-ID-one-account fraud guard
+-- (ban evasion / registration-bonus farming), built WITHOUT blocking writes.
+--
+-- CREATE INDEX CONCURRENTLY takes SHARE UPDATE EXCLUSIVE (allows concurrent
+-- reads AND writes) instead of the SHARE lock a plain CREATE UNIQUE INDEX
+-- takes, which blocks all writes to `users` for the entire build.
+--
+-- THIS STATEMENT MUST BE THE ONLY STATEMENT IN THIS FILE. golang-migrate's pgx
+-- driver (see cmd/server/main.go runMigrations — MultiStatementEnabled is not
+-- set, so it defaults false) sends an entire migration file as ONE query
+-- string. Postgres's simple query protocol implicitly wraps MULTIPLE
+-- statements in one string in a single transaction block, and
+-- "CREATE INDEX CONCURRENTLY cannot run inside a transaction block" — but a
+-- string containing exactly ONE statement is NOT wrapped that way, so
+-- CONCURRENTLY works as long as nothing else shares this file. Do not add
+-- another statement here, even a trivial one, and do not merge this back into
+-- 080 or 081.
+--
+-- A CONCURRENTLY build that fails partway leaves an INVALID index behind
+-- (Postgres does not clean this up automatically) — if this migration ever
+-- fails on a shared database, `DROP INDEX CONCURRENTLY IF EXISTS
+-- uq_users_national_id;` before re-running it.
+--
+-- A 23505 unique-violation on this index is the app's signal for "this
+-- national ID is already registered" (internal/driver, internal/admin match
+-- on the constraint/index name `uq_users_national_id`) — the ban-evasion /
+-- bonus-farming guard. Legitimate admin corrections are a plain UPDATE, which
+-- this index permits.
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_users_national_id
+    ON users (national_id_country, national_id_number)
+    WHERE national_id_number IS NOT NULL;

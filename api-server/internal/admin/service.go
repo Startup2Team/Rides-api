@@ -8,6 +8,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
+
+	"github.com/workspace/ride-platform/config"
 )
 
 // DBTX is the minimal database interface the Service requires.
@@ -45,6 +47,7 @@ type Service struct {
 	rdb      goredis.UniversalClient
 	bonus    BonusService
 	notifier Notifier
+	cfg      *config.Config
 }
 
 func NewService(db DBTX, log zerolog.Logger) *Service {
@@ -54,6 +57,22 @@ func NewService(db DBTX, log zerolog.Logger) *Service {
 func (s *Service) SetPackagesService(svc PackagesService) { s.packages = svc }
 func (s *Service) SetBonusService(svc BonusService)       { s.bonus = svc }
 func (s *Service) SetNotifier(n Notifier)                 { s.notifier = n }
+
+// SetConfig wires platform config — currently only used for the DB-1 staged
+// national-ID rollout flag (cfg.Driver.NationalIDRequired), gating
+// ApproveDriver/ReinstateDriver/CreateDriverFromAdmin's mandatory checks. Nil
+// cfg (not wired) is treated the same as an unset flag — not required — see
+// nationalIDRequired.
+func (s *Service) SetConfig(cfg *config.Config) { s.cfg = cfg }
+
+// nationalIDRequired reports whether the DB-1 mandatory-national-ID gate is
+// currently enforced (NATIONAL_ID_REQUIRED). Nil cfg (e.g. a test Service
+// that never called SetConfig) is treated as "not required" — the flag's own
+// documented default — rather than panicking or defaulting to the stricter
+// behaviour.
+func (s *Service) nationalIDRequired() bool {
+	return s.cfg != nil && s.cfg.Driver.NationalIDRequired
+}
 
 // SetRedis wires the Redis client used by account-assist operations
 // (clearing OTP lockouts, GPS anomaly counters).

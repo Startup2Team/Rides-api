@@ -877,6 +877,18 @@ func main() {
 			r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending))
 			r.Get("/profile", driverH.GetProfile)
 			r.Put("/profile", driverH.UpdateProfile)
+			// DB-1 round 2: owner self-correction of a national ID, while
+			// PENDING_REVIEW/REJECTED/NEEDS_MORE_INFO (role_state DRIVER_PENDING
+			// covers all three) — locks once APPROVED (role_state DRIVER_ACTIVE).
+			// Rate-limited per driver: a real correction happens a handful of
+			// times; this caps the endpoint's use as an ID-enumeration oracle
+			// (the ALREADY_REGISTERED 409 leaks whether a given ID is taken) to
+			// negligible throughput without hurting UX. UserRateLimit429 (not
+			// the silent-204 UserRateLimit): a driver hitting the cap while
+			// genuinely correcting a typo needs a visible 429, not a request
+			// that looks like it succeeded but silently did nothing.
+			r.With(mw.UserRateLimit429(rdb, "national_id_write", 5, time.Hour)).
+				Patch("/national-id", driverH.SetOwnNationalID)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
 			// One-call bootstrap: profile + active vehicle + ride flag + doc alerts.
 			r.Get("/session", driverH.GetSession)
@@ -1245,6 +1257,22 @@ func main() {
 			r.Get("/users/{id}/timeline", adminH.GetAccountTimeline)
 		})
 
+		// DB-1 round 2: national ID edit narrowed to SuperAdmin + OpsManager
+		// only — SupportStaff can still view the driver detail page (GET
+		// /drivers/{id} above, in the Operations Bucket), but the number there
+		// is masked for them; only this narrower group can set/correct it.
+		// Rate-limited per admin: a real correction happens a handful of times;
+		// this caps the endpoint's use as a national-ID-existence enumeration
+		// oracle (uq_users_national_id's 409 vs success leaks whether an ID is
+		// already registered) to negligible throughput without hurting UX.
+		// UserRateLimit429 (not the silent-204 UserRateLimit): an admin hitting
+		// the cap mid-correction needs a visible 429, not a silent no-op that
+		// looks like the edit succeeded.
+		r.With(
+			mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.OpsManager),
+			mw.UserRateLimit429(rdb, "national_id_write", 5, time.Hour),
+		).Patch("/drivers/{id}/national-id", adminH.SetDriverNationalID)
+
 		// --- Finance Bucket (Super Admin, Finance Manager, Analytics Staff) ---
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.FinanceManager, adminrole.AnalyticsStaff))
@@ -1447,6 +1475,7 @@ func main() {
 	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
 	adminSvc.SetNotifier(notifySvc) // push driver approve/reject decisions to the driver's devices
+	adminSvc.SetConfig(cfg)         // NATIONAL_ID_REQUIRED staged-rollout flag (DB-1)
 	// Fire "Schedule for later" notification campaigns when their time arrives.
 	go adminSvc.RunScheduledCampaignDispatcher(bgCtx)
 

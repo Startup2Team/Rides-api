@@ -3,10 +3,12 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
 	"net/http"
+	"sort"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -16,6 +18,7 @@ import (
 	"github.com/workspace/ride-platform/pkg/documents"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
+	"github.com/workspace/ride-platform/pkg/nationalid"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
 	"github.com/workspace/ride-platform/pkg/timeutil"
 
@@ -66,6 +69,16 @@ type ApplyInput struct {
 	LicenseExpiryDate       *time.Time
 	InsuranceExpiryDate     *time.Time
 	AuthorizationExpiryDate *time.Time
+	// NationalIDNumber/NationalIDCountry are MANDATORY (DB-1 round 2: national
+	// ID is now required for driver approval — see Apply and
+	// admin.ApproveDriver's defensive gate). Apply rejects a missing value
+	// before any DB write, then normalizes+validates (pkg/nationalid) before
+	// this reaches the repository. The repository captures them onto users in
+	// the same transaction as the driver_profiles write — first-write-wins for
+	// a brand-new application; a REJECTED driver's resubmission overwrites
+	// unconditionally (self-correction, see overwriteUserNationalIDTx).
+	NationalIDNumber  string
+	NationalIDCountry string
 }
 
 type CreditChecker interface {
@@ -118,21 +131,58 @@ func (s *Service) DemandHeatmap(ctx context.Context, windowMin int, center *geo.
 	return cells, nil
 }
 
+// resolveNationalIDInput normalizes and format-validates a national ID
+// against the platform's NATIONAL_ID_REQUIRED rollout flag
+// (config.DriverConfig.NationalIDRequired, DB-1 staged rollout).
+//
+// Capture/validation stays active whenever BOTH fields are present,
+// regardless of the flag — a bad format must never reach Postgres just to be
+// caught by the lenient backstop CHECK there (migration 080/081). Only
+// whether a value must be present AT ALL is gated: with required=false, a
+// missing/partial pair is treated as "not supplied" (both returned empty, no
+// error) so old app versions that don't yet send these fields keep applying
+// exactly as before; with required=true this is byte-for-byte the original
+// DB-1 round 2 behaviour.
+func resolveNationalIDInput(required bool, country, number string) (normCountry, normNumber string, err error) {
+	if country == "" || number == "" {
+		if required {
+			return "", "", apperrors.New(http.StatusBadRequest, "NATIONAL_ID_REQUIRED",
+				"national_id_number and national_id_country are required")
+		}
+		return "", "", nil
+	}
+	normCountry, normNumber = nationalid.Normalize(country, number)
+	if verr := nationalid.Validate(normCountry, normNumber); verr != nil {
+		return "", "", apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	}
+	return normCountry, normNumber, nil
+}
+
 // Apply submits a driver application.
 // In dev mode (DEV_AUTO_APPROVE_DRIVERS=true) the profile is immediately
 // approved and the user's role_state is promoted to DRIVER_ACTIVE so
 // they can go online without waiting for an admin action.
 func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
+	// National ID: mandatory only when cfg.Driver.NationalIDRequired is set
+	// (DB-1 staged rollout — see resolveNationalIDInput). Reject a missing
+	// value before any DB write when required, then normalize + format-
+	// validate (pkg/nationalid) whenever a value IS supplied. This applies to
+	// every call through Apply, including a REJECTED driver's resubmission: a
+	// resubmission missing the field when the flag is on is not "keep the old
+	// value", it is a bad request, same as any other required field.
+	country, number, err := resolveNationalIDInput(s.cfg.Driver.NationalIDRequired, in.NationalIDCountry, in.NationalIDNumber)
+	if err != nil {
+		return nil, err
+	}
+	in.NationalIDCountry, in.NationalIDNumber = country, number
+
 	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
 	if err == nil {
 		// Profile already exists.
 		if existing.ApprovalStatus == "REJECTED" {
 			// Profile was previously rejected; allow resubmission.
 			if rerr := s.repo.UpdateProfileForResubmission(ctx, in); rerr != nil {
-				if isUniqueViolation(rerr) {
-					return nil, apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
-				}
-				return nil, rerr
+				return nil, mapApplyErr(rerr)
 			}
 
 			if s.cfg.Driver.DevAutoApprove {
@@ -168,10 +218,7 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 
 	profile, err := s.repo.CreateProfile(ctx, in)
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
-		}
-		return nil, err
+		return nil, mapApplyErr(err)
 	}
 	// Mirror the application's vehicle into driver_vehicles (the multi-vehicle
 	// source of truth). Tolerate a duplicate plate: the profile row is already
@@ -204,6 +251,74 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 	}
 
 	return profile, nil
+}
+
+// editableNationalIDStatuses whitelists the approval_status values a driver
+// may still self-correct their OWN national ID under. Anything else —
+// APPROVED, SUSPENDED, or a future status this list hasn't been taught about
+// — is locked; the whitelist (not a blacklist of the two locked ones) is
+// deliberate so a new status defaults to closed, not open.
+var editableNationalIDStatuses = map[string]bool{
+	"PENDING_REVIEW":  true,
+	"REJECTED":        true,
+	"NEEDS_MORE_INFO": true,
+}
+
+// editableNationalIDStatusList is editableNationalIDStatuses as a slice, for
+// binding into the `= ANY($n)` clause in Repository.SetOwnNationalID. Derived
+// from the map (not re-typed) so the atomic DB guard and this whitelist can
+// never drift apart.
+var editableNationalIDStatusList = func() []string {
+	statuses := make([]string, 0, len(editableNationalIDStatuses))
+	for status := range editableNationalIDStatuses {
+		statuses = append(statuses, status)
+	}
+	sort.Strings(statuses)
+	return statuses
+}()
+
+// ErrNationalIDLocked is returned when a driver tries to self-correct their
+// national ID after approval. Approval is a decision about a specific,
+// physically-checked document; once made, the only remaining way to correct
+// the number on file is an admin edit (internal/admin.SetDriverNationalID),
+// which is audited.
+var ErrNationalIDLocked = apperrors.New(http.StatusConflict, "NATIONAL_ID_LOCKED",
+	"Your national ID is locked after approval. Contact support to correct it.")
+
+// SetOwnNationalID lets a driver correct their OWN national ID while their
+// approval is not yet final (see editableNationalIDStatuses). This is the
+// owner self-correction path (DB-1 round 2) — it replaces the old
+// mask-own-view + silent-resubmit behaviour: the driver can now see their
+// full number (FindProfileByUserID) AND fix it here, right up until an admin
+// approves them, at which point it locks.
+//
+// The existence check (FindProfileByUserID, for a 404 when there is somehow
+// no driver_profiles row) and the approval-status gate are deliberately NOT
+// the same read: the gate is enforced by repo.SetOwnNationalID itself, in the
+// SAME statement as the write (WHERE dp.approval_status = ANY(editable...)),
+// so there is no window between "check" and "write" for an admin's
+// concurrent ApproveDriver to land in. A stale profile.ApprovalStatus read
+// here is never used to authorize the write — that closes the TOCTOU where a
+// driver could race their own edit against an in-flight approval and change
+// the number on file after APPROVED.
+func (s *Service) SetOwnNationalID(ctx context.Context, userID, country, number string) error {
+	if _, err := s.repo.FindProfileByUserID(ctx, userID); err != nil {
+		return err
+	}
+
+	normCountry, normNumber := nationalid.Normalize(country, number)
+	if verr := nationalid.Validate(normCountry, normNumber); verr != nil {
+		return apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	}
+
+	if err := s.repo.SetOwnNationalID(ctx, userID, normCountry, normNumber); err != nil {
+		if errors.Is(err, ErrNationalIDTaken) {
+			return apperrors.New(http.StatusConflict, "NATIONAL_ID_ALREADY_REGISTERED",
+				"This national ID is already registered to another account.")
+		}
+		return err
+	}
+	return nil
 }
 
 // UpdateProfile updates mutable driver profile fields.
@@ -872,6 +987,27 @@ func isUniqueViolation(err error) bool {
 	}
 	msg := err.Error()
 	return contains(msg, "23505") || contains(msg, "unique")
+}
+
+// mapApplyErr translates a driver_profiles/users write error from
+// CreateProfile or UpdateProfileForResubmission into the client-facing error
+// it represents. Shared by both call sites in Apply so the new-application
+// and resubmission paths can never drift on how they report a duplicate.
+//
+// ErrNationalIDTaken (uq_users_national_id, 23505) is checked FIRST and
+// specifically, ahead of the generic isUniqueViolation substring match — a
+// national ID collision must always get the "already registered" message,
+// never be swallowed by the generic "vehicle plate or license number already
+// registered" one meant for driver_profiles' own unique columns.
+func mapApplyErr(err error) error {
+	if errors.Is(err, ErrNationalIDTaken) {
+		return apperrors.New(http.StatusConflict, "NATIONAL_ID_ALREADY_REGISTERED",
+			"This national ID is already registered to another account.")
+	}
+	if isUniqueViolation(err) {
+		return apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
+	}
+	return err
 }
 
 func contains(s, sub string) bool {

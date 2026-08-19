@@ -124,6 +124,12 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		LicenseExpiryDateCamel       string `json:"licenseExpiryDate"`
 		InsuranceExpiryDateCamel     string `json:"insuranceExpiryDate"`
 		AuthorizationExpiryDateCamel string `json:"authorizationExpiryDate"`
+		// National ID (DB-1) — OPTIONAL: older app builds that don't send these
+		// keep applying exactly as before. Country-aware format validation +
+		// normalization happens in Service.Apply (pkg/nationalid), not here, so
+		// there is exactly one place that decides what a valid ID looks like.
+		NationalIDNumber  string `json:"national_id_number"`
+		NationalIDCountry string `json:"national_id_country"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -203,6 +209,8 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		LicenseExpiryDate:       licenseExpiryDate,
 		InsuranceExpiryDate:     insuranceExpiryDate,
 		AuthorizationExpiryDate: authorizationExpiryDate,
+		NationalIDNumber:        body.NationalIDNumber,
+		NationalIDCountry:       body.NationalIDCountry,
 	})
 	if err != nil {
 		respond.Error(w, err)
@@ -451,6 +459,37 @@ func NearbyDriversHandler(svc *Service) http.HandlerFunc {
 
 		respond.OK(w, map[string]interface{}{"drivers": drivers})
 	}
+}
+
+// PATCH /api/v1/driver/national-id
+//
+// Owner self-correction (DB-1 round 2): a driver may correct their OWN
+// national ID while approval_status is PENDING_REVIEW, REJECTED, or
+// NEEDS_MORE_INFO. Once APPROVED it locks (409 NATIONAL_ID_LOCKED) — the
+// only remaining path is an admin edit (internal/admin SetDriverNationalID),
+// which is audited old-value-to-new.
+func (h *Handler) SetOwnNationalID(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+
+	var body struct {
+		NationalIDNumber  string `json:"national_id_number"  validate:"required"`
+		NationalIDCountry string `json:"national_id_country" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	if err := h.svc.SetOwnNationalID(r.Context(), claims.UserID, body.NationalIDCountry, body.NationalIDNumber); err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	respond.NoContent(w)
 }
 
 // POST /api/v1/driver/policy/accept
