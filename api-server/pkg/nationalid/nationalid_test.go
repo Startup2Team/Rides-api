@@ -11,11 +11,11 @@ import (
 
 func TestNormalize(t *testing.T) {
 	cases := []struct {
-		name          string
-		country       string
-		number        string
-		wantCountry   string
-		wantNumber    string
+		name        string
+		country     string
+		number      string
+		wantCountry string
+		wantNumber  string
 	}{
 		{"already clean RW", "rw", "1234567890123456", "RW", "1234567890123456"},
 		{"spaces and dashes RW", "rw", "1234 5678-9012 3456", "RW", "1234567890123456"},
