@@ -69,31 +69,37 @@ func (s *Service) AfterPackagePurchase(
 }
 
 // GrantRegistrationBonus grants the REGISTRATION tier bonus to a newly approved
-// driver. Idempotent — safe to call multiple times (returns nil if already granted).
+// driver, recording it in the legacy bonus_grants table for driver-facing
+// history (GET /bonuses). Idempotent — safe to call multiple times (returns
+// (0, nil) if already granted or no tier is configured).
+//
+// Returns the bonus rides actually granted this call so the caller (admin
+// approval flow) can mirror the same amount into the spendable v4 ledger —
+// bonus_grants alone is never read by the go-online/accept credit gates (DB-4).
 // GrantRegistrationBonus implements admin.BonusService.
-func (s *Service) GrantRegistrationBonus(ctx context.Context, driverID, vehicleTypeID string) (any, error) {
+func (s *Service) GrantRegistrationBonus(ctx context.Context, driverID, vehicleTypeID string) (int, error) {
 	already, err := s.repo.AlreadyGrantedRegistration(ctx, driverID)
 	if err != nil || already {
-		return nil, err // already granted or lookup failed — either way, skip
+		return 0, err // already granted or lookup failed — either way, skip
 	}
 
 	tier, err := s.repo.RegistrationTier(ctx)
 	if err != nil || tier == nil {
-		return nil, err // no registration tier configured
+		return 0, err // no registration tier configured
 	}
 
 	expiresAt := time.Now().Add(30 * 24 * time.Hour)
 	grant, err := s.repo.InsertGrant(ctx, driverID, tier.ID, nil, vehicleTypeID, tier.BonusRides, expiresAt)
 	if err != nil {
 		s.log.Error().Err(err).Str("driver_id", driverID).Msg("bonus: registration grant failed")
-		return nil, err
+		return 0, err
 	}
 
 	s.log.Info().
 		Str("driver_id", driverID).
 		Int("bonus_rides", tier.BonusRides).
 		Msg("bonus: registration bonus granted")
-	return grant, nil
+	return grant.BonusRides, nil
 }
 
 // DriverGrants returns the bonus history for a driver (their own data only).

@@ -259,6 +259,108 @@ func TestApproveDriver_DBError(t *testing.T) {
 	assert.ErrorIs(t, err, dbErr)
 }
 
+// ── ApproveDriver: registration-bonus ledger mirror (DB-4) ────────────────
+//
+// bonus.Service.GrantRegistrationBonus only ever wrote the legacy bonus_grants
+// table (keyed on users.id) — display history the go-online/accept credit
+// gates never read. These fakes prove ApproveDriver also mirrors the granted
+// amount into the v4 ledger (via PackagesService), and only when a bonus was
+// actually granted this call (idempotent — no ledger touch on a repeat/no-op).
+
+// fakeBonusService is a test double for admin.BonusService.
+type fakeBonusService struct {
+	bonusRides                    int
+	err                           error
+	calls                         int
+	gotDriverID, gotVehicleTypeID string
+}
+
+func (f *fakeBonusService) GrantRegistrationBonus(_ context.Context, driverID, vehicleTypeID string) (int, error) {
+	f.calls++
+	f.gotDriverID, f.gotVehicleTypeID = driverID, vehicleTypeID
+	return f.bonusRides, f.err
+}
+
+// fakePackagesService is a test double for admin.PackagesService.
+type fakePackagesService struct {
+	grantRegCalls                 int
+	gotDriverID, gotVehicleTypeID string
+	gotBonusRides                 int
+	grantRegErr                   error
+	freeTrialCalls                int
+}
+
+func (f *fakePackagesService) GrantFreeTrialIfEligible(_ context.Context, _, _ string) error {
+	f.freeTrialCalls++
+	return nil
+}
+
+func (f *fakePackagesService) GrantRegistrationBonus(_ context.Context, driverUserID, vehicleTypeID string, bonusRides int) error {
+	f.grantRegCalls++
+	f.gotDriverID, f.gotVehicleTypeID, f.gotBonusRides = driverUserID, vehicleTypeID, bonusRides
+	return f.grantRegErr
+}
+
+// approveDriverMockDB returns a mockDB wired for ApproveDriver's two lookups:
+// driver_profiles (user_id/transport_type) and the vehicle_types code->id resolve
+// inside the bonus block.
+func approveDriverMockDB() *mockDB {
+	return &mockDB{
+		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
+			if strings.Contains(sql, "vehicle_types") {
+				return scanRow("vt-uuid-123")
+			}
+			return scanRow("driver-uuid", "MOTO_BIKE")
+		},
+	}
+}
+
+func TestApproveDriver_MirrorsRegistrationBonusIntoLedger(t *testing.T) {
+	svc := newTestService(approveDriverMockDB())
+	bonusSvc := &fakeBonusService{bonusRides: 30}
+	pkgSvc := &fakePackagesService{}
+	svc.SetBonusService(bonusSvc)
+	svc.SetPackagesService(pkgSvc)
+
+	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, bonusSvc.calls)
+	require.Equal(t, 1, pkgSvc.grantRegCalls, "registration bonus must be mirrored into the spendable v4 ledger")
+	assert.Equal(t, "driver-uuid", pkgSvc.gotDriverID)
+	assert.Equal(t, "vt-uuid-123", pkgSvc.gotVehicleTypeID)
+	assert.Equal(t, 30, pkgSvc.gotBonusRides)
+}
+
+func TestApproveDriver_SkipsLedgerMirror_WhenBonusAlreadyGranted(t *testing.T) {
+	svc := newTestService(approveDriverMockDB())
+	// bonusRides == 0 is how bonus.Service signals "already granted / no tier
+	// configured, nothing new happened this call" — the ledger mirror must not
+	// fire, otherwise a retried approval would double-grant.
+	bonusSvc := &fakeBonusService{bonusRides: 0}
+	pkgSvc := &fakePackagesService{}
+	svc.SetBonusService(bonusSvc)
+	svc.SetPackagesService(pkgSvc)
+
+	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, bonusSvc.calls)
+	assert.Equal(t, 0, pkgSvc.grantRegCalls, "no bonus rides granted this call — ledger must not be touched")
+}
+
+func TestApproveDriver_DoesNotMirror_WhenBonusGrantErrors(t *testing.T) {
+	svc := newTestService(approveDriverMockDB())
+	bonusSvc := &fakeBonusService{err: errors.New("db down")}
+	pkgSvc := &fakePackagesService{}
+	svc.SetBonusService(bonusSvc)
+	svc.SetPackagesService(pkgSvc)
+
+	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
+	require.NoError(t, err, "registration bonus grant failure is best-effort and must not fail the approval")
+	assert.Equal(t, 0, pkgSvc.grantRegCalls)
+}
+
 // ── RejectDriver ──────────────────────────────────────────────────────────
 
 func TestRejectDriver_Success(t *testing.T) {

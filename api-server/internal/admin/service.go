@@ -19,14 +19,22 @@ type DBTX interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// BonusService grants the registration bonus when a driver is approved.
+// BonusService grants the registration bonus when a driver is approved and
+// records it for driver-facing bonus history. Returns the bonus rides
+// actually granted this call (0 if already granted / not configured) so the
+// caller can mirror the same amount into the spendable v4 ledger (DB-4).
 type BonusService interface {
-	GrantRegistrationBonus(ctx context.Context, driverID, vehicleTypeID string) (any, error)
+	GrantRegistrationBonus(ctx context.Context, driverID, vehicleTypeID string) (bonusRides int, err error)
 }
 
-// PackagesService grants the free-trial credit when a driver is first approved.
+// PackagesService grants the free-trial credit when a driver is first approved,
+// and mirrors the registration bonus into the spendable v4 entitlement ledger.
 type PackagesService interface {
 	GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error
+	// GrantRegistrationBonus credits bonusRides onto the v4 ledger (driver_entitlements,
+	// keyed on driver_profiles.id) so the legacy bonus_grants write above is actually
+	// spendable at the go-online/accept gates. Idempotent per driver+vehicle type.
+	GrantRegistrationBonus(ctx context.Context, driverUserID, vehicleTypeID string, bonusRides int) error
 }
 
 // Notifier persists an in-app notification and pushes it to every device the

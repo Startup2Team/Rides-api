@@ -75,13 +75,26 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 	}
 
 	// Grant the 30-ride registration bonus (separate from the free-trial package credit).
+	// DB-4: the legacy bonus_grants write below is display-only (GET /bonuses) — the
+	// go-online/accept credit gates and /entitlements only ever read the v4 ledger, so
+	// the same amount must also land there via s.packages or the bonus is unspendable.
 	if s.bonus != nil {
 		// Look up the vehicle_type_id for the transport_type code.
 		var vehicleTypeID string
 		_ = s.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, transportType).Scan(&vehicleTypeID)
 		if vehicleTypeID != "" {
-			if _, err := s.bonus.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID); err != nil {
+			bonusRides, err := s.bonus.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID)
+			if err != nil {
 				s.log.Warn().Err(err).Str("driver_user_id", driverUserID).Msg("admin: registration bonus grant failed")
+			} else if bonusRides > 0 && s.packages != nil {
+				if err := s.packages.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID, bonusRides); err != nil {
+					// This is money-affecting (an unspendable promise, same bug as DB-4):
+					// log loudly rather than best-effort-and-forget.
+					s.log.Error().Err(err).
+						Str("driver_user_id", driverUserID).
+						Int("bonus_rides", bonusRides).
+						Msg("admin: registration bonus ledger mirror failed — driver will see the bonus but cannot spend it")
+				}
 			}
 		}
 	}
