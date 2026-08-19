@@ -102,6 +102,21 @@ func (s *Service) GrantRegistrationBonus(ctx context.Context, driverID, vehicleT
 	return grant.BonusRides, nil
 }
 
+// RegistrationTierBonusRides returns the ride count configured on the active
+// REGISTRATION bonus tier (0 if none is configured or active).
+//
+// Exists so callers that only get a signal like "already granted" out of
+// GrantRegistrationBonus (which returns (0, nil) for that case) can still
+// discover what amount the tier grants — needed to self-heal a driver whose
+// legacy bonus_grants row exists but whose v4 ledger mirror never landed.
+func (s *Service) RegistrationTierBonusRides(ctx context.Context) (int, error) {
+	tier, err := s.repo.RegistrationTier(ctx)
+	if err != nil || tier == nil {
+		return 0, err
+	}
+	return tier.BonusRides, nil
+}
+
 // DriverGrants returns the bonus history for a driver (their own data only).
 func (s *Service) DriverGrants(ctx context.Context, driverID string) ([]*Grant, error) {
 	return s.repo.DriverGrants(ctx, driverID)

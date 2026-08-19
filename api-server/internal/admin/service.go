@@ -25,6 +25,12 @@ type DBTX interface {
 // caller can mirror the same amount into the spendable v4 ledger (DB-4).
 type BonusService interface {
 	GrantRegistrationBonus(ctx context.Context, driverID, vehicleTypeID string) (bonusRides int, err error)
+	// RegistrationTierBonusRides returns the ride count configured on the active
+	// REGISTRATION tier (0 if none configured). Used to self-heal a driver whose
+	// legacy bonus_grants row exists but whose v4 ledger mirror is missing: when
+	// GrantRegistrationBonus reports "already granted" (0, nil), this recovers the
+	// amount so the mirror can still be retried.
+	RegistrationTierBonusRides(ctx context.Context) (int, error)
 }
 
 // PackagesService grants the free-trial credit when a driver is first approved,

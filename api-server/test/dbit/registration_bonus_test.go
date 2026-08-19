@@ -4,6 +4,7 @@ package dbit
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -136,6 +137,104 @@ func TestGrantRegistrationBonus_IsIdempotent(t *testing.T) {
 		WHERE driver_id = $1 AND idempotency_key = $2`, profileID, "registration:"+profileID,
 	).Scan(&ledgerRows))
 	require.Equal(t, 1, ledgerRows, "exactly one ledger entry must exist per driver despite the retry")
+}
+
+// failOnceMirror wraps a real admin.PackagesService but fails the FIRST call
+// to GrantRegistrationBonus (simulating the transient DB blip that DB-4's
+// ledger mirror can hit), then delegates to the real implementation on every
+// subsequent call. GrantFreeTrialIfEligible always delegates untouched.
+type failOnceMirror struct {
+	inner  admin.PackagesService
+	failed bool
+}
+
+func (f *failOnceMirror) GrantFreeTrialIfEligible(ctx context.Context, driverUserID, vehicleTypeCode string) error {
+	return f.inner.GrantFreeTrialIfEligible(ctx, driverUserID, vehicleTypeCode)
+}
+
+func (f *failOnceMirror) GrantRegistrationBonus(ctx context.Context, driverUserID, vehicleTypeID string, bonusRides int) error {
+	if !f.failed {
+		f.failed = true
+		return errors.New("simulated transient ledger mirror failure")
+	}
+	return f.inner.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID, bonusRides)
+}
+
+// Regression for the self-heal fix: if the FIRST approval's ledger mirror
+// write fails (logged, not fatal — ApproveDriver must still succeed), the
+// legacy bonus.Service now reports "already granted" on every later call, so
+// naively gating the mirror on "bonusRides > 0" would leave that driver with
+// an unspendable bonus forever (the only recovery being the manual backfill
+// command). A RE-APPROVAL must repair the missing mirror.
+func TestApproveDriver_ReapprovalSelfHealsMissingLedgerMirror(t *testing.T) {
+	ctx := context.Background()
+
+	phone := uniquePhone()
+	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-regbonus-selfheal", "android", nil, nil)
+	require.NoError(t, err)
+
+	adminUserID := insertAdminAccount(t, ctx, "reg-bonus-selfheal-"+uniqueKey("a")+"@rides.test")
+
+	key := uniqueKey("d")
+	var profileID string
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO driver_profiles
+		    (user_id, transport_type, vehicle_plate, license_number, date_of_birth, city, momo_pay_code, approval_status)
+		VALUES ($1, 'MOTO_BIKE', $2, $3, '1995-01-01', 'Kigali', '+250788000000', 'PENDING_REVIEW')
+		RETURNING id`,
+		driverUser.ID, "RA "+key[len(key)-6:], "DL-"+key).Scan(&profileID))
+
+	bonusRepo := bonus.NewRepository(pool)
+	bonusSvc := bonus.NewService(bonusRepo, zerolog.Nop())
+	pkgRepo := packages.NewRepository(pool)
+	ledgerSvc := packages.NewLedgerService(pkgRepo, zerolog.Nop())
+	flaky := &failOnceMirror{inner: ledgerSvc}
+
+	adminSvc := admin.NewService(pool, zerolog.Nop())
+	adminSvc.SetBonusService(bonusSvc)
+	adminSvc.SetPackagesService(flaky)
+
+	// First approval: legacy bonus_grants write succeeds, but the ledger
+	// mirror "fails" (simulated). ApproveDriver is best-effort here and must
+	// not fail the approval itself.
+	require.NoError(t, adminSvc.ApproveDriver(ctx, profileID, adminUserID))
+
+	var bonusGrantsCount int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM bonus_grants WHERE driver_id = $1`, driverUser.ID).Scan(&bonusGrantsCount))
+	require.Equal(t, 1, bonusGrantsCount, "legacy bonus history must still be written even though the mirror failed")
+
+	// Confirm the bug condition: NO ledger entry exists yet for the
+	// registration idempotency key — the mirror genuinely did not land.
+	var ledgerRowsBefore int
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT count(*) FROM ride_credit_ledger
+		WHERE driver_id = $1 AND idempotency_key = $2`,
+		profileID, "registration:"+profileID,
+	).Scan(&ledgerRowsBefore))
+	require.Zero(t, ledgerRowsBefore, "the simulated mirror failure must leave no ledger row — this is the unspendable-bonus bug")
+
+	// Re-approval (e.g. an admin retries, or the driver is approved again):
+	// bonus.Service.GrantRegistrationBonus now reports "already granted"
+	// (0, nil) since the legacy bonus_grants row already exists, but the
+	// self-heal path must still repair the missing ledger mirror.
+	require.NoError(t, adminSvc.ApproveDriver(ctx, profileID, adminUserID))
+
+	var ledgerRowsAfter int
+	var ledgerBonusDelta int
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(MAX(bonus_delta), 0) FROM ride_credit_ledger
+		WHERE driver_id = $1 AND idempotency_key = $2`,
+		profileID, "registration:"+profileID,
+	).Scan(&ledgerRowsAfter, &ledgerBonusDelta))
+	require.Equal(t, 1, ledgerRowsAfter, "re-approval must repair the missing ledger mirror")
+	require.Equal(t, 30, ledgerBonusDelta, "the self-heal must mirror the full configured registration bonus")
+
+	// Legacy bonus history must not be duplicated by the self-heal — it only
+	// repairs the ledger side.
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM bonus_grants WHERE driver_id = $1`, driverUser.ID).Scan(&bonusGrantsCount))
+	require.Equal(t, 1, bonusGrantsCount, "legacy bonus history must not be duplicated by the self-heal")
 }
 
 // insertAdminAccount creates a minimally-valid admin_accounts row (approved_by

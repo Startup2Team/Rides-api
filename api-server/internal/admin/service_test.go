@@ -273,12 +273,23 @@ type fakeBonusService struct {
 	err                           error
 	calls                         int
 	gotDriverID, gotVehicleTypeID string
+
+	// tierRides/tierErr back RegistrationTierBonusRides, used by ApproveDriver's
+	// self-heal path when GrantRegistrationBonus returns (0, nil).
+	tierRides int
+	tierErr   error
+	tierCalls int
 }
 
 func (f *fakeBonusService) GrantRegistrationBonus(_ context.Context, driverID, vehicleTypeID string) (int, error) {
 	f.calls++
 	f.gotDriverID, f.gotVehicleTypeID = driverID, vehicleTypeID
 	return f.bonusRides, f.err
+}
+
+func (f *fakeBonusService) RegistrationTierBonusRides(_ context.Context) (int, error) {
+	f.tierCalls++
+	return f.tierRides, f.tierErr
 }
 
 // fakePackagesService is a test double for admin.PackagesService.
@@ -332,12 +343,17 @@ func TestApproveDriver_MirrorsRegistrationBonusIntoLedger(t *testing.T) {
 	assert.Equal(t, 30, pkgSvc.gotBonusRides)
 }
 
-func TestApproveDriver_SkipsLedgerMirror_WhenBonusAlreadyGranted(t *testing.T) {
+// bonusRides == 0 with a nil error is how bonus.Service signals "already
+// granted" (or "no tier configured") — nothing NEW happened on the legacy
+// side this call. Naively skipping the mirror here was the actual bug: if a
+// PRIOR approval's mirror write failed after the legacy grant landed (logged,
+// not fatal), the legacy side reports "already granted" forever afterwards,
+// so the mirror was never retried and the driver kept an unspendable bonus.
+// A re-approval must repair it by re-fetching the tier's configured amount
+// and retrying the (idempotent) mirror.
+func TestApproveDriver_SelfHealsLedgerMirror_WhenAlreadyGranted(t *testing.T) {
 	svc := newTestService(approveDriverMockDB())
-	// bonusRides == 0 is how bonus.Service signals "already granted / no tier
-	// configured, nothing new happened this call" — the ledger mirror must not
-	// fire, otherwise a retried approval would double-grant.
-	bonusSvc := &fakeBonusService{bonusRides: 0}
+	bonusSvc := &fakeBonusService{bonusRides: 0, tierRides: 30}
 	pkgSvc := &fakePackagesService{}
 	svc.SetBonusService(bonusSvc)
 	svc.SetPackagesService(pkgSvc)
@@ -346,7 +362,62 @@ func TestApproveDriver_SkipsLedgerMirror_WhenBonusAlreadyGranted(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, bonusSvc.calls)
-	assert.Equal(t, 0, pkgSvc.grantRegCalls, "no bonus rides granted this call — ledger must not be touched")
+	assert.Equal(t, 1, bonusSvc.tierCalls, "must re-fetch the configured tier amount to self-heal")
+	require.Equal(t, 1, pkgSvc.grantRegCalls, "a re-approval must retry the mirror when the legacy side is already granted")
+	assert.Equal(t, "driver-uuid", pkgSvc.gotDriverID)
+	assert.Equal(t, "vt-uuid-123", pkgSvc.gotVehicleTypeID)
+	assert.Equal(t, 30, pkgSvc.gotBonusRides, "must mirror the tier's CURRENT configured amount, not a stale value")
+}
+
+// If the mirror already landed (the common, non-buggy case), retrying it must
+// be a harmless no-op rather than a failure — packages.GrantRegistrationBonus
+// is idempotent on "registration:<profileID>", so this only proves the call
+// still happens; the dbit suite proves the idempotency itself against a real
+// ledger.
+func TestApproveDriver_SelfHealMirrorIsCalled_EvenIfAlreadyPresent(t *testing.T) {
+	svc := newTestService(approveDriverMockDB())
+	bonusSvc := &fakeBonusService{bonusRides: 0, tierRides: 30}
+	pkgSvc := &fakePackagesService{} // fake always "succeeds" — real idempotency is proven in dbit
+	svc.SetBonusService(bonusSvc)
+	svc.SetPackagesService(pkgSvc)
+
+	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
+	require.NoError(t, err)
+	assert.Equal(t, 1, pkgSvc.grantRegCalls)
+}
+
+// No REGISTRATION tier configured at all: self-heal must not invent an amount
+// to mirror — the ledger call itself would no-op on bonusRides<=0, but this
+// proves we don't even try.
+func TestApproveDriver_NoSelfHeal_WhenNoTierConfigured(t *testing.T) {
+	svc := newTestService(approveDriverMockDB())
+	bonusSvc := &fakeBonusService{bonusRides: 0, tierRides: 0}
+	pkgSvc := &fakePackagesService{}
+	svc.SetBonusService(bonusSvc)
+	svc.SetPackagesService(pkgSvc)
+
+	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, bonusSvc.tierCalls)
+	assert.Equal(t, 0, pkgSvc.grantRegCalls, "no tier configured — nothing to self-heal")
+}
+
+// A real error from the legacy grant call (e.g. a DB blip) is NOT the same
+// signal as "already granted", and must not trigger the self-heal lookup —
+// only a clean (0, nil) does.
+func TestApproveDriver_DoesNotSelfHeal_WhenBonusGrantErrors(t *testing.T) {
+	svc := newTestService(approveDriverMockDB())
+	bonusSvc := &fakeBonusService{err: errors.New("db down"), tierRides: 30}
+	pkgSvc := &fakePackagesService{}
+	svc.SetBonusService(bonusSvc)
+	svc.SetPackagesService(pkgSvc)
+
+	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, bonusSvc.tierCalls, "an actual grant error must not trigger the self-heal path")
+	assert.Equal(t, 0, pkgSvc.grantRegCalls)
 }
 
 func TestApproveDriver_DoesNotMirror_WhenBonusGrantErrors(t *testing.T) {
