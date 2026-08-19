@@ -322,7 +322,7 @@ func Load() (*Config, error) {
 	cfg := &Config{}
 
 	cfg.Port = getEnv("PORT", "8080")
-	cfg.Env = getEnv("ENV", "development")
+	cfg.Env = getEnv("ENV", "staging")
 	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
@@ -406,7 +406,7 @@ func Load() (*Config, error) {
 	cfg.MoMo.Currency = getEnv("MOMO_CURRENCY", "")
 	cfg.MoMo.CallbackURL = getEnv("MOMO_CALLBACK_URL", "")
 
-	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "s3")
+	cfg.Storage.Provider = getEnv("STORAGE_PROVIDER", "r2")
 	cfg.Storage.Bucket = getEnv("STORAGE_BUCKET", "")
 	cfg.Storage.Region = getEnv("STORAGE_REGION", "auto")
 	cfg.Storage.KeyID = getEnv("STORAGE_KEY_ID", "")

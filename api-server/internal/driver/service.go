@@ -126,8 +126,8 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
 	if err == nil {
 		// Profile already exists.
-		if existing.ApprovalStatus == "REJECTED" {
-			// Profile was previously rejected; allow resubmission.
+		if existing.ApprovalStatus == "REJECTED" || existing.ApprovalStatus == "PENDING_REVIEW" || existing.ApprovalStatus == "PENDING" {
+			// Profile was previously rejected or changes requested; allow resubmission.
 			if rerr := s.repo.UpdateProfileForResubmission(ctx, in); rerr != nil {
 				if isUniqueViolation(rerr) {
 					return nil, apperrors.New(409, "DUPLICATE_CREDENTIALS", "vehicle plate or license number already registered")
