@@ -405,6 +405,89 @@ func TestCreateDriverFromAdmin_NationalIDConflict_ExistingUser(t *testing.T) {
 	assert.False(t, tx.committed)
 }
 
+// TestCreateDriverFromAdmin_ExistingAccountDifferentID_RejectedNotDropped
+// proves the DB-1 round 2 fix for the silent-drop bug: when the phone number
+// already belongs to an account that has a DIFFERENT national ID on file,
+// the step-3 capture's first-write-wins WHERE clause (national_id_number IS
+// NULL) would match zero rows and let the whole registration succeed anyway
+// — silently discarding the admin's input while leaving the old ID in place.
+// CreateDriverFromAdmin must catch this BEFORE creating any driver_profiles
+// row and return a loud NATIONAL_ID_MISMATCH, not a quiet no-op.
+func TestCreateDriverFromAdmin_ExistingAccountDifferentID_RejectedNotDropped(t *testing.T) {
+	tx := &customMockTx{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			switch {
+			case strings.Contains(sql, "FROM users WHERE phone_number"):
+				// Existing account already has a DIFFERENT national ID on file.
+				return scanRow("existing-user-9", "1234567890123456")
+			}
+			t.Fatalf("unexpected QueryRow: %s", sql)
+			return nil
+		},
+		execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			t.Fatalf("must not write anything once the ID mismatch is detected: %s", sql)
+			return pgconn.CommandTag{}, nil
+		},
+	}
+	svc := newTestService(&mockDB{
+		beginFn: func(ctx context.Context) (pgx.Tx, error) { return tx, nil },
+	})
+
+	_, err := svc.CreateDriverFromAdmin(context.Background(), AdminCreateDriverInput{
+		Phone: "+250700000009", FullName: "Different ID",
+		TransportType: "MOTO_BIKE", VehiclePlate: "RAA000F", LicenseNumber: "1231231231231234",
+		NationalIDCountry: "RW", NationalIDNumber: "9999999999999999", // different from the one on file
+	})
+	require.Error(t, err)
+	appErr, ok := err.(*apperrors.AppError)
+	require.True(t, ok, "expected *apperrors.AppError, got %T: %v", err, err)
+	assert.Equal(t, http.StatusConflict, appErr.StatusCode)
+	assert.Equal(t, "NATIONAL_ID_MISMATCH", appErr.Code)
+	assert.False(t, tx.committed, "must never commit — no driver_profiles row should be created for a rejected mismatch")
+}
+
+// TestCreateDriverFromAdmin_ExistingAccountSameID_Succeeds proves the mismatch
+// guard does NOT fire when the supplied national ID matches what the existing
+// account already has on file — re-registering with the correct, unchanged ID
+// must still work exactly as before.
+func TestCreateDriverFromAdmin_ExistingAccountSameID_Succeeds(t *testing.T) {
+	tx := &customMockTx{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			switch {
+			case strings.Contains(sql, "FROM users WHERE phone_number"):
+				return scanRow("existing-user-10", "1234567890123456")
+			case strings.Contains(sql, "FROM driver_profiles WHERE user_id"):
+				return errRow(pgx.ErrNoRows)
+			case strings.Contains(sql, "INSERT INTO driver_profiles"):
+				return scanRow("new-profile-10")
+			}
+			t.Fatalf("unexpected QueryRow: %s", sql)
+			return nil
+		},
+		execFn: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			switch {
+			case strings.Contains(sql, "SET role_state"):
+				return pgconn.CommandTag{}, nil
+			case strings.Contains(sql, "SET national_id_number"):
+				return pgconn.CommandTag{}, nil // matches existing value — first-write-wins no-op, not an error
+			}
+			t.Fatalf("unexpected Exec: %s", sql)
+			return pgconn.CommandTag{}, nil
+		},
+	}
+	svc := newTestService(&mockDB{
+		beginFn: func(ctx context.Context) (pgx.Tx, error) { return tx, nil },
+	})
+
+	_, err := svc.CreateDriverFromAdmin(context.Background(), AdminCreateDriverInput{
+		Phone: "+250700000010", FullName: "Same ID",
+		TransportType: "MOTO_BIKE", VehiclePlate: "RAA000G", LicenseNumber: "4324324324324321",
+		NationalIDCountry: "RW", NationalIDNumber: "1234567890123456", // same as on file
+	})
+	require.NoError(t, err)
+	assert.True(t, tx.committed)
+}
+
 // TestCreateDriverFromAdmin_ProfileInsertFails_NationalIDNotBound proves the
 // DB-1 round 2 atomicity fix: user-create/promote + national-ID capture +
 // the driver_profiles insert are ONE transaction. A driver_profiles insert

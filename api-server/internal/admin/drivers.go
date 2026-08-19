@@ -47,6 +47,21 @@ func errNationalIDAlreadyRegistered() error {
 		"This national ID is already registered to another account.")
 }
 
+// errNationalIDMismatchOnAdminCreate is returned by CreateDriverFromAdmin
+// when the existing account for the given phone number already has a
+// DIFFERENT national ID on file than the one supplied. The registration
+// capture is first-write-wins by design (it must not silently clobber a
+// value a driver or a prior admin already set) — but for THIS admin, whose
+// input would otherwise vanish with no signal, that has to be a loud,
+// actionable error, not a quiet no-op. It routes them at the endpoint built
+// to actually change an existing value: PATCH /admin/drivers/{id}/national-id
+// (SetDriverNationalID), which is audited old-value-to-new.
+func errNationalIDMismatchOnAdminCreate() error {
+	return apperrors.New(http.StatusConflict, "NATIONAL_ID_MISMATCH",
+		"This phone number's account already has a different national ID on file. "+
+			"Use PATCH /admin/drivers/{id}/national-id to correct it.")
+}
+
 func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID string) error {
 	var driverUserID, transportType string
 	var nationalIDNumber *string
@@ -242,6 +257,29 @@ func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 }
 
 func (s *Service) ReinstateDriver(ctx context.Context, profileID string) error {
+	// DB-1 round 2: the same defensive gate ApproveDriver has — this also sets
+	// approval_status = 'APPROVED', so a legacy driver suspended before a
+	// national ID was mandatory (or one an admin cleared) must not be
+	// reinstated straight to APPROVED without one on file; that would let
+	// uq_users_national_id's ban-evasion guard be bypassed via suspend+reinstate.
+	var nationalIDNumber *string
+	err := s.db.QueryRow(ctx, `
+		SELECT u.national_id_number
+		  FROM driver_profiles dp
+		  JOIN users u ON u.id = dp.user_id
+		 WHERE dp.id = $1`, profileID,
+	).Scan(&nationalIDNumber)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperrors.ErrNotFound
+		}
+		return err
+	}
+	if nationalIDNumber == nil || *nationalIDNumber == "" {
+		return apperrors.New(http.StatusConflict, "NATIONAL_ID_REQUIRED",
+			"This driver has no national ID on file and cannot be reinstated.")
+	}
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -880,9 +918,27 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 	// the user is new or existing — one code path is responsible for it
 	// either way (see step 3).
 	var userID string
-	err = tx.QueryRow(ctx, `SELECT id FROM users WHERE phone_number = $1`, in.Phone).Scan(&userID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
+	var existingNationalIDNumber *string
+	err = tx.QueryRow(ctx, `SELECT id, national_id_number FROM users WHERE phone_number = $1`, in.Phone).
+		Scan(&userID, &existingNationalIDNumber)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check existing user: %w", err)
+	}
+
+	// The step-3 capture below is intentionally first-write-wins (WHERE
+	// national_id_number IS NULL) — matching the self-service/resubmission
+	// rule. But for an EXISTING account that already has a DIFFERENT national
+	// ID on file, that WHERE clause matches zero rows and the write silently
+	// no-ops while the rest of the registration still succeeds — the admin's
+	// input is dropped on the floor with no signal. Catch that here, before
+	// touching this user's row at all (or creating any driver_profiles row),
+	// and send the admin to the audited edit path instead of letting the
+	// input disappear.
+	if existingNationalIDNumber != nil && *existingNationalIDNumber != "" && *existingNationalIDNumber != natNumber {
+		return nil, errNationalIDMismatchOnAdminCreate()
+	}
+
+	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO users (phone_number, full_name, role_state)
 			VALUES ($1, $2, 'DRIVER_ACTIVE')
@@ -891,9 +947,7 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		).Scan(&userID); err != nil {
 			return nil, fmt.Errorf("create user: %w", err)
 		}
-	case err != nil:
-		return nil, fmt.Errorf("check existing user: %w", err)
-	default:
+	} else {
 		// User exists — promote to DRIVER_ACTIVE.
 		if _, err := tx.Exec(ctx,
 			`UPDATE users SET role_state = 'DRIVER_ACTIVE', updated_at = NOW() WHERE id = $1`, userID,

@@ -880,7 +880,12 @@ func main() {
 			// DB-1 round 2: owner self-correction of a national ID, while
 			// PENDING_REVIEW/REJECTED/NEEDS_MORE_INFO (role_state DRIVER_PENDING
 			// covers all three) — locks once APPROVED (role_state DRIVER_ACTIVE).
-			r.Patch("/national-id", driverH.SetOwnNationalID)
+			// Rate-limited per driver: a real correction happens a handful of
+			// times; this caps the endpoint's use as an ID-enumeration oracle
+			// (the ALREADY_REGISTERED 409 leaks whether a given ID is taken) to
+			// negligible throughput without hurting UX.
+			r.With(mw.UserRateLimit(rdb, "national_id_write", 5, time.Hour)).
+				Patch("/national-id", driverH.SetOwnNationalID)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
 			// One-call bootstrap: profile + active vehicle + ride flag + doc alerts.
 			r.Get("/session", driverH.GetSession)
@@ -1253,8 +1258,14 @@ func main() {
 		// only — SupportStaff can still view the driver detail page (GET
 		// /drivers/{id} above, in the Operations Bucket), but the number there
 		// is masked for them; only this narrower group can set/correct it.
-		r.With(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.OpsManager)).
-			Patch("/drivers/{id}/national-id", adminH.SetDriverNationalID)
+		// Rate-limited per admin: a real correction happens a handful of times;
+		// this caps the endpoint's use as a national-ID-existence enumeration
+		// oracle (uq_users_national_id's 409 vs success leaks whether an ID is
+		// already registered) to negligible throughput without hurting UX.
+		r.With(
+			mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.OpsManager),
+			mw.UserRateLimit(rdb, "national_id_write", 5, time.Hour),
+		).Patch("/drivers/{id}/national-id", adminH.SetDriverNationalID)
 
 		// --- Finance Bucket (Super Admin, Finance Manager, Analytics Staff) ---
 		r.Group(func(r chi.Router) {

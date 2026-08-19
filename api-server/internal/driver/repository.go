@@ -340,25 +340,33 @@ func (r *Repository) FindProfileByUserID(ctx context.Context, userID string) (*P
 }
 
 // SetOwnNationalID lets a driver correct their OWN national ID while their
-// approval is not yet final (PENDING_REVIEW, REJECTED, NEEDS_MORE_INFO — that
-// gate is enforced by the caller, Service.SetOwnNationalID, BEFORE this runs,
-// using the profile's approval_status). Unlike setUserNationalIDTx
-// (first-write-wins, for a first-time application), this write is
-// UNCONDITIONAL for the user's own row — the entire point of a
-// self-correction path is to let them fix a value they already submitted.
-// Once APPROVED, the service layer refuses to call this at all; the driver's
-// only remaining path to a change is internal/admin.SetDriverNationalID.
+// approval is not yet final (PENDING_REVIEW, REJECTED, NEEDS_MORE_INFO —
+// editableNationalIDStatusList in service.go). The gate is enforced HERE, in
+// the same UPDATE that performs the write (WHERE dp.approval_status =
+// ANY(...)), not by a separate pre-read in the caller — a read-then-write
+// across two statements left a window where an admin's concurrent
+// ApproveDriver could land between the check and the write, letting a driver
+// change their ID after APPROVED (TOCTOU, closed here). RowsAffected()==0
+// after a successful Exec means the join+status predicate matched no row —
+// i.e. the driver's approval_status has since moved out of the editable set
+// — and is reported as ErrNationalIDLocked.
 func (r *Repository) SetOwnNationalID(ctx context.Context, userID, country, number string) error {
-	_, err := r.db.Exec(ctx, `
-		UPDATE users
+	tag, err := r.db.Exec(ctx, `
+		UPDATE users u
 		SET national_id_number = $1, national_id_country = $2, updated_at = NOW()
-		WHERE id = $3
-	`, number, country, userID)
+		FROM driver_profiles dp
+		WHERE dp.user_id = u.id
+		  AND u.id = $3
+		  AND dp.approval_status = ANY($4)
+	`, number, country, userID, editableNationalIDStatusList)
 	if err != nil {
 		if isNationalIDConflict(err) {
 			return ErrNationalIDTaken
 		}
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNationalIDLocked
 	}
 	return nil
 }

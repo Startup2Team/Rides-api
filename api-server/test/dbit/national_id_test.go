@@ -303,6 +303,52 @@ func TestNationalID_LocksAfterApproval(t *testing.T) {
 	require.Equal(t, originalID, *unchanged.NationalIDNumber)
 }
 
+// TestNationalID_RepoSetOwnNationalID_AtomicGuardRejectsAfterApproval proves
+// the TOCTOU fix directly against the repository method, not the service: it
+// calls driver.Repository.SetOwnNationalID straight after approval, WITHOUT
+// any caller-side pre-read of approval_status first — i.e. exactly the shape
+// of the old bug window (a read that's already gone stale by the time the
+// write runs). Before the fix, this repository method wrote unconditionally
+// and only the service's separate pre-read stood between a driver and
+// changing their ID post-approval; a concurrent ApproveDriver landing between
+// that read and this write let the change through anyway. Now the guard is
+// IN this statement (UPDATE ... FROM driver_profiles ... WHERE
+// approval_status = ANY(editable)), so it refuses the write on its own,
+// regardless of what any caller checked beforehand.
+func TestNationalID_RepoSetOwnNationalID_AtomicGuardRejectsAfterApproval(t *testing.T) {
+	ctx := context.Background()
+	authRepo := auth.NewRepository(pool)
+	driverRepo := driver.NewRepository(pool)
+	adminSvc := admin.NewService(pool, zerolog.Nop())
+
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-11", "android", nil, nil)
+	require.NoError(t, err)
+
+	originalID := fmt.Sprintf("11%014d", time.Now().UnixNano()%100000000000000)
+	in := newDriverApplyInput(t, u.ID)
+	in.NationalIDCountry = "RW"
+	in.NationalIDNumber = originalID
+	profile, err := driverRepo.CreateProfile(ctx, in)
+	require.NoError(t, err)
+	require.Equal(t, "PENDING_REVIEW", profile.ApprovalStatus)
+
+	approverID := createTestAdminAccount(t, ctx)
+	require.NoError(t, adminSvc.ApproveDriver(ctx, profile.ID, approverID))
+
+	// Call the REPOSITORY method directly, bypassing the service layer (and
+	// therefore any pre-read it might have done) entirely.
+	attemptedID := fmt.Sprintf("12%014d", time.Now().UnixNano()%100000000000000)
+	err = driverRepo.SetOwnNationalID(ctx, u.ID, "RW", attemptedID)
+	require.Error(t, err, "the atomic guard must reject the write even with no prior approval_status check by the caller")
+	require.ErrorIs(t, err, driver.ErrNationalIDLocked)
+
+	unchanged, err := driverRepo.FindProfileByUserID(ctx, u.ID)
+	require.NoError(t, err)
+	require.NotNil(t, unchanged.NationalIDNumber)
+	require.Equal(t, originalID, *unchanged.NationalIDNumber,
+		"the original ID must be completely untouched by the rejected write")
+}
+
 // TestNationalID_AdminCreateAtomicity_ProfileInsertFailureLeavesNoIDBound
 // proves the DB-1 round 2 atomicity fix against a REAL Postgres transaction
 // (not a mock): if CreateDriverFromAdmin's driver_profiles insert fails (a

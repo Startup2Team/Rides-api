@@ -338,6 +338,9 @@ func TestSuspendDriver_BeginError(t *testing.T) {
 func TestReinstateDriver_Success(t *testing.T) {
 	tx := &mockTx{}
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("119912345678901") // national ID on file
+		},
 		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
 	})
 	err := svc.ReinstateDriver(context.Background(), "profile-xyz")
@@ -349,10 +352,35 @@ func TestReinstateDriver_TxExecError(t *testing.T) {
 	dbErr := errors.New("tx exec failed")
 	tx := &mockTx{execErr: dbErr}
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("119912345678901") // national ID on file
+		},
 		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
 	})
 	err := svc.ReinstateDriver(context.Background(), "profile-xyz")
 	assert.ErrorIs(t, err, dbErr)
+}
+
+// TestReinstateDriver_NoNationalID_Rejected proves the DB-1 round 2 defensive
+// gate: a legacy suspended driver with no national ID on file (pre-dating the
+// mandatory-ID rule, or cleared by an admin) must not be reinstated straight
+// to APPROVED — mirrors ApproveDriver's own gate, closing the suspend/
+// reinstate bypass of the one-ID-one-account guard.
+func TestReinstateDriver_NoNationalID_Rejected(t *testing.T) {
+	tx := &mockTx{}
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow(nil) // no national ID on file
+		},
+		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
+	})
+	err := svc.ReinstateDriver(context.Background(), "profile-xyz")
+	require.Error(t, err)
+	appErr, ok := err.(*apperrors.AppError)
+	require.True(t, ok, "expected *apperrors.AppError, got %T: %v", err, err)
+	assert.Equal(t, http.StatusConflict, appErr.StatusCode)
+	assert.Equal(t, "NATIONAL_ID_REQUIRED", appErr.Code)
+	assert.False(t, tx.committed, "no transaction should even be opened when the gate rejects")
 }
 
 // ── SuspendUser / ReinstateUser ───────────────────────────────────────────

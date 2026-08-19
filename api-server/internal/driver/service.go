@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"sort"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -240,6 +241,19 @@ var editableNationalIDStatuses = map[string]bool{
 	"NEEDS_MORE_INFO": true,
 }
 
+// editableNationalIDStatusList is editableNationalIDStatuses as a slice, for
+// binding into the `= ANY($n)` clause in Repository.SetOwnNationalID. Derived
+// from the map (not re-typed) so the atomic DB guard and this whitelist can
+// never drift apart.
+var editableNationalIDStatusList = func() []string {
+	statuses := make([]string, 0, len(editableNationalIDStatuses))
+	for status := range editableNationalIDStatuses {
+		statuses = append(statuses, status)
+	}
+	sort.Strings(statuses)
+	return statuses
+}()
+
 // ErrNationalIDLocked is returned when a driver tries to self-correct their
 // national ID after approval. Approval is a decision about a specific,
 // physically-checked document; once made, the only remaining way to correct
@@ -254,13 +268,19 @@ var ErrNationalIDLocked = apperrors.New(http.StatusConflict, "NATIONAL_ID_LOCKED
 // mask-own-view + silent-resubmit behaviour: the driver can now see their
 // full number (FindProfileByUserID) AND fix it here, right up until an admin
 // approves them, at which point it locks.
+//
+// The existence check (FindProfileByUserID, for a 404 when there is somehow
+// no driver_profiles row) and the approval-status gate are deliberately NOT
+// the same read: the gate is enforced by repo.SetOwnNationalID itself, in the
+// SAME statement as the write (WHERE dp.approval_status = ANY(editable...)),
+// so there is no window between "check" and "write" for an admin's
+// concurrent ApproveDriver to land in. A stale profile.ApprovalStatus read
+// here is never used to authorize the write — that closes the TOCTOU where a
+// driver could race their own edit against an in-flight approval and change
+// the number on file after APPROVED.
 func (s *Service) SetOwnNationalID(ctx context.Context, userID, country, number string) error {
-	profile, err := s.repo.FindProfileByUserID(ctx, userID)
-	if err != nil {
+	if _, err := s.repo.FindProfileByUserID(ctx, userID); err != nil {
 		return err
-	}
-	if !editableNationalIDStatuses[profile.ApprovalStatus] {
-		return ErrNationalIDLocked
 	}
 
 	normCountry, normNumber := nationalid.Normalize(country, number)
