@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/workspace/ride-platform/config"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -170,8 +171,17 @@ func (m *mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 }
 
 // newTestService creates a Service wired to a mockDB (no real DB, no real logger).
+// newTestService builds a Service with NationalIDRequired ON — matching the
+// original DB-1 round 2 behaviour ("as now") that every pre-existing test in
+// this package was written against. Tests that specifically want to exercise
+// the flag OFF (optional) path construct a *Service literal directly instead
+// of using this helper.
 func newTestService(db DBTX) *Service {
-	return &Service{db: db, log: zerolog.Nop()}
+	return &Service{
+		db:  db,
+		log: zerolog.Nop(),
+		cfg: &config.Config{Driver: config.DriverConfig{NationalIDRequired: true}},
+	}
 }
 
 // ── Pure function tests ───────────────────────────────────────────────────

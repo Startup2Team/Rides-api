@@ -883,8 +883,11 @@ func main() {
 			// Rate-limited per driver: a real correction happens a handful of
 			// times; this caps the endpoint's use as an ID-enumeration oracle
 			// (the ALREADY_REGISTERED 409 leaks whether a given ID is taken) to
-			// negligible throughput without hurting UX.
-			r.With(mw.UserRateLimit(rdb, "national_id_write", 5, time.Hour)).
+			// negligible throughput without hurting UX. UserRateLimit429 (not
+			// the silent-204 UserRateLimit): a driver hitting the cap while
+			// genuinely correcting a typo needs a visible 429, not a request
+			// that looks like it succeeded but silently did nothing.
+			r.With(mw.UserRateLimit429(rdb, "national_id_write", 5, time.Hour)).
 				Patch("/national-id", driverH.SetOwnNationalID)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
 			// One-call bootstrap: profile + active vehicle + ride flag + doc alerts.
@@ -1262,9 +1265,12 @@ func main() {
 		// this caps the endpoint's use as a national-ID-existence enumeration
 		// oracle (uq_users_national_id's 409 vs success leaks whether an ID is
 		// already registered) to negligible throughput without hurting UX.
+		// UserRateLimit429 (not the silent-204 UserRateLimit): an admin hitting
+		// the cap mid-correction needs a visible 429, not a silent no-op that
+		// looks like the edit succeeded.
 		r.With(
 			mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.OpsManager),
-			mw.UserRateLimit(rdb, "national_id_write", 5, time.Hour),
+			mw.UserRateLimit429(rdb, "national_id_write", 5, time.Hour),
 		).Patch("/drivers/{id}/national-id", adminH.SetDriverNationalID)
 
 		// --- Finance Bucket (Super Admin, Finance Manager, Analytics Staff) ---
@@ -1469,6 +1475,7 @@ func main() {
 	adminSvc.SetPackagesService(ledgerSvc) // v4: free trial grant via the ledger
 	adminSvc.SetBonusService(bonusSvc)
 	adminSvc.SetNotifier(notifySvc) // push driver approve/reject decisions to the driver's devices
+	adminSvc.SetConfig(cfg)         // NATIONAL_ID_REQUIRED staged-rollout flag (DB-1)
 	// Fire "Schedule for later" notification campaigns when their time arrives.
 	go adminSvc.RunScheduledCampaignDispatcher(bgCtx)
 

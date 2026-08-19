@@ -131,25 +131,48 @@ func (s *Service) DemandHeatmap(ctx context.Context, windowMin int, center *geo.
 	return cells, nil
 }
 
+// resolveNationalIDInput normalizes and format-validates a national ID
+// against the platform's NATIONAL_ID_REQUIRED rollout flag
+// (config.DriverConfig.NationalIDRequired, DB-1 staged rollout).
+//
+// Capture/validation stays active whenever BOTH fields are present,
+// regardless of the flag — a bad format must never reach Postgres just to be
+// caught by the lenient backstop CHECK there (migration 080/081). Only
+// whether a value must be present AT ALL is gated: with required=false, a
+// missing/partial pair is treated as "not supplied" (both returned empty, no
+// error) so old app versions that don't yet send these fields keep applying
+// exactly as before; with required=true this is byte-for-byte the original
+// DB-1 round 2 behaviour.
+func resolveNationalIDInput(required bool, country, number string) (normCountry, normNumber string, err error) {
+	if country == "" || number == "" {
+		if required {
+			return "", "", apperrors.New(http.StatusBadRequest, "NATIONAL_ID_REQUIRED",
+				"national_id_number and national_id_country are required")
+		}
+		return "", "", nil
+	}
+	normCountry, normNumber = nationalid.Normalize(country, number)
+	if verr := nationalid.Validate(normCountry, normNumber); verr != nil {
+		return "", "", apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	}
+	return normCountry, normNumber, nil
+}
+
 // Apply submits a driver application.
 // In dev mode (DEV_AUTO_APPROVE_DRIVERS=true) the profile is immediately
 // approved and the user's role_state is promoted to DRIVER_ACTIVE so
 // they can go online without waiting for an admin action.
 func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
-	// National ID is now MANDATORY (DB-1 round 2 — product decision: required
-	// for driver approval). Reject a missing value before any DB write, then
-	// normalize + format-validate (pkg/nationalid) — a bad format must never
-	// reach Postgres just to be caught by the lenient backstop CHECK there.
-	// This applies to every call through Apply, including a REJECTED driver's
-	// resubmission: a resubmission missing the field is not "keep the old
+	// National ID: mandatory only when cfg.Driver.NationalIDRequired is set
+	// (DB-1 staged rollout — see resolveNationalIDInput). Reject a missing
+	// value before any DB write when required, then normalize + format-
+	// validate (pkg/nationalid) whenever a value IS supplied. This applies to
+	// every call through Apply, including a REJECTED driver's resubmission: a
+	// resubmission missing the field when the flag is on is not "keep the old
 	// value", it is a bad request, same as any other required field.
-	if in.NationalIDNumber == "" || in.NationalIDCountry == "" {
-		return nil, apperrors.New(http.StatusBadRequest, "NATIONAL_ID_REQUIRED",
-			"national_id_number and national_id_country are required")
-	}
-	country, number := nationalid.Normalize(in.NationalIDCountry, in.NationalIDNumber)
-	if verr := nationalid.Validate(country, number); verr != nil {
-		return nil, apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	country, number, err := resolveNationalIDInput(s.cfg.Driver.NationalIDRequired, in.NationalIDCountry, in.NationalIDNumber)
+	if err != nil {
+		return nil, err
 	}
 	in.NationalIDCountry, in.NationalIDNumber = country, number
 

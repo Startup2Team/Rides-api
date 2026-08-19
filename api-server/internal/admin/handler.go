@@ -373,6 +373,9 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		// National ID (DB-1) — optional (additive).
 		NationalIDNumber  string `json:"national_id_number"`
 		NationalIDCountry string `json:"national_id_country"`
+		// Gender (FEAT-onboarding-fields) — optional (additive); mirrors the
+		// driver's own self-registration field (internal/driver Apply).
+		Gender string `json:"gender"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON")
@@ -404,6 +407,9 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 	case body.MomoPayCode == "" && body.MerchantPayCode == "":
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "at least one of momo_pay_code or merchant_pay_code is required")
 		return
+	case body.Gender != "" && body.Gender != "male" && body.Gender != "female" && body.Gender != "other":
+		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "gender must be one of: male, female, other")
+		return
 	}
 	docs := make([]DriverDocumentInput, 0, len(body.Documents))
 	for _, d := range body.Documents {
@@ -424,6 +430,7 @@ func (h *Handler) CreateDriver(w http.ResponseWriter, r *http.Request) {
 		Documents:         docs,
 		NationalIDNumber:  body.NationalIDNumber,
 		NationalIDCountry: body.NationalIDCountry,
+		Gender:            body.Gender,
 	})
 	if err != nil {
 		respond.Error(w, err)

@@ -115,13 +115,14 @@ func TestApply_InvalidNationalIDFormat_RejectsBeforeAnyDBCall(t *testing.T) {
 }
 
 // TestApply_NationalIDMissing_RejectsBeforeAnyDBCall proves the DB-1 round 2
-// product decision: national ID is now MANDATORY to submit a driver
-// application — omitting either field (or both) is rejected with
-// NATIONAL_ID_REQUIRED before Apply ever reaches the repository (a nil pool
-// would panic if it did, so a clean 400 here proves the guard runs first).
+// product decision: with NATIONAL_ID_REQUIRED on, national ID is MANDATORY to
+// submit a driver application — omitting either field (or both) is rejected
+// with NATIONAL_ID_REQUIRED before Apply ever reaches the repository (a nil
+// pool would panic if it did, so a clean 400 here proves the guard runs
+// first).
 func TestApply_NationalIDMissing_RejectsBeforeAnyDBCall(t *testing.T) {
 	repo := NewRepository(nil)
-	svc := NewService(repo, nil, nil, &config.Config{}, zerolog.Nop())
+	svc := NewService(repo, nil, nil, &config.Config{Driver: config.DriverConfig{NationalIDRequired: true}}, zerolog.Nop())
 
 	cases := []struct {
 		name    string
@@ -145,5 +146,62 @@ func TestApply_NationalIDMissing_RejectsBeforeAnyDBCall(t *testing.T) {
 			assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
 			assert.Equal(t, "NATIONAL_ID_REQUIRED", appErr.Code)
 		})
+	}
+}
+
+// ── resolveNationalIDInput: NATIONAL_ID_REQUIRED staged-rollout gate ─────
+//
+// These test the pure decision function directly (no DB involved), covering
+// the ON/OFF matrix Apply relies on.
+
+func TestResolveNationalIDInput_FlagOff_Missing_NoErrorNoValue(t *testing.T) {
+	// Flag off + nothing supplied: old app versions that don't send these
+	// fields yet must keep applying exactly as before — no error, no value.
+	country, number, err := resolveNationalIDInput(false, "", "")
+	require.NoError(t, err)
+	assert.Empty(t, country)
+	assert.Empty(t, number)
+}
+
+func TestResolveNationalIDInput_FlagOff_Partial_TreatedAsNotSupplied(t *testing.T) {
+	cases := []struct{ country, number string }{
+		{"RW", ""},
+		{"", "1234567890123456"},
+	}
+	for _, tc := range cases {
+		country, number, err := resolveNationalIDInput(false, tc.country, tc.number)
+		require.NoError(t, err)
+		assert.Empty(t, country)
+		assert.Empty(t, number)
+	}
+}
+
+func TestResolveNationalIDInput_FlagOn_Missing_Required(t *testing.T) {
+	_, _, err := resolveNationalIDInput(true, "", "")
+	require.Error(t, err)
+	appErr, ok := err.(*apperrors.AppError)
+	require.True(t, ok)
+	assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
+	assert.Equal(t, "NATIONAL_ID_REQUIRED", appErr.Code)
+}
+
+func TestResolveNationalIDInput_BothPresent_NormalizesAndValidates_RegardlessOfFlag(t *testing.T) {
+	// Capture/validation stays active whenever a value IS supplied — the flag
+	// only gates whether it must be present at all.
+	for _, required := range []bool{true, false} {
+		country, number, err := resolveNationalIDInput(required, "rw", "1234 5678-9012 3456")
+		require.NoError(t, err)
+		assert.Equal(t, "RW", country)
+		assert.Equal(t, "1234567890123456", number)
+	}
+}
+
+func TestResolveNationalIDInput_InvalidFormat_RejectedRegardlessOfFlag(t *testing.T) {
+	for _, required := range []bool{true, false} {
+		_, _, err := resolveNationalIDInput(required, "RW", "123")
+		require.Error(t, err)
+		appErr, ok := err.(*apperrors.AppError)
+		require.True(t, ok)
+		assert.Equal(t, "INVALID_NATIONAL_ID", appErr.Code)
 	}
 }

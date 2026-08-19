@@ -98,10 +98,28 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		ProfileImageURL       *string `json:"profile_image_url"`
 		EmergencyContactName  *string `json:"emergency_contact_name"`
 		EmergencyContactPhone *string `json:"emergency_contact_phone"`
+		// Gender (FEAT-onboarding-fields) — OPTIONAL, never required. Nil =
+		// leave unchanged, same as every other field here.
+		Gender *string `json:"gender"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
+	}
+	if body.Gender != nil {
+		switch *body.Gender {
+		case "":
+			// The gender column's CHECK only permits NULL or the three
+			// values below — never "". There's no "clear my gender" UI path
+			// today, so an explicit empty string is treated the same as
+			// omitting the field (leave unchanged), not an error.
+			body.Gender = nil
+		case "male", "female", "other":
+			// valid — pass through as-is.
+		default:
+			respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "gender must be one of: male, female, other")
+			return
+		}
 	}
 
 	if err := h.svc.UpdateProfile(r.Context(), claims.UserID, ProfileUpdate{
@@ -111,6 +129,7 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		ProfileImageURL:       body.ProfileImageURL,
 		EmergencyContactName:  body.EmergencyContactName,
 		EmergencyContactPhone: body.EmergencyContactPhone,
+		Gender:                body.Gender,
 	}); err != nil {
 		respond.Error(w, err)
 		return

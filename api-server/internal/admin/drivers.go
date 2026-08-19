@@ -80,12 +80,15 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 	if driverUserID == adminUserID {
 		return apperrors.ErrSelfApproval
 	}
-	// DB-1 round 2: national ID is now mandatory for approval — defensive gate
-	// in case the applicant somehow reached PENDING_REVIEW without one (e.g. a
-	// pre-existing profile from before this was enforced at Apply time). This
-	// is what makes the uq_users_national_id uniqueness guard actually prevent
-	// ban-evasion: an approved driver with no ID on file can't be caught by it.
-	if nationalIDNumber == nil || *nationalIDNumber == "" {
+	// DB-1 round 2: national ID is mandatory for approval WHEN
+	// NATIONAL_ID_REQUIRED is on (DB-1 staged rollout, config.go) — defensive
+	// gate in case the applicant somehow reached PENDING_REVIEW without one
+	// (e.g. a pre-existing profile from before this was enforced at Apply
+	// time). This is what makes the uq_users_national_id uniqueness guard
+	// actually prevent ban-evasion: an approved driver with no ID on file
+	// can't be caught by it. Flag off (default, until mobile+web ship the
+	// field) skips this so approval works exactly as before DB-1.
+	if s.nationalIDRequired() && (nationalIDNumber == nil || *nationalIDNumber == "") {
 		return apperrors.New(http.StatusConflict, "NATIONAL_ID_REQUIRED",
 			"This driver has no national ID on file and cannot be approved.")
 	}
@@ -257,8 +260,9 @@ func (s *Service) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 }
 
 func (s *Service) ReinstateDriver(ctx context.Context, profileID string) error {
-	// DB-1 round 2: the same defensive gate ApproveDriver has — this also sets
-	// approval_status = 'APPROVED', so a legacy driver suspended before a
+	// DB-1 round 2: the same defensive gate ApproveDriver has (gated the same
+	// way, on NATIONAL_ID_REQUIRED) — this also sets approval_status =
+	// 'APPROVED', so while the flag is on, a legacy driver suspended before a
 	// national ID was mandatory (or one an admin cleared) must not be
 	// reinstated straight to APPROVED without one on file; that would let
 	// uq_users_national_id's ban-evasion guard be bypassed via suspend+reinstate.
@@ -275,7 +279,7 @@ func (s *Service) ReinstateDriver(ctx context.Context, profileID string) error {
 		}
 		return err
 	}
-	if nationalIDNumber == nil || *nationalIDNumber == "" {
+	if s.nationalIDRequired() && (nationalIDNumber == nil || *nationalIDNumber == "") {
 		return apperrors.New(http.StatusConflict, "NATIONAL_ID_REQUIRED",
 			"This driver has no national ID on file and cannot be reinstated.")
 	}
@@ -439,6 +443,12 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 	// it's their own; driver list gets nothing at all) never see the raw
 	// value from this function.
 	var nationalIDNumber, nationalIDCountry *string
+	// Gender (admin-created-driver gender, FEAT-onboarding-fields) — appended
+	// LAST in both the SELECT and Scan lists so existing positional-arg test
+	// helpers (driverRowQueryRowFn) keep working unmodified: a mock row with
+	// fewer values than destinations simply leaves the trailing destination
+	// at its zero value (nil), which is exactly "no gender on file".
+	var gender *string
 
 	err := s.db.QueryRow(ctx, `
 		SELECT dp.id, dp.user_id, u.phone_number, u.full_name, u.profile_image_url,
@@ -451,7 +461,8 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 		       dp.acceptance_rate, dp.total_rides, dp.is_online,
 		       dp.license_expiry_date, dp.insurance_expiry_date, dp.authorization_expiry_date,
 		       dp.created_at,
-		       u.national_id_number, u.national_id_country
+		       u.national_id_number, u.national_id_country,
+		       dp.gender
 		FROM driver_profiles dp JOIN users u ON u.id = dp.user_id
 		WHERE dp.id = $1
 	`, profileID).Scan(
@@ -466,6 +477,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 		&licenseExpiryDate, &insuranceExpiryDate, &authorizationExpiryDate,
 		&createdAt,
 		&nationalIDNumber, &nationalIDCountry,
+		&gender,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -507,6 +519,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 		"documents":                 docs,
 		"national_id_number":        nationalIDNumber,
 		"national_id_country":       nationalIDCountry,
+		"gender":                    gender,
 	}, nil
 }
 
@@ -849,16 +862,50 @@ type AdminCreateDriverInput struct {
 	PassengerSeats  *int
 	LoadCapacityKg  *int
 	Documents       []DriverDocumentInput
-	// NationalIDNumber/NationalIDCountry are MANDATORY (DB-1 round 2).
+	// Gender is OPTIONAL (mirrors the driver's own self-registration field,
+	// internal/driver ApplyInput.Gender / migration 055) — admin-created
+	// drivers previously had no way to record it at all.
+	Gender string
+	// NationalIDNumber/NationalIDCountry are mandatory only when
+	// NATIONAL_ID_REQUIRED is on (DB-1 staged rollout, config.go).
 	// CreateDriverFromAdmin sets approval_status = 'APPROVED' directly — it
 	// never goes through ApproveDriver, so that function's defensive gate
-	// cannot see this path — so the same mandatory-for-approval rule has to be
-	// enforced here too, or admin registration would remain a way to approve a
-	// driver with no national ID on file, defeating the uniqueness guard
-	// (ban-evasion / bonus-farming) entirely. Normalized + format-validated
-	// (pkg/nationalid) before any DB write.
+	// cannot see this path — so the same required-for-approval rule has to be
+	// enforced here too (when the flag is on), or admin registration would
+	// remain a way to approve a driver with no national ID on file, defeating
+	// the uniqueness guard (ban-evasion / bonus-farming) entirely. Normalized
+	// + format-validated (pkg/nationalid) whenever a value IS supplied,
+	// regardless of the flag — see resolveNationalIDInput.
 	NationalIDNumber  string
 	NationalIDCountry string
+}
+
+// resolveNationalIDInput normalizes and format-validates a national ID
+// against the platform's NATIONAL_ID_REQUIRED rollout flag
+// (config.DriverConfig.NationalIDRequired, DB-1 staged rollout) — the
+// admin-side counterpart of internal/driver's identically-named function
+// (kept as a separate small copy, matching this package's existing pattern
+// of NOT sharing isNationalIDConflict/isUniqueViolation with internal/driver
+// either — the two bounded contexts stay independently editable).
+//
+// Capture/validation stays active whenever BOTH fields are present,
+// regardless of the flag; only whether a value must be present at all is
+// gated: required=false + a missing/partial pair returns empty values with no
+// error ("not supplied"), required=true is byte-for-byte the original DB-1
+// round 2 behaviour.
+func resolveNationalIDInput(required bool, country, number string) (normCountry, normNumber string, err error) {
+	if country == "" || number == "" {
+		if required {
+			return "", "", apperrors.New(http.StatusBadRequest, "NATIONAL_ID_REQUIRED",
+				"national_id_number and national_id_country are required")
+		}
+		return "", "", nil
+	}
+	normCountry, normNumber = nationalid.Normalize(country, number)
+	if verr := nationalid.Validate(normCountry, normNumber); verr != nil {
+		return "", "", apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	}
+	return normCountry, normNumber, nil
 }
 
 // Document types now come from pkg/documents, which also records whether each
@@ -871,16 +918,13 @@ type AdminCreateDriverInput struct {
 // CreateDriverFromAdmin registers a new driver (user + profile) from the admin panel.
 // If a user with the phone already exists, reuse their account.
 func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDriverInput) (map[string]interface{}, error) {
-	// National ID is MANDATORY here (DB-1 round 2 — see the doc comment on
-	// AdminCreateDriverInput for why). Normalize + format-validate BEFORE any
-	// DB write, same as the driver-onboarding path.
-	if in.NationalIDNumber == "" || in.NationalIDCountry == "" {
-		return nil, apperrors.New(http.StatusBadRequest, "NATIONAL_ID_REQUIRED",
-			"national_id_number and national_id_country are required")
-	}
-	natCountry, natNumber := nationalid.Normalize(in.NationalIDCountry, in.NationalIDNumber)
-	if verr := nationalid.Validate(natCountry, natNumber); verr != nil {
-		return nil, apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	// National ID is mandatory here only when NATIONAL_ID_REQUIRED is on (DB-1
+	// staged rollout — see the doc comment on AdminCreateDriverInput). Whether
+	// required or not, normalize + format-validate BEFORE any DB write
+	// whenever a value IS supplied, same as the driver-onboarding path.
+	natCountry, natNumber, err := resolveNationalIDInput(s.nationalIDRequired(), in.NationalIDCountry, in.NationalIDNumber)
+	if err != nil {
+		return nil, err
 	}
 
 	dob := in.DateOfBirth
@@ -933,8 +977,11 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 	// input is dropped on the floor with no signal. Catch that here, before
 	// touching this user's row at all (or creating any driver_profiles row),
 	// and send the admin to the audited edit path instead of letting the
-	// input disappear.
-	if existingNationalIDNumber != nil && *existingNationalIDNumber != "" && *existingNationalIDNumber != natNumber {
+	// input disappear. Only applies when this call actually supplied a
+	// national ID (natNumber != "") — a call that didn't (flag off) has
+	// nothing to conflict with, and must not be blocked by whatever the
+	// existing account already has on file.
+	if natNumber != "" && existingNationalIDNumber != nil && *existingNationalIDNumber != "" && *existingNationalIDNumber != natNumber {
 		return nil, errNationalIDMismatchOnAdminCreate()
 	}
 
@@ -974,15 +1021,15 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 			date_of_birth, city, momo_provider, momo_pay_code, merchant_pay_code,
 			approval_status, approved_by, approved_at,
 			province, district, sector, cell, village,
-			passenger_seats, load_capacity_kg
+			passenger_seats, load_capacity_kg, gender
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,'APPROVED',$10,NOW(),$11,$12,$13,$14,$15,$16,$17
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,'APPROVED',$10,NOW(),$11,$12,$13,$14,$15,$16,$17,$18
 		) RETURNING id`,
 		userID, in.TransportType, in.VehiclePlate, in.LicenseNumber,
 		dob, city, momoProvider, momoCode, merchantCode,
 		in.AdminUserID,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
-		in.PassengerSeats, in.LoadCapacityKg,
+		in.PassengerSeats, in.LoadCapacityKg, in.Gender,
 	).Scan(&profileID)
 	if err != nil {
 		return nil, mapAdminCreateDriverError(err, in)
@@ -991,15 +1038,19 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 	// 3. National ID capture — the LAST write in the transaction, after the
 	// profile insert has already succeeded. First-write-wins for an account
 	// that somehow already has one captured (matches the self-service and
-	// resubmission rule); a brand-new user has nothing to collide with.
-	if _, err := tx.Exec(ctx, `
-		UPDATE users SET national_id_number = $1, national_id_country = $2, updated_at = NOW()
-		WHERE id = $3 AND national_id_number IS NULL
-	`, natNumber, natCountry, userID); err != nil {
-		if isNationalIDConflict(err) {
-			return nil, errNationalIDAlreadyRegistered()
+	// resubmission rule); a brand-new user has nothing to collide with. Only
+	// runs when this call actually supplied a national ID — with the flag off
+	// and nothing supplied, there is nothing to capture.
+	if natNumber != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE users SET national_id_number = $1, national_id_country = $2, updated_at = NOW()
+			WHERE id = $3 AND national_id_number IS NULL
+		`, natNumber, natCountry, userID); err != nil {
+			if isNationalIDConflict(err) {
+				return nil, errNationalIDAlreadyRegistered()
+			}
+			return nil, fmt.Errorf("capture national id: %w", err)
 		}
-		return nil, fmt.Errorf("capture national id: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
