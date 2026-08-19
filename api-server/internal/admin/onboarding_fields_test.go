@@ -56,14 +56,21 @@ func TestCreateDriverFromAdmin_GenderRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, insertArgs, "INSERT INTO driver_profiles must have been reached")
-	assert.Contains(t, insertArgs, "female", "gender must be passed through to the driver_profiles INSERT")
+	// gender is normalized to a *string (nil for "", pointer for a supplied
+	// value) before the INSERT — see drivers.go — so a non-empty value must
+	// round-trip as a *string, not a bare string.
+	genderArg, ok := insertArgs[len(insertArgs)-1].(*string)
+	require.True(t, ok, "gender must be passed to the driver_profiles INSERT as *string")
+	require.NotNil(t, genderArg)
+	assert.Equal(t, "female", *genderArg, "gender must be passed through to the driver_profiles INSERT")
 	assert.True(t, tx.committed)
 }
 
 func TestCreateDriverFromAdmin_GenderOmitted_RoundTripsEmpty(t *testing.T) {
-	// Gender is OPTIONAL — omitting it must not break registration, and the
-	// value written is the zero value (""), same as the self-registration
-	// path's plain (non-pointer) Gender field.
+	// Gender is OPTIONAL — omitting it must not break registration. The value
+	// written is NULL (not the zero value ""), matching how the rider path
+	// (internal/customer.Handler.UpdateProfile) stores "no gender on file" and
+	// avoiding a literal "" landing in driver_profiles.gender.
 	var insertArgs []any
 	tx := &customMockTx{
 		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -96,7 +103,9 @@ func TestCreateDriverFromAdmin_GenderOmitted_RoundTripsEmpty(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, insertArgs)
-	assert.Contains(t, insertArgs, "", "an omitted gender is passed through as the zero value, not dropped")
+	// gender is the LAST arg in the driver_profiles INSERT (see drivers.go);
+	// omitted gender must normalize to a nil *string (NULL), not "".
+	assert.Nil(t, insertArgs[len(insertArgs)-1], "an omitted gender must be normalized to NULL, not written as \"\"")
 }
 
 // ── GetDriver: gender exposure ────────────────────────────────────────────

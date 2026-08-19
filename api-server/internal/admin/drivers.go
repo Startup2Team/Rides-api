@@ -944,6 +944,15 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 	if momoProvider == "" {
 		momoProvider = "mtn"
 	}
+	// Gender: normalize "" -> NULL before the INSERT (same normalization the
+	// rider path applies in internal/customer.Handler.UpdateProfile). Written
+	// literally today, "" only "works" because driver_profiles.gender has no
+	// CHECK constraint yet; storing NULL instead matches how riders record
+	// "no gender on file" and won't break the day a CHECK is added here too.
+	var gender *string
+	if in.Gender != "" {
+		gender = &in.Gender
+	}
 
 	// User-create/promote, the driver_profiles insert, and the national-ID
 	// capture all happen in ONE transaction (DB-1 round 2 atomicity fix): a
@@ -1029,7 +1038,7 @@ func (s *Service) CreateDriverFromAdmin(ctx context.Context, in AdminCreateDrive
 		dob, city, momoProvider, momoCode, merchantCode,
 		in.AdminUserID,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
-		in.PassengerSeats, in.LoadCapacityKg, in.Gender,
+		in.PassengerSeats, in.LoadCapacityKg, gender,
 	).Scan(&profileID)
 	if err != nil {
 		return nil, mapAdminCreateDriverError(err, in)
