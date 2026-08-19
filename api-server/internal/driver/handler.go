@@ -461,6 +461,37 @@ func NearbyDriversHandler(svc *Service) http.HandlerFunc {
 	}
 }
 
+// PATCH /api/v1/driver/national-id
+//
+// Owner self-correction (DB-1 round 2): a driver may correct their OWN
+// national ID while approval_status is PENDING_REVIEW, REJECTED, or
+// NEEDS_MORE_INFO. Once APPROVED it locks (409 NATIONAL_ID_LOCKED) — the
+// only remaining path is an admin edit (internal/admin SetDriverNationalID),
+// which is audited old-value-to-new.
+func (h *Handler) SetOwnNationalID(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+
+	var body struct {
+		NationalIDNumber  string `json:"national_id_number"  validate:"required"`
+		NationalIDCountry string `json:"national_id_country" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	if err := h.svc.SetOwnNationalID(r.Context(), claims.UserID, body.NationalIDCountry, body.NationalIDNumber); err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	respond.NoContent(w)
+}
+
 // POST /api/v1/driver/policy/accept
 func (h *Handler) AcceptPolicy(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)

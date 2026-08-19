@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/pkg/adminrole"
 	"github.com/workspace/ride-platform/pkg/audit"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/respond"
@@ -442,12 +443,28 @@ func (h *Handler) ForceDriverOffline(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/admin/drivers/:id
+//
+// National ID exposure is role-gated inside GetDriver itself (SuperAdmin/
+// OpsManager get the full number, SupportStaff gets it masked) — every VIEW
+// where the full number was actually shown is audited here so harvesting is
+// reconstructable after the fact (actor, driver, timestamp).
 func (h *Handler) GetDriver(w http.ResponseWriter, r *http.Request) {
 	profileID := chi.URLParam(r, "id")
-	driver, err := h.svc.GetDriver(r.Context(), profileID)
+	adminID, role := adminCtx(r)
+	driver, err := h.svc.GetDriver(r.Context(), profileID, role)
 	if err != nil {
 		respond.Error(w, err)
 		return
+	}
+	// Type-assert to *string and check the CONCRETE pointer, not the
+	// interface, for nil: driver["national_id_number"] holds a *string even
+	// when absent (a boxed nil pointer), and a boxed nil is never == nil as
+	// an interface{} — `driver["national_id_number"] != nil` would be true
+	// on every call, auditing "viewed" even when there was nothing to view.
+	nationalID, hasNationalID := driver["national_id_number"].(*string)
+	if hasNationalID && nationalID != nil && (role == adminrole.SuperAdmin || role == adminrole.OpsManager) {
+		h.audit.Record(r.Context(), adminID, role, "driver.view_national_id", "driver", profileID,
+			"Viewed driver's full national ID", nil)
 	}
 	respond.OK(w, driver)
 }
@@ -480,10 +497,13 @@ func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/v1/admin/drivers/:id/national-id
 //
-// Admin-only edit path for a driver's national ID (DB-1). Drivers cannot
-// self-edit a captured ID — this is the ONLY way to set or correct one after
-// onboarding, and every call is audited with the MASKED number (never the
-// full value) in the audit metadata.
+// Admin-only edit path for a driver's national ID after approval (DB-1).
+// Route-gated to SuperAdmin/OpsManager only (SupportStaff removed, DB-1
+// round 2 — see cmd/server/main.go). A driver can still self-correct their
+// OWN, not-yet-approved ID via internal/driver.SetOwnNationalID; once
+// APPROVED, this is the only way to change it. Every call is audited with
+// the MASKED old and new numbers (never the full value) in the audit
+// metadata.
 func (h *Handler) SetDriverNationalID(w http.ResponseWriter, r *http.Request) {
 	adminID, role := adminCtx(r)
 	profileID := chi.URLParam(r, "id")
@@ -501,14 +521,21 @@ func (h *Handler) SetDriverNationalID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	masked, country, err := h.svc.SetDriverNationalID(r.Context(), profileID, body.NationalIDCountry, body.NationalIDNumber)
+	oldMasked, newMasked, country, err := h.svc.SetDriverNationalID(r.Context(), profileID, body.NationalIDCountry, body.NationalIDNumber)
 	if err != nil {
 		respond.Error(w, err)
 		return
 	}
 
+	// Old→new (DB-1 round 2), both masked — never the raw number — so a
+	// correction is reviewable after the fact instead of only showing the new
+	// value with no record of what it replaced.
 	h.audit.Record(r.Context(), adminID, role, "driver.set_national_id", "driver", profileID,
-		"Set driver national ID", map[string]any{"country": country, "national_id_masked": masked})
+		"Set driver national ID", map[string]any{
+			"country":                country,
+			"national_id_old_masked": oldMasked,
+			"national_id_new_masked": newMasked,
+		})
 	respond.NoContent(w)
 }
 

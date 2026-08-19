@@ -877,6 +877,10 @@ func main() {
 			r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending))
 			r.Get("/profile", driverH.GetProfile)
 			r.Put("/profile", driverH.UpdateProfile)
+			// DB-1 round 2: owner self-correction of a national ID, while
+			// PENDING_REVIEW/REJECTED/NEEDS_MORE_INFO (role_state DRIVER_PENDING
+			// covers all three) — locks once APPROVED (role_state DRIVER_ACTIVE).
+			r.Patch("/national-id", driverH.SetOwnNationalID)
 			r.Post("/policy/accept", driverH.AcceptPolicy)
 			// One-call bootstrap: profile + active vehicle + ride flag + doc alerts.
 			r.Get("/session", driverH.GetSession)
@@ -1147,11 +1151,6 @@ func main() {
 			r.Get("/drivers/{id}/referrals", adminH.GetDriverReferrals)
 			r.Post("/drivers/{id}/force-offline", adminH.ForceDriverOffline)
 			r.Patch("/drivers/{id}", adminH.UpdateDriver)
-			// DB-1: admin-only national ID set/correct. Same role gate as the other
-			// driver mutations below (SuperAdmin, OpsManager, SupportStaff) for now —
-			// flagged for senior-security to weigh in on whether national ID edits
-			// warrant a narrower gate (e.g. excluding SupportStaff).
-			r.Patch("/drivers/{id}/national-id", adminH.SetDriverNationalID)
 			// r.Delete("/drivers/{id}", adminH.DeleteDriver) REMOVED - suspend/reinstate only
 			r.Post("/drivers/{id}/approve", adminH.ApproveDriver)
 			r.Post("/drivers/{id}/reject", adminH.RejectDriver)
@@ -1249,6 +1248,13 @@ func main() {
 			r.Post("/users/{id}/clear-device-collision", adminH.ClearDeviceCollisionFlag)
 			r.Get("/users/{id}/timeline", adminH.GetAccountTimeline)
 		})
+
+		// DB-1 round 2: national ID edit narrowed to SuperAdmin + OpsManager
+		// only — SupportStaff can still view the driver detail page (GET
+		// /drivers/{id} above, in the Operations Bucket), but the number there
+		// is masked for them; only this narrower group can set/correct it.
+		r.With(mw.RequireAdminRole(adminrole.SuperAdmin, adminrole.OpsManager)).
+			Patch("/drivers/{id}/national-id", adminH.SetDriverNationalID)
 
 		// --- Finance Bucket (Super Admin, Finance Manager, Analytics Staff) ---
 		r.Group(func(r chi.Router) {

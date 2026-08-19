@@ -68,13 +68,14 @@ type ApplyInput struct {
 	LicenseExpiryDate       *time.Time
 	InsuranceExpiryDate     *time.Time
 	AuthorizationExpiryDate *time.Time
-	// NationalIDNumber/NationalIDCountry are OPTIONAL (additive: omitted by
-	// older app versions behaves exactly as before). When both are supplied,
-	// Apply normalizes+validates them (pkg/nationalid) before this reaches the
-	// repository, and the repository captures them onto users in the same
-	// transaction as the driver_profiles write — first-write-wins; a value
-	// already on file for this user is never overwritten here (admin-only
-	// correction, see internal/admin SetDriverNationalID).
+	// NationalIDNumber/NationalIDCountry are MANDATORY (DB-1 round 2: national
+	// ID is now required for driver approval — see Apply and
+	// admin.ApproveDriver's defensive gate). Apply rejects a missing value
+	// before any DB write, then normalizes+validates (pkg/nationalid) before
+	// this reaches the repository. The repository captures them onto users in
+	// the same transaction as the driver_profiles write — first-write-wins for
+	// a brand-new application; a REJECTED driver's resubmission overwrites
+	// unconditionally (self-correction, see overwriteUserNationalIDTx).
 	NationalIDNumber  string
 	NationalIDCountry string
 }
@@ -134,16 +135,22 @@ func (s *Service) DemandHeatmap(ctx context.Context, windowMin int, center *geo.
 // approved and the user's role_state is promoted to DRIVER_ACTIVE so
 // they can go online without waiting for an admin action.
 func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
-	// National ID is optional (additive) but, when supplied, must be normalized
-	// and format-valid BEFORE any DB write — a bad format must never reach
-	// Postgres just to be caught by the lenient backstop CHECK there.
-	if in.NationalIDNumber != "" || in.NationalIDCountry != "" {
-		country, number := nationalid.Normalize(in.NationalIDCountry, in.NationalIDNumber)
-		if verr := nationalid.Validate(country, number); verr != nil {
-			return nil, apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
-		}
-		in.NationalIDCountry, in.NationalIDNumber = country, number
+	// National ID is now MANDATORY (DB-1 round 2 — product decision: required
+	// for driver approval). Reject a missing value before any DB write, then
+	// normalize + format-validate (pkg/nationalid) — a bad format must never
+	// reach Postgres just to be caught by the lenient backstop CHECK there.
+	// This applies to every call through Apply, including a REJECTED driver's
+	// resubmission: a resubmission missing the field is not "keep the old
+	// value", it is a bad request, same as any other required field.
+	if in.NationalIDNumber == "" || in.NationalIDCountry == "" {
+		return nil, apperrors.New(http.StatusBadRequest, "NATIONAL_ID_REQUIRED",
+			"national_id_number and national_id_country are required")
 	}
+	country, number := nationalid.Normalize(in.NationalIDCountry, in.NationalIDNumber)
+	if verr := nationalid.Validate(country, number); verr != nil {
+		return nil, apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	}
+	in.NationalIDCountry, in.NationalIDNumber = country, number
 
 	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
 	if err == nil {
@@ -220,6 +227,55 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 	}
 
 	return profile, nil
+}
+
+// editableNationalIDStatuses whitelists the approval_status values a driver
+// may still self-correct their OWN national ID under. Anything else —
+// APPROVED, SUSPENDED, or a future status this list hasn't been taught about
+// — is locked; the whitelist (not a blacklist of the two locked ones) is
+// deliberate so a new status defaults to closed, not open.
+var editableNationalIDStatuses = map[string]bool{
+	"PENDING_REVIEW":  true,
+	"REJECTED":        true,
+	"NEEDS_MORE_INFO": true,
+}
+
+// ErrNationalIDLocked is returned when a driver tries to self-correct their
+// national ID after approval. Approval is a decision about a specific,
+// physically-checked document; once made, the only remaining way to correct
+// the number on file is an admin edit (internal/admin.SetDriverNationalID),
+// which is audited.
+var ErrNationalIDLocked = apperrors.New(http.StatusConflict, "NATIONAL_ID_LOCKED",
+	"Your national ID is locked after approval. Contact support to correct it.")
+
+// SetOwnNationalID lets a driver correct their OWN national ID while their
+// approval is not yet final (see editableNationalIDStatuses). This is the
+// owner self-correction path (DB-1 round 2) — it replaces the old
+// mask-own-view + silent-resubmit behaviour: the driver can now see their
+// full number (FindProfileByUserID) AND fix it here, right up until an admin
+// approves them, at which point it locks.
+func (s *Service) SetOwnNationalID(ctx context.Context, userID, country, number string) error {
+	profile, err := s.repo.FindProfileByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !editableNationalIDStatuses[profile.ApprovalStatus] {
+		return ErrNationalIDLocked
+	}
+
+	normCountry, normNumber := nationalid.Normalize(country, number)
+	if verr := nationalid.Validate(normCountry, normNumber); verr != nil {
+		return apperrors.New(http.StatusBadRequest, "INVALID_NATIONAL_ID", verr.Error())
+	}
+
+	if err := s.repo.SetOwnNationalID(ctx, userID, normCountry, normNumber); err != nil {
+		if errors.Is(err, ErrNationalIDTaken) {
+			return apperrors.New(http.StatusConflict, "NATIONAL_ID_ALREADY_REGISTERED",
+				"This national ID is already registered to another account.")
+		}
+		return err
+	}
+	return nil
 }
 
 // UpdateProfile updates mutable driver profile fields.

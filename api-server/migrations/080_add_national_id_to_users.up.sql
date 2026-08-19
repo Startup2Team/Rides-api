@@ -15,7 +15,23 @@
 -- and there is NO backfill in this migration. Numbers are captured going forward at
 -- onboarding; historical drivers can be back-filled operationally from the ID
 -- images already on file, as a separate data step.
-
+--
+-- DB-1 round 2 (lock review): this file used to ALSO create the uq_users_national_id
+-- UNIQUE INDEX and add both CHECK constraints WITH full validation in one shot —
+-- all three take ACCESS EXCLUSIVE on `users` for the whole operation (a full-table
+-- scan for the CHECKs, a full index build for the UNIQUE INDEX), which on a table
+-- every request touches would have blocked reads AND writes for the duration.
+-- Split for a zero/near-zero-downtime rollout:
+--   1. THIS file: add the columns, add both CHECK constraints NOT VALID (near-
+--      instant — NOT VALID skips the validation scan, so ACCESS EXCLUSIVE is held
+--      only long enough to write catalog metadata).
+--   2. 081_validate_national_id_checks: VALIDATE CONSTRAINT for both, in ITS OWN
+--      migration/transaction — only SHARE UPDATE EXCLUSIVE (does not block reads
+--      or writes) while it scans existing rows. Every existing row is NULL here,
+--      so this scan is a formality, not a performance concern.
+--   3. 082_add_national_id_unique_index_concurrently: CREATE UNIQUE INDEX
+--      CONCURRENTLY, alone in its own migration file (see that file for why it
+--      MUST be alone).
 ALTER TABLE users
     ADD COLUMN IF NOT EXISTS national_id_number  VARCHAR(16),
     -- ISO-3166-1 alpha-2 issuing country (e.g. 'RW', 'UG'). Drives country-aware
@@ -28,28 +44,22 @@ ALTER TABLE users
 -- countries are added without a migration. This CHECK is deliberately lenient so it
 -- never rejects a valid future-country ID: it only asserts the value is normalized
 -- (no spaces / punctuation), upper-case alphanumeric, and 5..16 characters.
+--
+-- NOT VALID: added but not yet checked against existing rows — 081 validates it in
+-- a separate, lower-lock-level step. Every existing row is NULL (which the CHECK
+-- explicitly permits), so this is a formality, not a real gap in coverage.
 ALTER TABLE users
     ADD CONSTRAINT users_national_id_number_chk
     CHECK (
         national_id_number IS NULL
         OR national_id_number ~ '^[A-Z0-9]{5,16}$'
-    );
+    ) NOT VALID;
 
 -- A number cannot be interpreted or validated without knowing its issuing country,
--- so a country is mandatory whenever a number is present.
+-- so a country is mandatory whenever a number is present. NOT VALID — see above.
 ALTER TABLE users
     ADD CONSTRAINT users_national_id_country_chk
     CHECK (
         national_id_number IS NULL
         OR (national_id_country IS NOT NULL AND national_id_country ~ '^[A-Z]{2}$')
-    );
-
--- One national ID = one account, scoped by issuing country. Partial index so the
--- many NULL rows during rollout never collide (Postgres already treats NULLs as
--- distinct in a unique index; the predicate makes the intent explicit and keeps the
--- index small). A 23505 unique-violation on this index is the app's signal for
--- "this national ID is already registered" — the ban-evasion / bonus-farming guard.
--- Legitimate admin corrections are a plain UPDATE, which this index permits.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_users_national_id
-    ON users (national_id_country, national_id_number)
-    WHERE national_id_number IS NOT NULL;
+    ) NOT VALID;

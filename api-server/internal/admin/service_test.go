@@ -236,7 +236,7 @@ func TestApproveDriver_Success(t *testing.T) {
 	execCount := 0
 	svc := newTestService(&mockDB{
 		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
-			return scanRow("driver-uuid", "MOTO_BIKE")
+			return scanRow("driver-uuid", "MOTO_BIKE", "1234567890123456") // has a national ID on file
 		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			execCount++
@@ -672,7 +672,7 @@ func TestGetDriver_NotFound(t *testing.T) {
 			return errRow(pgx.ErrNoRows)
 		},
 	})
-	_, err := svc.GetDriver(context.Background(), "unknown-uuid")
+	_, err := svc.GetDriver(context.Background(), "unknown-uuid", "SUPER_ADMIN")
 	assert.True(t, errors.Is(err, apperrors.ErrNotFound))
 }
 
@@ -1186,6 +1186,8 @@ type customMockTx struct {
 	pgx.Tx
 	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
 	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	committed  bool
+	rolledBack bool
 }
 
 func (t *customMockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -1202,8 +1204,8 @@ func (t *customMockTx) Exec(ctx context.Context, sql string, args ...any) (pgcon
 	return pgconn.CommandTag{}, nil
 }
 
-func (t *customMockTx) Commit(ctx context.Context) error   { return nil }
-func (t *customMockTx) Rollback(ctx context.Context) error { return nil }
+func (t *customMockTx) Commit(ctx context.Context) error   { t.committed = true; return nil }
+func (t *customMockTx) Rollback(ctx context.Context) error { t.rolledBack = true; return nil }
 
 func TestCreateNotificationCampaign_Success(t *testing.T) {
 	now := time.Now()

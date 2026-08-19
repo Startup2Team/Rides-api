@@ -81,9 +81,15 @@ func SupportedCountries() []string {
 
 // Mask redacts a national ID number down to its last 4 characters, e.g.
 // "1234567890123456" -> "************3456". Safe for logs, audit metadata,
-// and any list/summary view. The unredacted number is only ever returned in
-// the admin driver-DETAIL payload (internal/admin GetDriver) — everywhere
-// else (driver's own profile, admin audit log, server logs) uses this.
+// and any list/summary view. The unredacted number is only ever returned to:
+//   - the driver themself (internal/driver FindProfileByUserID — it's their
+//     own ID, looked up by their own user id);
+//   - SuperAdmin/OpsManager viewing the admin driver-detail payload
+//     (internal/admin GetDriver — SupportStaff and every other role get this
+//     Mask applied instead).
+//
+// Every other surface (admin audit log, server logs, the matching engine's
+// internal FindProfileByID, driver lists) uses this.
 func Mask(number string) string {
 	if number == "" {
 		return ""

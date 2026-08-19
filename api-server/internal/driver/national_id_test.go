@@ -80,7 +80,7 @@ func TestMapApplyErr_Nil(t *testing.T) {
 	assert.NoError(t, mapApplyErr(nil))
 }
 
-// ── Apply(): invalid national ID format is rejected before any DB call ────
+// ── Apply(): national ID is MANDATORY, rejected before any DB call ───────
 
 func TestApply_InvalidNationalIDFormat_RejectsBeforeAnyDBCall(t *testing.T) {
 	// repo wraps a nil *pgxpool.Pool: if Apply reached a real query it would
@@ -88,6 +88,8 @@ func TestApply_InvalidNationalIDFormat_RejectsBeforeAnyDBCall(t *testing.T) {
 	repo := NewRepository(nil)
 	svc := NewService(repo, nil, nil, &config.Config{}, zerolog.Nop())
 
+	// Both fields present but format-invalid — the fields exist, so this is a
+	// format problem (INVALID_NATIONAL_ID), not a missing-field problem.
 	cases := []struct {
 		name    string
 		country string
@@ -95,8 +97,6 @@ func TestApply_InvalidNationalIDFormat_RejectsBeforeAnyDBCall(t *testing.T) {
 	}{
 		{"too short for RW", "RW", "123"},
 		{"unsupported country", "KE", "1234567890123456"},
-		{"country without number", "RW", ""},
-		{"number without country", "", "1234567890123456"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,17 +114,36 @@ func TestApply_InvalidNationalIDFormat_RejectsBeforeAnyDBCall(t *testing.T) {
 	}
 }
 
-func TestApply_NationalIDOmitted_SkipsValidation(t *testing.T) {
-	// Additive contract: omitting both fields must not trip the format guard.
-	// (It will go on to call FindProfileByUserID against a nil pool and panic
-	// — recovered here — which is exactly proof the guard was skipped, not a
-	// real assertion about what Apply returns without a DB.)
+// TestApply_NationalIDMissing_RejectsBeforeAnyDBCall proves the DB-1 round 2
+// product decision: national ID is now MANDATORY to submit a driver
+// application — omitting either field (or both) is rejected with
+// NATIONAL_ID_REQUIRED before Apply ever reaches the repository (a nil pool
+// would panic if it did, so a clean 400 here proves the guard runs first).
+func TestApply_NationalIDMissing_RejectsBeforeAnyDBCall(t *testing.T) {
 	repo := NewRepository(nil)
 	svc := NewService(repo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	defer func() {
-		r := recover()
-		assert.NotNil(t, r, "expected Apply to proceed past national-ID validation and hit the (nil) repo")
-	}()
-	_, _ = svc.Apply(context.Background(), ApplyInput{UserID: "user-1"})
+	cases := []struct {
+		name    string
+		country string
+		number  string
+	}{
+		{"both omitted", "", ""},
+		{"country without number", "RW", ""},
+		{"number without country", "", "1234567890123456"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.Apply(context.Background(), ApplyInput{
+				UserID:            "user-1",
+				NationalIDCountry: tc.country,
+				NationalIDNumber:  tc.number,
+			})
+			require.Error(t, err)
+			appErr, ok := err.(*apperrors.AppError)
+			require.True(t, ok, "expected *apperrors.AppError, got %T: %v", err, err)
+			assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
+			assert.Equal(t, "NATIONAL_ID_REQUIRED", appErr.Code)
+		})
+	}
 }
