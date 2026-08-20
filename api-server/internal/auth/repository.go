@@ -302,7 +302,20 @@ func (r *Repository) AnonymizeUser(ctx context.Context, userID string) error {
 		return err
 	}
 
-	// 7. Update user profile to scrub personal details and release phone number
+	// 7. Update user profile to scrub personal details and release phone number.
+	//
+	// national_id_number/country are set to NULL (not merely masked) here —
+	// DB-1 deletion purge. This means a deleted-and-recreated account is NOT
+	// caught by the ban-evasion uniqueness guard (uq_users_national_id): the
+	// old value no longer exists to collide with a re-registration under the
+	// same ID. A future direction to close that gap WITHOUT retaining the
+	// plaintext PII: store a keyed HMAC (HMAC-SHA256 with a server-side
+	// secret) of the normalized ID in a separate, permanent column, and check
+	// THAT for collisions on new applications even after full deletion. Not
+	// built here — this needs its own ADR + senior-security sign-off first (a
+	// one-way hash is not reversible, but it IS a stable pseudonymous
+	// identifier that survives deletion, which is itself a privacy trade-off
+	// worth reviewing deliberately rather than bundling into this fix).
 	_, err = tx.Exec(ctx, `
 		UPDATE users
 		SET phone_number = 'del_' || left(id::text, 15),
@@ -310,6 +323,8 @@ func (r *Repository) AnonymizeUser(ctx context.Context, userID string) error {
 			email = NULL,
 			device_id = NULL,
 			fcm_token = NULL,
+			national_id_number = NULL,
+			national_id_country = NULL,
 			updated_at = NOW()
 		WHERE id = $1
 	`, userID)

@@ -284,6 +284,16 @@ type DriverConfig struct {
 	// is warned, then temporarily banned.
 	CancelWarnThreshold int
 	CancelBanThreshold  int
+	// NationalIDRequired gates the DB-1 mandatory-national-ID enforcement
+	// points (driver Apply, admin ApproveDriver, CreateDriverFromAdmin,
+	// ReinstateDriver) — NATIONAL_ID_REQUIRED, default false. Capture,
+	// format-validation, masking, and the one-ID-one-account uniqueness guard
+	// all stay active regardless of this flag whenever a value IS supplied;
+	// only whether it must be present at all is gated. Ship false while
+	// mobile/web are updated to send the field (old app versions keep
+	// applying exactly as before), then flip true once they do — the DB-1
+	// staged rollout.
+	NationalIDRequired bool
 }
 
 type CustomerConfig struct {
@@ -437,6 +447,10 @@ func Load() (*Config, error) {
 	cfg.Driver.DeclinePriorityThreshold = getEnvInt("DRIVER_DECLINE_PRIORITY_THRESHOLD", 10)
 	cfg.Driver.DeclineAutoOfflineThreshold = getEnvInt("DRIVER_DECLINE_AUTO_OFFLINE_THRESHOLD", 15)
 	cfg.Driver.DevAutoApprove = getEnvBool("DEV_AUTO_APPROVE_DRIVERS", false)
+	// DB-1 staged rollout: off by default so old app versions (that don't yet
+	// send national_id_number/national_id_country) keep applying/approving as
+	// before. Flip on once mobile+web ship the field.
+	cfg.Driver.NationalIDRequired = getEnvBool("NATIONAL_ID_REQUIRED", false)
 
 	cfg.Customer.CancelWarnThreshold = getEnvInt("CUSTOMER_CANCEL_WARN_THRESHOLD", 4)
 	cfg.Customer.CancelSuspendThreshold = getEnvInt("CUSTOMER_CANCEL_SUSPEND_THRESHOLD", 8)

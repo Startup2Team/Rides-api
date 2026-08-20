@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/workspace/ride-platform/config"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -170,8 +171,17 @@ func (m *mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 }
 
 // newTestService creates a Service wired to a mockDB (no real DB, no real logger).
+// newTestService builds a Service with NationalIDRequired ON — matching the
+// original DB-1 round 2 behaviour ("as now") that every pre-existing test in
+// this package was written against. Tests that specifically want to exercise
+// the flag OFF (optional) path construct a *Service literal directly instead
+// of using this helper.
 func newTestService(db DBTX) *Service {
-	return &Service{db: db, log: zerolog.Nop()}
+	return &Service{
+		db:  db,
+		log: zerolog.Nop(),
+		cfg: &config.Config{Driver: config.DriverConfig{NationalIDRequired: true}},
+	}
 }
 
 // ── Pure function tests ───────────────────────────────────────────────────
@@ -236,7 +246,7 @@ func TestApproveDriver_Success(t *testing.T) {
 	execCount := 0
 	svc := newTestService(&mockDB{
 		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
-			return scanRow("driver-uuid", "MOTO_BIKE")
+			return scanRow("driver-uuid", "MOTO_BIKE", "1234567890123456") // has a national ID on file
 		},
 		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 			execCount++
@@ -313,15 +323,18 @@ func (f *fakePackagesService) GrantRegistrationBonus(_ context.Context, driverUs
 }
 
 // approveDriverMockDB returns a mockDB wired for ApproveDriver's two lookups:
-// driver_profiles (user_id/transport_type) and the vehicle_types code->id resolve
-// inside the bonus block.
+// driver_profiles (user_id/transport_type/national_id_number) and the
+// vehicle_types code->id resolve inside the bonus block. The driver row carries
+// a national ID so the DB-1 mandatory-national-ID gate (on in newTestService)
+// is satisfied and these tests exercise the registration-bonus path itself —
+// the gate has its own dedicated tests in national_id_test.go.
 func approveDriverMockDB() *mockDB {
 	return &mockDB{
 		queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
 			if strings.Contains(sql, "vehicle_types") {
 				return scanRow("vt-uuid-123")
 			}
-			return scanRow("driver-uuid", "MOTO_BIKE")
+			return scanRow("driver-uuid", "MOTO_BIKE", "1199012345678901")
 		},
 	}
 }
@@ -511,6 +524,9 @@ func TestSuspendDriver_BeginError(t *testing.T) {
 func TestReinstateDriver_Success(t *testing.T) {
 	tx := &mockTx{}
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("119912345678901") // national ID on file
+		},
 		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
 	})
 	err := svc.ReinstateDriver(context.Background(), "profile-xyz")
@@ -522,10 +538,35 @@ func TestReinstateDriver_TxExecError(t *testing.T) {
 	dbErr := errors.New("tx exec failed")
 	tx := &mockTx{execErr: dbErr}
 	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow("119912345678901") // national ID on file
+		},
 		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
 	})
 	err := svc.ReinstateDriver(context.Background(), "profile-xyz")
 	assert.ErrorIs(t, err, dbErr)
+}
+
+// TestReinstateDriver_NoNationalID_Rejected proves the DB-1 round 2 defensive
+// gate: a legacy suspended driver with no national ID on file (pre-dating the
+// mandatory-ID rule, or cleared by an admin) must not be reinstated straight
+// to APPROVED — mirrors ApproveDriver's own gate, closing the suspend/
+// reinstate bypass of the one-ID-one-account guard.
+func TestReinstateDriver_NoNationalID_Rejected(t *testing.T) {
+	tx := &mockTx{}
+	svc := newTestService(&mockDB{
+		queryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+			return scanRow(nil) // no national ID on file
+		},
+		beginFn: func(_ context.Context) (pgx.Tx, error) { return tx, nil },
+	})
+	err := svc.ReinstateDriver(context.Background(), "profile-xyz")
+	require.Error(t, err)
+	appErr, ok := err.(*apperrors.AppError)
+	require.True(t, ok, "expected *apperrors.AppError, got %T: %v", err, err)
+	assert.Equal(t, http.StatusConflict, appErr.StatusCode)
+	assert.Equal(t, "NATIONAL_ID_REQUIRED", appErr.Code)
+	assert.False(t, tx.committed, "no transaction should even be opened when the gate rejects")
 }
 
 // ── SuspendUser / ReinstateUser ───────────────────────────────────────────
@@ -845,7 +886,7 @@ func TestGetDriver_NotFound(t *testing.T) {
 			return errRow(pgx.ErrNoRows)
 		},
 	})
-	_, err := svc.GetDriver(context.Background(), "unknown-uuid")
+	_, err := svc.GetDriver(context.Background(), "unknown-uuid", "SUPER_ADMIN")
 	assert.True(t, errors.Is(err, apperrors.ErrNotFound))
 }
 
@@ -1359,6 +1400,8 @@ type customMockTx struct {
 	pgx.Tx
 	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
 	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	committed  bool
+	rolledBack bool
 }
 
 func (t *customMockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -1375,8 +1418,8 @@ func (t *customMockTx) Exec(ctx context.Context, sql string, args ...any) (pgcon
 	return pgconn.CommandTag{}, nil
 }
 
-func (t *customMockTx) Commit(ctx context.Context) error   { return nil }
-func (t *customMockTx) Rollback(ctx context.Context) error { return nil }
+func (t *customMockTx) Commit(ctx context.Context) error   { t.committed = true; return nil }
+func (t *customMockTx) Rollback(ctx context.Context) error { t.rolledBack = true; return nil }
 
 func TestCreateNotificationCampaign_Success(t *testing.T) {
 	now := time.Now()

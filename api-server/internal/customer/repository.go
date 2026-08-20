@@ -24,6 +24,10 @@ type Profile struct {
 	// PreferredMode is the active VIEW ("customer"|"driver"), separate from
 	// role_state (capability). Null until the user first switches.
 	PreferredMode *string `json:"preferred_mode,omitempty"`
+	// Gender (FEAT-onboarding-fields) — OPTIONAL, mirrors the driver-side
+	// field (migration 055); never required at registration. Null until the
+	// customer sets it via PUT /customer/profile.
+	Gender *string `json:"gender,omitempty"`
 }
 
 // ProfileUpdate carries the mutable customer profile fields. Nil = leave
@@ -36,6 +40,7 @@ type ProfileUpdate struct {
 	ProfileImageURL       *string
 	EmergencyContactName  *string
 	EmergencyContactPhone *string
+	Gender                *string
 }
 
 // Repository handles customer DB operations.
@@ -51,10 +56,10 @@ func (r *Repository) FindByID(ctx context.Context, userID string) (*Profile, err
 	p := &Profile{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, phone_number, full_name, email, fcm_token, role_state, profile_image_url,
-		       emergency_contact_name, emergency_contact_phone, preferred_mode
+		       emergency_contact_name, emergency_contact_phone, preferred_mode, gender
 		FROM users WHERE id = $1
 	`, userID).Scan(&p.ID, &p.PhoneNumber, &p.FullName, &p.Email, &p.FCMToken, &p.RoleState, &p.ProfileImageURL,
-		&p.EmergencyContactName, &p.EmergencyContactPhone, &p.PreferredMode)
+		&p.EmergencyContactName, &p.EmergencyContactPhone, &p.PreferredMode, &p.Gender)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperrors.ErrNotFound
@@ -85,8 +90,9 @@ func (r *Repository) UpdateProfile(ctx context.Context, userID string, u Profile
 		    profile_image_url       = COALESCE($4, profile_image_url),
 		    emergency_contact_name  = COALESCE($5, emergency_contact_name),
 		    emergency_contact_phone = COALESCE($6, emergency_contact_phone),
+		    gender                  = COALESCE($7, gender),
 		    updated_at              = NOW()
-		WHERE id = $7
-	`, u.FullName, u.Email, u.FCMToken, u.ProfileImageURL, u.EmergencyContactName, u.EmergencyContactPhone, userID)
+		WHERE id = $8
+	`, u.FullName, u.Email, u.FCMToken, u.ProfileImageURL, u.EmergencyContactName, u.EmergencyContactPhone, u.Gender, userID)
 	return err
 }

@@ -3,7 +3,6 @@ package packages
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
@@ -55,7 +54,11 @@ func (r *Repository) resolveProfile(ctx context.Context, userID, vehicleTypeCode
 
 // grant inserts a grant ledger entry and bumps the entitlement cache atomically.
 // entryType is PURCHASE_GRANT | BONUS_GRANT | ADMIN_GRANT.
-func (r *Repository) grant(ctx context.Context, profileID string, vehicleID *string, vehicleTypeID, entryType string, rides, bonus int, sourcePurchaseID *string, expiresAt *time.Time, adminID *string, reason string, idemKey *string) error {
+//
+// Credits are permanent: grants are always written with expires_at = NULL. The
+// column remains in the schema (inert) but nothing stamps an expiry — there is
+// no longer any sweep that could drain a driver's balance.
+func (r *Repository) grant(ctx context.Context, profileID string, vehicleID *string, vehicleTypeID, entryType string, rides, bonus int, sourcePurchaseID *string, adminID *string, reason string, idemKey *string) error {
 	tx, hasTx := r.getTx(ctx)
 	var err error
 	if !hasTx {
@@ -82,11 +85,11 @@ func (r *Repository) grant(ctx context.Context, profileID string, vehicleID *str
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO ride_credit_ledger
 		    (driver_id, vehicle_id, vehicle_type_id, entry_type, rides_delta, bonus_delta,
-		     balance_rides, balance_bonus, source_purchase_id, admin_id, reason, expires_at, idempotency_key)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		     balance_rides, balance_bonus, source_purchase_id, admin_id, reason, idempotency_key)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (idempotency_key) DO NOTHING
 	`, profileID, vehicleID, vehicleTypeID, entryType, rides, bonus,
-		newRides, newBonus, sourcePurchaseID, adminID, nullStr(reason), expiresAt, idemKey)
+		newRides, newBonus, sourcePurchaseID, adminID, nullStr(reason), idemKey)
 	if err != nil {
 		return err
 	}
@@ -246,15 +249,16 @@ func nullStr(s string) *string {
 
 // ── Service-level API ─────────────────────────────────────────────────────────
 
-// GrantPurchase records a paid package's rides + bonus onto the ledger.
-func (l *LedgerService) GrantPurchase(ctx context.Context, profileID string, vehicleID *string, vehicleTypeID, purchaseID string, rides, bonus int, expiresAt time.Time) error {
+// GrantPurchase records a paid package's rides + bonus onto the ledger. Credits
+// are permanent (no expires_at); the grant lives until it is spent.
+func (l *LedgerService) GrantPurchase(ctx context.Context, profileID string, vehicleID *string, vehicleTypeID, purchaseID string, rides, bonus int) error {
 	if rides > 0 {
-		if err := l.repo.grant(ctx, profileID, vehicleID, vehicleTypeID, "PURCHASE_GRANT", rides, 0, &purchaseID, &expiresAt, nil, "", ptr("grant:"+purchaseID)); err != nil {
+		if err := l.repo.grant(ctx, profileID, vehicleID, vehicleTypeID, "PURCHASE_GRANT", rides, 0, &purchaseID, nil, "", ptr("grant:"+purchaseID)); err != nil {
 			return err
 		}
 	}
 	if bonus > 0 {
-		if err := l.repo.grant(ctx, profileID, vehicleID, vehicleTypeID, "BONUS_GRANT", 0, bonus, &purchaseID, &expiresAt, nil, "", ptr("bonus:"+purchaseID)); err != nil {
+		if err := l.repo.grant(ctx, profileID, vehicleID, vehicleTypeID, "BONUS_GRANT", 0, bonus, &purchaseID, nil, "", ptr("bonus:"+purchaseID)); err != nil {
 			return err
 		}
 	}
@@ -270,6 +274,10 @@ func (l *LedgerService) GrantPurchase(ctx context.Context, profileID string, veh
 //
 // Idempotent per driver+vehicle type ("registration:<profileID>" key), so a
 // retried approval (e.g. a duplicate admin request) cannot double-grant.
+//
+// The registration bonus is permanent, like every other credit since the
+// credit-expiry removal (#138): it grants with expires_at = NULL and lives
+// until it is spent — never swept.
 func (l *LedgerService) GrantRegistrationBonus(ctx context.Context, driverUserID, vehicleTypeID string, bonusRides int) error {
 	if bonusRides <= 0 {
 		return nil
@@ -282,14 +290,13 @@ func (l *LedgerService) GrantRegistrationBonus(ctx context.Context, driverUserID
 		}
 		return err
 	}
-	expiresAt := time.Now().Add(30 * 24 * time.Hour)
 	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "BONUS_GRANT", 0, bonusRides,
-		nil, &expiresAt, nil, "registration bonus", ptr("registration:"+profileID))
+		nil, nil, "registration bonus", ptr("registration:"+profileID))
 }
 
 // AdminGrant lets a support agent add credits with a reason (audited separately).
 func (l *LedgerService) AdminGrant(ctx context.Context, profileID, vehicleTypeID, adminID string, rides, bonus int, reason string) error {
-	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "ADMIN_GRANT", rides, bonus, nil, nil, &adminID, reason, nil)
+	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "ADMIN_GRANT", rides, bonus, nil, &adminID, reason, nil)
 }
 
 // AdminGrantByCode resolves a vehicle-type code to its id, then grants credits.
@@ -371,23 +378,23 @@ func (l *LedgerService) GrantFreeTrialIfEligible(ctx context.Context, driverUser
 	}
 
 	// Find the active promotional version for this vehicle type.
-	var rides, bonus, validityDays int
+	var rides, bonus int
 	err = l.repo.db.QueryRow(ctx, `
-		SELECT v.rides, v.bonus_rides, v.validity_days
+		SELECT v.rides, v.bonus_rides
 		FROM ride_package_versions v
 		JOIN ride_packages p ON p.id = v.package_id
 		WHERE p.vehicle_type_id = $1 AND p.is_active = TRUE
 		  AND v.status = 'ACTIVE' AND v.is_promotional = TRUE
 		ORDER BY v.rides DESC LIMIT 1
-	`, vehicleTypeID).Scan(&rides, &bonus, &validityDays)
+	`, vehicleTypeID).Scan(&rides, &bonus)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // no promo package configured — nothing to grant
 		}
 		return err
 	}
-	expiresAt := time.Now().Add(time.Duration(validityDays) * 24 * time.Hour)
-	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "BONUS_GRANT", rides, bonus, nil, &expiresAt, nil, "free trial", ptr("freetrial:"+profileID))
+	// Free-trial credits are permanent too (no expires_at).
+	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "BONUS_GRANT", rides, bonus, nil, nil, "free trial", ptr("freetrial:"+profileID))
 }
 
 // ListEntitlementsForUser returns a driver's balances across vehicle types.
@@ -411,81 +418,3 @@ func (l *LedgerService) ListEntitlementsForUser(ctx context.Context, userID stri
 }
 
 func ptr(s string) *string { return &s }
-
-// SweepExpired recomputes every driver's balance from the ledger and writes an
-// EXPIRY entry wherever credits have lapsed (a grant's expires_at passed). The
-// live balance is the sum of NON-expired grants minus everything consumed,
-// floored at zero — so expired, unspent credits drop off and the cache follows.
-// Returns the number of entitlements adjusted. Safe to run repeatedly.
-func (l *LedgerService) SweepExpired(ctx context.Context) (int, error) {
-	rows, err := l.repo.db.Query(ctx, `SELECT driver_id, vehicle_type_id, rides_remaining, bonus_remaining FROM driver_entitlements`)
-	if err != nil {
-		return 0, err
-	}
-	type ent struct {
-		driverID, vehicleTypeID string
-		rides, bonus            int
-	}
-	var ents []ent
-	for rows.Next() {
-		var e ent
-		if err := rows.Scan(&e.driverID, &e.vehicleTypeID, &e.rides, &e.bonus); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		ents = append(ents, e)
-	}
-	rows.Close()
-
-	adjusted := 0
-	for _, e := range ents {
-		var grantRides, grantBonus, usedRides, usedBonus int
-		err := l.repo.db.QueryRow(ctx, `
-			SELECT
-			  COALESCE(SUM(rides_delta) FILTER (WHERE rides_delta > 0 AND (expires_at IS NULL OR expires_at > now())), 0),
-			  COALESCE(SUM(bonus_delta) FILTER (WHERE bonus_delta > 0 AND (expires_at IS NULL OR expires_at > now())), 0),
-			  COALESCE(-SUM(rides_delta) FILTER (WHERE rides_delta < 0), 0),
-			  COALESCE(-SUM(bonus_delta) FILTER (WHERE bonus_delta < 0), 0)
-			FROM ride_credit_ledger
-			WHERE driver_id = $1 AND vehicle_type_id = $2
-		`, e.driverID, e.vehicleTypeID).Scan(&grantRides, &grantBonus, &usedRides, &usedBonus)
-		if err != nil {
-			return adjusted, err
-		}
-		newRides := grantRides - usedRides
-		if newRides < 0 {
-			newRides = 0
-		}
-		newBonus := grantBonus - usedBonus
-		if newBonus < 0 {
-			newBonus = 0
-		}
-		if newRides >= e.rides && newBonus >= e.bonus {
-			continue // nothing expired
-		}
-		tx, err := l.repo.db.Begin(ctx)
-		if err != nil {
-			return adjusted, err
-		}
-		if _, err = tx.Exec(ctx, `
-			INSERT INTO ride_credit_ledger
-			    (driver_id, vehicle_type_id, entry_type, rides_delta, bonus_delta, balance_rides, balance_bonus, reason)
-			VALUES ($1,$2,'EXPIRY',$3,$4,$5,$6,'credits expired')
-		`, e.driverID, e.vehicleTypeID, newRides-e.rides, newBonus-e.bonus, newRides, newBonus); err != nil {
-			tx.Rollback(ctx)
-			return adjusted, err
-		}
-		if _, err = tx.Exec(ctx, `
-			UPDATE driver_entitlements SET rides_remaining=$3, bonus_remaining=$4, updated_at=now()
-			WHERE driver_id=$1 AND vehicle_type_id=$2
-		`, e.driverID, e.vehicleTypeID, newRides, newBonus); err != nil {
-			tx.Rollback(ctx)
-			return adjusted, err
-		}
-		if err = tx.Commit(ctx); err != nil {
-			return adjusted, err
-		}
-		adjusted++
-	}
-	return adjusted, nil
-}

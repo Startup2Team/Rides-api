@@ -1,0 +1,17 @@
+-- Lock-consistency fix, step 2 of 2: validate the CHECK constraint 083 added
+-- NOT VALID.
+--
+-- VALIDATE CONSTRAINT takes only SHARE UPDATE EXCLUSIVE on `users` (allows
+-- concurrent reads AND writes) while it scans existing rows — unlike the
+-- ACCESS EXCLUSIVE a plain `ADD CONSTRAINT ... CHECK (...)` would hold for the
+-- same scan. Running this in a SEPARATE migration/transaction from 083's
+-- ADD CONSTRAINT ... NOT VALID is what actually gets the lower lock: if both
+-- ran in the same transaction, the ACCESS EXCLUSIVE from ADD CONSTRAINT would
+-- still be held (Postgres holds locks until COMMIT, not per-statement) for
+-- the whole VALIDATE CONSTRAINT scan too, defeating the point. Mirrors
+-- 081_validate_national_id_checks for 080.
+--
+-- Every existing row is NULL for gender (083 added the column with no
+-- backfill), so this scan is a formality — the split is still the correct
+-- pattern for any table this size might grow to before this ships.
+ALTER TABLE users VALIDATE CONSTRAINT users_gender_chk;

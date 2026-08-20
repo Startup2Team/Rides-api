@@ -33,7 +33,7 @@ type mockSvc struct {
 	rejectDriverFn               func(ctx context.Context, profileID, adminUserID, reason string) error
 	suspendDriverFn              func(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
 	reinstateDriverFn            func(ctx context.Context, profileID string) error
-	getDriverFn                  func(ctx context.Context, profileID string) (map[string]interface{}, error)
+	getDriverFn                  func(ctx context.Context, profileID, requesterRole string) (map[string]interface{}, error)
 	updateDriverFn               func(ctx context.Context, profileID string, fields map[string]interface{}) error
 	deleteDriverFn               func(ctx context.Context, profileID string) error
 	listCustomersFn              func(ctx context.Context, status, search, sort string, limit, offset int) ([]map[string]interface{}, int, error)
@@ -65,6 +65,7 @@ type mockSvc struct {
 	notifyDriverFn               func(ctx context.Context, driverRef, title, body, reason, createdBy string) (map[string]interface{}, error)
 	listNotificationCampaignsFn  func(ctx context.Context, limit, offset int) ([]map[string]interface{}, int, error)
 	deleteNotificationCampaignFn func(ctx context.Context, id string) error
+	setDriverNationalIDFn        func(ctx context.Context, profileID, country, number string) (string, string, string, error)
 }
 
 func (m *mockSvc) ListDrivers(ctx context.Context, status, vehicleType, search, sort string, limit, offset int) ([]map[string]interface{}, int, error) {
@@ -118,11 +119,17 @@ func (m *mockSvc) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 func (m *mockSvc) ReinstateDriver(ctx context.Context, profileID string) error {
 	return m.reinstateDriverFn(ctx, profileID)
 }
-func (m *mockSvc) GetDriver(ctx context.Context, profileID string) (map[string]interface{}, error) {
-	return m.getDriverFn(ctx, profileID)
+func (m *mockSvc) GetDriver(ctx context.Context, profileID, requesterRole string) (map[string]interface{}, error) {
+	return m.getDriverFn(ctx, profileID, requesterRole)
 }
 func (m *mockSvc) UpdateDriver(ctx context.Context, profileID string, fields map[string]interface{}) error {
 	return m.updateDriverFn(ctx, profileID, fields)
+}
+func (m *mockSvc) SetDriverNationalID(ctx context.Context, profileID, country, number string) (string, string, string, error) {
+	if m.setDriverNationalIDFn != nil {
+		return m.setDriverNationalIDFn(ctx, profileID, country, number)
+	}
+	return "", "", "", nil
 }
 func (m *mockSvc) DeleteDriver(ctx context.Context, profileID string) error {
 	return m.deleteDriverFn(ctx, profileID)
@@ -442,7 +449,7 @@ func TestDriverOverview_HappyPath(t *testing.T) {
 
 func TestGetDriver_HappyPath(t *testing.T) {
 	mock := &mockSvc{
-		getDriverFn: func(_ context.Context, profileID string) (map[string]interface{}, error) {
+		getDriverFn: func(_ context.Context, profileID, requesterRole string) (map[string]interface{}, error) {
 			return map[string]interface{}{"id": profileID, "full_name": "Bob"}, nil
 		},
 	}
@@ -453,9 +460,86 @@ func TestGetDriver_HappyPath(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
 
+// injectAdminClaims is like injectClaims but also sets AdminRole, needed for
+// tests that exercise RequireAdminRole-gated behaviour (here: GetDriver's
+// national-ID audit, which only fires for SuperAdmin/OpsManager).
+func injectAdminClaims(userID, adminRole string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), mw.ContextKeyClaims, &mw.Claims{
+				UserID:    userID,
+				RoleState: mw.RoleAdmin,
+				AdminRole: adminRole,
+				TokenType: "access",
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// trackingAuditDB counts Exec calls so a test can assert an audit entry was
+// (or was not) written, without a real database.
+type trackingAuditDB struct{ execCount *int }
+
+func (d trackingAuditDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	*d.execCount++
+	return pgconn.CommandTag{}, nil
+}
+
+// TestGetDriver_SuperAdmin_AuditsFullNationalIDView proves GetDriver's audit
+// fires when a SuperAdmin actually sees a full national ID.
+func TestGetDriver_SuperAdmin_AuditsFullNationalIDView(t *testing.T) {
+	var execCount int
+	fullID := "1234567890123456"
+	mock := &mockSvc{
+		getDriverFn: func(_ context.Context, profileID, requesterRole string) (map[string]interface{}, error) {
+			return map[string]interface{}{"id": profileID, "national_id_number": &fullID}, nil
+		},
+	}
+	h := admin.NewHandler(mock, nil, audit.New(trackingAuditDB{execCount: &execCount}), "test")
+	r := chi.NewRouter()
+	r.Use(injectAdminClaims(adminID, "SUPER_ADMIN"))
+	r.Get("/admin/drivers/{id}", h.GetDriver)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/drivers/profile-abc", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, 1, execCount, "a SuperAdmin viewing a real national ID must be audited")
+}
+
+// TestGetDriver_NoNationalIDOnFile_DoesNotAuditView is a regression test: the
+// map value behind "national_id_number" is a *string even when there is no ID
+// on file (a boxed nil pointer) — comparing that interface{} directly against
+// nil with `!=` is ALWAYS true (a well-known Go gotcha), which would have
+// audited "viewed the driver's national ID" on EVERY SuperAdmin GetDriver
+// call regardless of whether the driver has one captured at all. The fix
+// type-asserts to the concrete *string and checks THAT for nil.
+func TestGetDriver_NoNationalIDOnFile_DoesNotAuditView(t *testing.T) {
+	var execCount int
+	var nilID *string
+	mock := &mockSvc{
+		getDriverFn: func(_ context.Context, profileID, requesterRole string) (map[string]interface{}, error) {
+			return map[string]interface{}{"id": profileID, "national_id_number": nilID}, nil
+		},
+	}
+	h := admin.NewHandler(mock, nil, audit.New(trackingAuditDB{execCount: &execCount}), "test")
+	r := chi.NewRouter()
+	r.Use(injectAdminClaims(adminID, "SUPER_ADMIN"))
+	r.Get("/admin/drivers/{id}", h.GetDriver)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/drivers/profile-abc", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, 0, execCount, "must not audit a view when there is no national ID to view")
+}
+
 func TestGetDriver_NotFound(t *testing.T) {
 	mock := &mockSvc{
-		getDriverFn: func(_ context.Context, _ string) (map[string]interface{}, error) {
+		getDriverFn: func(_ context.Context, _, _ string) (map[string]interface{}, error) {
 			return nil, apperrors.ErrNotFound
 		},
 	}
