@@ -249,7 +249,6 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 	`, profileID, offer.vehicleTypeID).Scan(&vehicleID)
 
 	paymentRef := uuid.NewString()
-	expiresAt := time.Now().Add(time.Duration(offer.validityDays) * 24 * time.Hour)
 
 	// Free / promotional → grant immediately, no MoMo (no payment timeout).
 	if offer.price <= 0 || offer.isPromotional {
@@ -260,7 +259,7 @@ func (s *PurchaseService) Create(ctx context.Context, userID string, in CreateIn
 		if err := s.repo.markPaid(ctx, id, ""); err != nil {
 			return nil, err
 		}
-		if err := s.ledger.GrantPurchase(ctx, profileID, vehicleID, offer.vehicleTypeID, id, offer.rides, offer.bonus, expiresAt); err != nil {
+		if err := s.ledger.GrantPurchase(ctx, profileID, vehicleID, offer.vehicleTypeID, id, offer.rides, offer.bonus); err != nil {
 			s.log.Error().Err(err).Str("purchase_id", id).Msg("packages: free grant failed")
 		} else {
 			_ = s.repo.markCreditsGranted(ctx, id)
@@ -310,7 +309,7 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 
 	txCtx := context.WithValue(ctx, txKey{}, tx)
 
-	p, profileID, vehicleID, vehicleTypeID, rides, bonus, validityDays, status, err := s.repo.lockPurchaseForConfirm(txCtx, paymentRef)
+	p, profileID, vehicleID, vehicleTypeID, rides, bonus, _, status, err := s.repo.lockPurchaseForConfirm(txCtx, paymentRef)
 	if err != nil {
 		return err
 	}
@@ -337,8 +336,7 @@ func (s *PurchaseService) confirm(ctx context.Context, paymentRef, providerTxnID
 	if err := s.repo.markPaid(txCtx, p, providerTxnID); err != nil {
 		return err
 	}
-	expiresAt := time.Now().Add(time.Duration(validityDays) * 24 * time.Hour)
-	if err := s.ledger.GrantPurchase(txCtx, profileID, vehicleID, vehicleTypeID, p, rides, bonus, expiresAt); err != nil {
+	if err := s.ledger.GrantPurchase(txCtx, profileID, vehicleID, vehicleTypeID, p, rides, bonus); err != nil {
 		return fmt.Errorf("grant after payment: %w", err)
 	}
 	if err := s.repo.markCreditsGranted(txCtx, p); err != nil {
@@ -502,8 +500,7 @@ func (s *PurchaseService) AdminCreateOnBehalf(ctx context.Context, adminID strin
 		if err := s.repo.markPaid(ctx, id, "MANUAL-"+adminID+"-"+paymentRef); err != nil {
 			return nil, err
 		}
-		expiresAt := time.Now().Add(time.Duration(offer.validityDays) * 24 * time.Hour)
-		if err := s.ledger.GrantPurchase(ctx, in.DriverID, vehicleID, offer.vehicleTypeID, id, offer.rides, offer.bonus, expiresAt); err != nil {
+		if err := s.ledger.GrantPurchase(ctx, in.DriverID, vehicleID, offer.vehicleTypeID, id, offer.rides, offer.bonus); err != nil {
 			return nil, fmt.Errorf("admin grant: %w", err)
 		}
 		_ = s.repo.markCreditsGranted(ctx, id)
