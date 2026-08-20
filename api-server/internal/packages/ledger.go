@@ -79,14 +79,24 @@ func (r *Repository) grant(ctx context.Context, profileID string, vehicleID *str
 	}
 	newRides, newBonus := curRides+rides, curBonus+bonus
 
-	if _, err = tx.Exec(ctx, `
+	// ON CONFLICT DO NOTHING makes a repeated call under the same idempotency_key
+	// a silent no-op (e.g. a retried admin approval) instead of a 23505 error —
+	// exactly-once grant without the caller needing its own dedupe check.
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO ride_credit_ledger
 		    (driver_id, vehicle_id, vehicle_type_id, entry_type, rides_delta, bonus_delta,
 		     balance_rides, balance_bonus, source_purchase_id, admin_id, reason, idempotency_key)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		ON CONFLICT (idempotency_key) DO NOTHING
 	`, profileID, vehicleID, vehicleTypeID, entryType, rides, bonus,
-		newRides, newBonus, sourcePurchaseID, adminID, nullStr(reason), idemKey); err != nil {
+		newRides, newBonus, sourcePurchaseID, adminID, nullStr(reason), idemKey)
+	if err != nil {
 		return err
+	}
+	if idemKey != nil && tag.RowsAffected() == 0 {
+		// Already granted under this key — the cache already reflects it from
+		// the original call, so there is nothing further to apply.
+		return nil
 	}
 
 	if _, err = tx.Exec(ctx, `
@@ -253,6 +263,35 @@ func (l *LedgerService) GrantPurchase(ctx context.Context, profileID string, veh
 		}
 	}
 	return nil
+}
+
+// GrantRegistrationBonus mirrors a newly-approved driver's registration bonus
+// into the v4 ledger (driver_entitlements, keyed on driver_profiles.id) so it
+// is actually spendable at the go-online/accept gates. admin.ApproveDriver
+// still writes the legacy bonus_grants row separately (via bonus.Service) for
+// the driver-facing bonus history — this is the fix for DB-4: that legacy
+// write alone was never read by the spend gates.
+//
+// Idempotent per driver+vehicle type ("registration:<profileID>" key), so a
+// retried approval (e.g. a duplicate admin request) cannot double-grant.
+//
+// The registration bonus is permanent, like every other credit since the
+// credit-expiry removal (#138): it grants with expires_at = NULL and lives
+// until it is spent — never swept.
+func (l *LedgerService) GrantRegistrationBonus(ctx context.Context, driverUserID, vehicleTypeID string, bonusRides int) error {
+	if bonusRides <= 0 {
+		return nil
+	}
+	var profileID string
+	err := l.repo.db.QueryRow(ctx, `SELECT id FROM driver_profiles WHERE user_id = $1`, driverUserID).Scan(&profileID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // no driver profile — nothing to credit
+		}
+		return err
+	}
+	return l.repo.grant(ctx, profileID, nil, vehicleTypeID, "BONUS_GRANT", 0, bonusRides,
+		nil, nil, "registration bonus", ptr("registration:"+profileID))
 }
 
 // AdminGrant lets a support agent add credits with a reason (audited separately).

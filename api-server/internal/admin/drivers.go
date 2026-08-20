@@ -126,13 +126,51 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 	}
 
 	// Grant the 30-ride registration bonus (separate from the free-trial package credit).
+	// DB-4: the legacy bonus_grants write below is display-only (GET /bonuses) — the
+	// go-online/accept credit gates and /entitlements only ever read the v4 ledger, so
+	// the same amount must also land there via s.packages or the bonus is unspendable.
 	if s.bonus != nil {
 		// Look up the vehicle_type_id for the transport_type code.
 		var vehicleTypeID string
 		_ = s.db.QueryRow(ctx, `SELECT id FROM vehicle_types WHERE code = $1`, transportType).Scan(&vehicleTypeID)
 		if vehicleTypeID != "" {
-			if _, err := s.bonus.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID); err != nil {
+			bonusRides, err := s.bonus.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID)
+			if err != nil {
 				s.log.Warn().Err(err).Str("driver_user_id", driverUserID).Msg("admin: registration bonus grant failed")
+			} else if bonusRides > 0 && s.packages != nil {
+				if err := s.packages.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID, bonusRides); err != nil {
+					// This is money-affecting (an unspendable promise, same bug as DB-4):
+					// log loudly rather than best-effort-and-forget.
+					s.log.Error().Err(err).
+						Str("driver_user_id", driverUserID).
+						Int("bonus_rides", bonusRides).
+						Msg("admin: registration bonus ledger mirror failed — driver will see the bonus but cannot spend it")
+				}
+			} else if bonusRides == 0 && s.packages != nil {
+				// bonusRides == 0, err == nil means either "already granted" (the
+				// common case on a re-approval) or "no REGISTRATION tier configured".
+				// A prior approval's ledger mirror can fail after the legacy grant
+				// already landed (logged above as an Error, not fatal) — the legacy
+				// side then reports "already granted" forever, so without this the
+				// mirror is never retried and the driver keeps an unspendable bonus
+				// until someone runs the manual backfill. Self-heal here: re-fetch
+				// the tier's configured amount and retry the mirror. If the tier
+				// mirror already landed, GrantRegistrationBonus is idempotent on
+				// "registration:<profileID>" and this is a harmless no-op; if no
+				// tier is configured, tierRides is 0 and the mirror call itself
+				// no-ops (bonusRides <= 0 guard in packages.GrantRegistrationBonus).
+				tierRides, err := s.bonus.RegistrationTierBonusRides(ctx)
+				if err != nil {
+					s.log.Warn().Err(err).Str("driver_user_id", driverUserID).
+						Msg("admin: registration tier lookup failed while self-healing ledger mirror")
+				} else if tierRides > 0 {
+					if err := s.packages.GrantRegistrationBonus(ctx, driverUserID, vehicleTypeID, tierRides); err != nil {
+						s.log.Error().Err(err).
+							Str("driver_user_id", driverUserID).
+							Int("bonus_rides", tierRides).
+							Msg("admin: registration bonus ledger mirror self-heal failed")
+					}
+				}
 			}
 		}
 	}
