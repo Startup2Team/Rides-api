@@ -208,6 +208,25 @@ func (h *Handler) GetActiveRideForDriver(w http.ResponseWriter, r *http.Request)
 	respond.OK(w, ride.ToResponse())
 }
 
+// updateCustomerLocationRequest is the payload for UpdateCustomerLocation.
+// Named (rather than inline) so its validator tags can be unit-tested
+// directly against go-playground/validator without spinning up an HTTP
+// request — see TestUpdateCustomerLocationRequest_Validation.
+type updateCustomerLocationRequest struct {
+	// No `required`: go-playground/validator treats it as "reject the zero
+	// value", which would reject lat==0 (the equator, which runs through
+	// Uganda) or lng==0. min/max bounds plus the service-level
+	// geo.Point.Validate() are the real range checks.
+	Lat float64 `json:"lat" validate:"min=-90,max=90"`
+	Lng float64 `json:"lng" validate:"min=-180,max=180"`
+	// Cached but not currently fanned out to the driver (WS payload is
+	// lat/lng only). Bounded anyway so a malformed/malicious client can't
+	// stuff nonsense into Redis: 300 km/h is well above any road vehicle,
+	// 0-360 is the full compass.
+	SpeedKMH *float64 `json:"speed_kmh" validate:"omitempty,gte=0,lte=300"`
+	Heading  *float64 `json:"heading"   validate:"omitempty,gte=0,lte=360"`
+}
+
 // POST /api/v1/rides/{id}/customer-location
 // Customer publishes their live GPS position, relayed to the assigned driver.
 // Whole-trip sharing: only accepted while the ride is in an active status
@@ -216,12 +235,7 @@ func (h *Handler) UpdateCustomerLocation(w http.ResponseWriter, r *http.Request)
 	claims := middleware.GetClaims(r)
 	rideID := chi.URLParam(r, "id")
 
-	var body struct {
-		Lat      float64  `json:"lat"       validate:"required,min=-90,max=90"`
-		Lng      float64  `json:"lng"       validate:"required,min=-180,max=180"`
-		SpeedKMH *float64 `json:"speed_kmh"`
-		Heading  *float64 `json:"heading"`
-	}
+	var body updateCustomerLocationRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return

@@ -1227,6 +1227,11 @@ func (s *Service) releaseRideRedisState(ctx context.Context, rideID, customerID 
 	s.redis.Del(ctx, rkeys.K.RideState(rideID))
 	s.redis.Del(ctx, rkeys.K.RidePendingDriver(rideID))
 	s.redis.Del(ctx, rkeys.K.RideExcludedDrivers(rideID))
+	// Explicit teardown of live-location PII rather than relying on the 30-min
+	// TTL: minimize how long the customer's and driver's GPS trail for this
+	// ride sits in Redis once the ride is no longer active.
+	s.redis.Del(ctx, rkeys.K.RideCustomerLocation(rideID))
+	s.redis.Del(ctx, rkeys.K.RideDriverLocation(rideID))
 	if driverProfileID != nil {
 		s.releaseDriverRedisState(ctx, *driverProfileID, vehicleType)
 	}
