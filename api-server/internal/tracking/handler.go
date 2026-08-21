@@ -250,46 +250,12 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 				client.Send <- Message{Type: "error", Payload: map[string]interface{}{"message": err.Error()}}
 				continue
 			}
-			// Forward real-time position to the customer watching this driver's active ride.
-			// Apply EMA smoothing (α=0.4) before fan-out to reduce GPS jitter on the
-			// customer map without introducing significant lag. The raw coordinates are
-			// already persisted by UpdateLocation for geofence checks — we only smooth
-			// the customer-facing position here.
-			if rideID, rerr := h.redis.Get(r.Context(), rkeys.K.DriverActiveRide(driverProfile.ID)).Result(); rerr == nil && rideID != "" {
-				smoothLat, smoothLng := incoming.Lat, incoming.Lng
-
-				const emaAlpha = 0.4
-				if prev, perr := h.redis.Get(r.Context(), rkeys.K.DriverSmoothedLocation(driverProfile.ID)).Result(); perr == nil {
-					var prevLoc struct {
-						Lat float64 `json:"lat"`
-						Lng float64 `json:"lng"`
-					}
-					if json.Unmarshal([]byte(prev), &prevLoc) == nil && (prevLoc.Lat != 0 || prevLoc.Lng != 0) {
-						smoothLat = emaAlpha*incoming.Lat + (1-emaAlpha)*prevLoc.Lat
-						smoothLng = emaAlpha*incoming.Lng + (1-emaAlpha)*prevLoc.Lng
-					}
-				}
-
-				smoothJSON, _ := json.Marshal(map[string]interface{}{
-					"lat": smoothLat,
-					"lng": smoothLng,
-				})
-				// Store smoothed position (no expiry — overwritten on every update,
-				// cleared when driver goes offline).
-				h.redis.Set(r.Context(), rkeys.K.DriverSmoothedLocation(driverProfile.ID), string(smoothJSON), 0)
-
-				// Persist smoothed position for reconnecting customers.
-				h.redis.Set(r.Context(), rkeys.K.RideDriverLocation(rideID), string(smoothJSON), 30*time.Minute)
-
-				h.hub.SendToCustomer(rideID, Message{
-					Type:   "driver_location",
-					RideID: rideID,
-					Payload: map[string]interface{}{
-						"lat": smoothLat,
-						"lng": smoothLng,
-					},
-				})
-			}
+			// The customer-facing relay (EMA smoothing, ride:<id>:driver_location
+			// cache, hub.SendToCustomer) used to happen here. It's been moved into
+			// driver.Service.UpdateLocation itself: the app publishes driver
+			// location over POST /driver/location, not this WS frame, so this copy
+			// never actually ran and the customer's driver marker never streamed.
+			// See driver.Service.relayLocationToCustomer.
 		}
 	}
 }
