@@ -26,22 +26,32 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// createRideRequest is the payload for CreateRide. Named (rather than inline)
+// so its validator tags can be unit-tested directly against
+// go-playground/validator without spinning up an HTTP request — see
+// TestCreateRideRequest_Validation.
+type createRideRequest struct {
+	// No `required` on the coordinates: go-playground/validator treats it as
+	// "reject the zero value", which would reject lat==0 (the equator, which
+	// runs through Uganda) or lng==0 (prime meridian). min/max bounds plus
+	// the service-level geo.Point.Validate() are the real range checks.
+	PickupLat      float64  `json:"pickup_lat"    validate:"min=-90,max=90"`
+	PickupLng      float64  `json:"pickup_lng"    validate:"min=-180,max=180"`
+	PickupAddr     string   `json:"pickup_address" validate:"required"`
+	DestLat        float64  `json:"dest_lat"      validate:"min=-90,max=90"`
+	DestLng        float64  `json:"dest_lng"      validate:"min=-180,max=180"`
+	DestAddr       string   `json:"dest_address"  validate:"required"`
+	TransportType  string   `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+	InitialFare    *float64 `json:"initial_fare"`
+	DistanceKM     *float64 `json:"distance_km"`
+	IdempotencyKey string   `json:"idempotency_key"`
+}
+
 // POST /api/v1/customer/rides
 func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
-	var body struct {
-		PickupLat      float64  `json:"pickup_lat"    validate:"required,min=-90,max=90"`
-		PickupLng      float64  `json:"pickup_lng"    validate:"required,min=-180,max=180"`
-		PickupAddr     string   `json:"pickup_address" validate:"required"`
-		DestLat        float64  `json:"dest_lat"      validate:"required,min=-90,max=90"`
-		DestLng        float64  `json:"dest_lng"      validate:"required,min=-180,max=180"`
-		DestAddr       string   `json:"dest_address"  validate:"required"`
-		TransportType  string   `json:"transport_type" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
-		InitialFare    *float64 `json:"initial_fare"`
-		DistanceKM     *float64 `json:"distance_km"`
-		IdempotencyKey string   `json:"idempotency_key"`
-	}
+	var body createRideRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)

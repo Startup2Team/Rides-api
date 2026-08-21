@@ -40,9 +40,13 @@ type LocationUpdate struct {
 }
 
 // BatchLocationUpdate is a coordinate update within a batch send.
+//
+// No `required` on Lat/Lng: go-playground/validator treats it as "reject the
+// zero value", which would reject lat==0 (the equator, which runs through
+// Uganda) or lng==0 (prime meridian). min/max bounds are the real range check.
 type BatchLocationUpdate struct {
-	Lat       float64  `json:"lat"       validate:"required,min=-90,max=90"`
-	Lng       float64  `json:"lng"       validate:"required,min=-180,max=180"`
+	Lat       float64  `json:"lat"       validate:"min=-90,max=90"`
+	Lng       float64  `json:"lng"       validate:"min=-180,max=180"`
 	SpeedKMH  *float64 `json:"speed_kmh"`
 	Heading   *float64 `json:"heading"`
 	Timestamp int64    `json:"timestamp"`
