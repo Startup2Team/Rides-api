@@ -917,8 +917,6 @@ func main() {
 				Post("/location", driverH.UpdateLocation)
 			r.With(mw.UserRateLimit(rdb, "driver_location_batch", cfg.Security.DriverLocationRateLimit, time.Minute)).
 				Post("/locations", driverH.UpdateLocationsBatch)
-			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
-				Post("/location", driverH.UpdateLocation)
 
 			// Demand heatmap — where riders are requesting, so a driver can
 			// reposition. Read-only; per-user limit keeps polling reasonable.
