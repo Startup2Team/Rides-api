@@ -232,6 +232,10 @@ func main() {
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
 	driverSvc := driver.NewService(driverRepo, rdb, anaSvc, cfg, log)
+	// Relay a driver's REST-published location straight to the customer
+	// watching their active ride (driver → tracking would be an import cycle;
+	// *tracking.Hub satisfies driver.WSNotifier via Hub.NotifyCustomer).
+	driverSvc.SetWSNotifier(hub)
 	walletSvc := wallet.NewService(walletRepo, log, cfg.Payments.Enabled)
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
