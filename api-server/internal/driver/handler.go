@@ -281,16 +281,25 @@ func (h *Handler) SetAvailability(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+// updateLocationRequest is the payload for UpdateLocation. Named (rather than
+// inline) so its validator tags can be unit-tested directly against
+// go-playground/validator without spinning up an HTTP request.
+type updateLocationRequest struct {
+	// No `required`: go-playground/validator treats it as "reject the zero
+	// value", which would reject lat==0 (the equator, which runs through
+	// Uganda) or lng==0 (prime meridian). min/max bounds are the real range
+	// check.
+	Lat      float64  `json:"lat"       validate:"min=-90,max=90"`
+	Lng      float64  `json:"lng"       validate:"min=-180,max=180"`
+	SpeedKMH *float64 `json:"speed_kmh"`
+	Heading  *float64 `json:"heading"`
+}
+
 // POST /api/v1/driver/location
 func (h *Handler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
-	var body struct {
-		Lat      float64  `json:"lat"       validate:"required,min=-90,max=90"`
-		Lng      float64  `json:"lng"       validate:"required,min=-180,max=180"`
-		SpeedKMH *float64 `json:"speed_kmh"`
-		Heading  *float64 `json:"heading"`
-	}
+	var body updateLocationRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
