@@ -226,6 +226,15 @@ func (h *Hub) SendToCustomer(rideID string, msg Message) {
 	h.rdb.Publish(ctx, "ws:ride:"+rideID, string(payload))
 }
 
+// NotifyCustomer is a driver.WSNotifier-compatible wrapper around
+// SendToCustomer, expressed in primitive types so package driver can declare
+// the interface without importing package tracking (tracking already imports
+// driver for the WS handler's profile lookups, so the reverse import would
+// cycle).
+func (h *Hub) NotifyCustomer(rideID, msgType string, payload map[string]interface{}) {
+	h.SendToCustomer(rideID, Message{Type: msgType, RideID: rideID, Payload: payload})
+}
+
 // IsDriverConnected reports whether the driver holds a live WebSocket on ANY
 // replica.
 //

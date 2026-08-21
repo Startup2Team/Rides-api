@@ -134,14 +134,22 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		if rideID, rerr := h.redis.Get(ctx, rkeys.K.DriverActiveRide(driverProfile.ID)).Result(); rerr == nil && rideID != "" {
 			if state, serr := h.redis.Get(ctx, rkeys.K.RideState(rideID)).Result(); serr == nil && state != "" {
+				payload := map[string]interface{}{
+					"status":  state,
+					"ride_id": rideID,
+				}
+				// Include the customer's last known GPS (whole-trip sharing), so a
+				// driver reconnecting mid-trip sees their position without waiting
+				// for the next customer-location publish. Mirrors how the customer
+				// replay below injects driver_lat/driver_lng.
+				if locJSON, lerr := h.redis.Get(ctx, rkeys.K.RideCustomerLocation(rideID)).Result(); lerr == nil {
+					injectCustomerLocation(payload, locJSON)
+				}
 				select {
 				case client.Send <- Message{
-					Type:   "ride_state",
-					RideID: rideID,
-					Payload: map[string]interface{}{
-						"status":  state,
-						"ride_id": rideID,
-					},
+					Type:    "ride_state",
+					RideID:  rideID,
+					Payload: payload,
 				}:
 				default:
 				}
@@ -242,47 +250,28 @@ func (h *Handler) DriverWS(w http.ResponseWriter, r *http.Request) {
 				client.Send <- Message{Type: "error", Payload: map[string]interface{}{"message": err.Error()}}
 				continue
 			}
-			// Forward real-time position to the customer watching this driver's active ride.
-			// Apply EMA smoothing (α=0.4) before fan-out to reduce GPS jitter on the
-			// customer map without introducing significant lag. The raw coordinates are
-			// already persisted by UpdateLocation for geofence checks — we only smooth
-			// the customer-facing position here.
-			if rideID, rerr := h.redis.Get(r.Context(), rkeys.K.DriverActiveRide(driverProfile.ID)).Result(); rerr == nil && rideID != "" {
-				smoothLat, smoothLng := incoming.Lat, incoming.Lng
-
-				const emaAlpha = 0.4
-				if prev, perr := h.redis.Get(r.Context(), rkeys.K.DriverSmoothedLocation(driverProfile.ID)).Result(); perr == nil {
-					var prevLoc struct {
-						Lat float64 `json:"lat"`
-						Lng float64 `json:"lng"`
-					}
-					if json.Unmarshal([]byte(prev), &prevLoc) == nil && (prevLoc.Lat != 0 || prevLoc.Lng != 0) {
-						smoothLat = emaAlpha*incoming.Lat + (1-emaAlpha)*prevLoc.Lat
-						smoothLng = emaAlpha*incoming.Lng + (1-emaAlpha)*prevLoc.Lng
-					}
-				}
-
-				smoothJSON, _ := json.Marshal(map[string]interface{}{
-					"lat": smoothLat,
-					"lng": smoothLng,
-				})
-				// Store smoothed position (no expiry — overwritten on every update,
-				// cleared when driver goes offline).
-				h.redis.Set(r.Context(), rkeys.K.DriverSmoothedLocation(driverProfile.ID), string(smoothJSON), 0)
-
-				// Persist smoothed position for reconnecting customers.
-				h.redis.Set(r.Context(), rkeys.K.RideDriverLocation(rideID), string(smoothJSON), 30*time.Minute)
-
-				h.hub.SendToCustomer(rideID, Message{
-					Type:   "driver_location",
-					RideID: rideID,
-					Payload: map[string]interface{}{
-						"lat": smoothLat,
-						"lng": smoothLng,
-					},
-				})
-			}
+			// The customer-facing relay (EMA smoothing, ride:<id>:driver_location
+			// cache, hub.SendToCustomer) used to happen here. It's been moved into
+			// driver.Service.UpdateLocation itself: the app publishes driver
+			// location over POST /driver/location, not this WS frame, so this copy
+			// never actually ran and the customer's driver marker never streamed.
+			// See driver.Service.relayLocationToCustomer.
 		}
+	}
+}
+
+// injectCustomerLocation adds customer_lat/customer_lng to payload from a
+// RideCustomerLocation cache value, if present and parseable. No-op (payload
+// left untouched) on any read/parse failure, so a driver reconnect replay
+// never fails just because the customer hasn't published a location yet.
+func injectCustomerLocation(payload map[string]interface{}, locJSON string) {
+	var loc struct {
+		Lat float64 `json:"lat"`
+		Lng float64 `json:"lng"`
+	}
+	if json.Unmarshal([]byte(locJSON), &loc) == nil {
+		payload["customer_lat"] = loc.Lat
+		payload["customer_lng"] = loc.Lng
 	}
 }
 

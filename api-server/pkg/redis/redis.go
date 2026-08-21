@@ -224,6 +224,14 @@ func (Keys) RideDriverLocation(rideID string) string {
 	return fmt.Sprintf("ride:%s:driver_location", rideID)
 }
 
+// RideCustomerLocation caches the customer's last GPS update for a specific
+// ride while whole-trip live-location sharing is active. Mirrors
+// RideDriverLocation; TTL 30 minutes. Read on driver WS reconnect replay so a
+// driver who reconnects mid-trip sees the last known customer position.
+func (Keys) RideCustomerLocation(rideID string) string {
+	return fmt.Sprintf("ride:%s:customer_location", rideID)
+}
+
 // ── Admin dashboard ────────────────────────────────────────────────────────
 
 func (Keys) DashboardCache() string {

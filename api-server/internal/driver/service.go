@@ -92,6 +92,17 @@ type ActiveRideCanceller interface {
 	CancelActiveRideForDriverExit(ctx context.Context, driverUserID, reason string) error
 }
 
+// WSNotifier lets UpdateLocation/UpdateLocationBatch push a driver's freshly
+// persisted position straight to the customer watching their active ride.
+// Implemented by *tracking.Hub's NotifyCustomer method (a thin wrapper around
+// Hub.SendToCustomer using primitive types so this package doesn't have to
+// import package tracking to declare the interface — tracking already imports
+// driver for the WS handler's profile lookups, so the reverse import would
+// cycle) and injected in main.
+type WSNotifier interface {
+	NotifyCustomer(rideID, msgType string, payload map[string]interface{})
+}
+
 // Service handles driver business logic.
 type Service struct {
 	repo           *Repository
@@ -99,6 +110,7 @@ type Service struct {
 	analytics      *analytics.Service
 	cfg            *config.Config
 	log            zerolog.Logger
+	wsNotifier     WSNotifier
 	creditChecker  CreditChecker
 	expiryNotifier expiryNotifier
 	rideCanceller  ActiveRideCanceller
@@ -116,6 +128,12 @@ func (s *Service) SetCreditChecker(cc CreditChecker) {
 // silently escape) an agreed ride — see ForceOffline.
 func (s *Service) SetActiveRideCanceller(c ActiveRideCanceller) {
 	s.rideCanceller = c
+}
+
+// SetWSNotifier wires the WebSocket hub so location updates can relay to the
+// customer in real time — see relayLocationToCustomer.
+func (s *Service) SetWSNotifier(n WSNotifier) {
+	s.wsNotifier = n
 }
 
 // DemandHeatmap returns bucketed pickup demand over the last windowMin minutes,
@@ -625,6 +643,10 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		Latitude:  update.Lat,
 	})
 
+	// Forward the freshly-persisted position to the customer watching this
+	// driver's active ride, if any.
+	s.relayLocationToCustomer(ctx, profile.ID, update.Lat, update.Lng)
+
 	// Async telemetry writes
 	go func() {
 		bgCtx := context.Background()
@@ -692,6 +714,10 @@ func (s *Service) UpdateLocationBatch(ctx context.Context, userID string, batch 
 		Latitude:  latest.Lat,
 	})
 
+	// Forward the freshly-persisted position to the customer watching this
+	// driver's active ride, if any.
+	s.relayLocationToCustomer(ctx, profile.ID, latest.Lat, latest.Lng)
+
 	// Async telemetry batch writes
 	go func() {
 		bgCtx := context.Background()
@@ -728,6 +754,54 @@ func (s *Service) UpdateLocationBatch(ctx context.Context, userID string, batch 
 	}()
 
 	return nil
+}
+
+// relayLocationToCustomer forwards a driver's freshly-persisted GPS position
+// to the customer on their active ride, if any. EMA-smoothed (α=0.4) to
+// reduce GPS jitter on the customer map without introducing significant lag —
+// the raw coordinates are already persisted above for geofence checks; this
+// only smooths the customer-facing position.
+//
+// This used to live in the WS read pump (tracking.Handler.DriverWS), keyed off
+// the driver's "location_update" WS frame. The app publishes driver location
+// over this REST path, not WS, so that copy was dead code and the customer
+// marker never actually streamed — moved here, the path that's actually hit.
+func (s *Service) relayLocationToCustomer(ctx context.Context, profileID string, lat, lng float64) {
+	if s.wsNotifier == nil {
+		return
+	}
+	rideID, err := s.redis.Get(ctx, rkeys.K.DriverActiveRide(profileID)).Result()
+	if err != nil || rideID == "" {
+		return
+	}
+
+	smoothLat, smoothLng := lat, lng
+	const emaAlpha = 0.4
+	if prev, perr := s.redis.Get(ctx, rkeys.K.DriverSmoothedLocation(profileID)).Result(); perr == nil {
+		var prevLoc struct {
+			Lat float64 `json:"lat"`
+			Lng float64 `json:"lng"`
+		}
+		if json.Unmarshal([]byte(prev), &prevLoc) == nil && (prevLoc.Lat != 0 || prevLoc.Lng != 0) {
+			smoothLat = emaAlpha*lat + (1-emaAlpha)*prevLoc.Lat
+			smoothLng = emaAlpha*lng + (1-emaAlpha)*prevLoc.Lng
+		}
+	}
+
+	smoothJSON, err := json.Marshal(map[string]interface{}{"lat": smoothLat, "lng": smoothLng})
+	if err != nil {
+		s.log.Warn().Err(err).Str("driver_id", profileID).Msg("driver: failed to marshal smoothed location")
+		return
+	}
+	// Store smoothed position — no expiry, overwritten on every update.
+	s.redis.Set(ctx, rkeys.K.DriverSmoothedLocation(profileID), string(smoothJSON), 0)
+	// Persist smoothed position for reconnecting customers.
+	s.redis.Set(ctx, rkeys.K.RideDriverLocation(rideID), string(smoothJSON), 30*time.Minute)
+
+	s.wsNotifier.NotifyCustomer(rideID, "driver_location", map[string]interface{}{
+		"lat": smoothLat,
+		"lng": smoothLng,
+	})
 }
 
 func (s *Service) checkGPSPlausibility(ctx context.Context, driverProfileID string, newPoint geo.Point) (bool, float64) {

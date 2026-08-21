@@ -553,6 +553,77 @@ func (s *Service) FinalizeStaleInProgressRides(ctx context.Context) (int, error)
 	return finalized, nil
 }
 
+// CustomerLocationUpdate is a single GPS update published by the customer,
+// relayed to their assigned driver for the duration of an active trip.
+type CustomerLocationUpdate struct {
+	Lat      float64
+	Lng      float64
+	SpeedKMH *float64
+	Heading  *float64
+}
+
+// customerLocationShareEligible reports whether a ride's current status and
+// assigned driver allow relaying the customer's GPS to that driver.
+// driverID == nil is defensive: every status in CustomerLocationShareStatuses
+// is reached only after a driver is assigned, but this must never fan out to
+// nowhere if that ever drifts.
+func customerLocationShareEligible(status Status, driverID *string) bool {
+	return CustomerLocationShareStatuses[status] && driverID != nil
+}
+
+// UpdateCustomerLocation caches the customer's live position and relays it to
+// the assigned driver over WebSocket (whole-trip sharing).
+//
+// Ownership: FindByIDAndCustomer scopes the lookup to rideID+customerID, so a
+// ride owned by someone else resolves as ErrRideNotFound (404) — the same
+// non-committal response GetRide/CancelRide give a stranger, rather than a
+// 403 that would confirm the ride ID exists. Activity: gated to
+// CustomerLocationShareStatuses, mirroring how CancelRide gates on
+// CancellableStatuses — anything else (not yet matched, or terminal) is
+// ErrRideNotActive (409).
+func (s *Service) UpdateCustomerLocation(ctx context.Context, rideID, customerID string, update CustomerLocationUpdate) error {
+	point := geo.Point{Lat: update.Lat, Lng: update.Lng}
+	if err := point.Validate(); err != nil {
+		return err
+	}
+
+	r, err := s.repo.FindByIDAndCustomer(ctx, rideID, customerID)
+	if err != nil {
+		return err
+	}
+	if !customerLocationShareEligible(r.Status, r.DriverID) {
+		return apperrors.ErrRideNotActive
+	}
+
+	locJSON, err := json.Marshal(map[string]interface{}{
+		"lat":        update.Lat,
+		"lng":        update.Lng,
+		"speed_kmh":  update.SpeedKMH,
+		"heading":    update.Heading,
+		"updated_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return fmt.Errorf("ride: marshal customer location: %w", err)
+	}
+	// 30 min TTL mirrors RideDriverLocation — long enough to survive a driver
+	// reconnect mid-trip, short enough to self-clean if a ride's Redis
+	// teardown is ever missed.
+	if err := s.redis.Set(ctx, rkeys.K.RideCustomerLocation(rideID), locJSON, 30*time.Minute).Err(); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: failed to cache customer location")
+	}
+
+	s.hub.SendToDriver(*r.DriverID, tracking.Message{
+		Type:   "customer_location",
+		RideID: rideID,
+		Payload: map[string]interface{}{
+			"lat": update.Lat,
+			"lng": update.Lng,
+		},
+	})
+
+	return nil
+}
+
 // CancelRide cancels a ride initiated by a customer.
 func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason string) error {
 	r, err := s.repo.FindByIDAndCustomer(ctx, rideID, customerID)
@@ -1156,6 +1227,11 @@ func (s *Service) releaseRideRedisState(ctx context.Context, rideID, customerID 
 	s.redis.Del(ctx, rkeys.K.RideState(rideID))
 	s.redis.Del(ctx, rkeys.K.RidePendingDriver(rideID))
 	s.redis.Del(ctx, rkeys.K.RideExcludedDrivers(rideID))
+	// Explicit teardown of live-location PII rather than relying on the 30-min
+	// TTL: minimize how long the customer's and driver's GPS trail for this
+	// ride sits in Redis once the ride is no longer active.
+	s.redis.Del(ctx, rkeys.K.RideCustomerLocation(rideID))
+	s.redis.Del(ctx, rkeys.K.RideDriverLocation(rideID))
 	if driverProfileID != nil {
 		s.releaseDriverRedisState(ctx, *driverProfileID, vehicleType)
 	}

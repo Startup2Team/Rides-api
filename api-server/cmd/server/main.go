@@ -232,6 +232,10 @@ func main() {
 	// ── Domain services ───────────────────────────────────────────────────────
 	authSvc := auth.NewService(authRepo, rdb, telSvc, cfg, log)
 	driverSvc := driver.NewService(driverRepo, rdb, anaSvc, cfg, log)
+	// Relay a driver's REST-published location straight to the customer
+	// watching their active ride (driver → tracking would be an import cycle;
+	// *tracking.Hub satisfies driver.WSNotifier via Hub.NotifyCustomer).
+	driverSvc.SetWSNotifier(hub)
 	walletSvc := wallet.NewService(walletRepo, log, cfg.Payments.Enabled)
 	bonusSvc := bonus.NewService(bonusRepo, log)
 	pkgSvc := packages.NewService(pkgRepo, log)
@@ -841,6 +845,22 @@ func main() {
 		r.Post("/support/tickets", ticketH.SubmitTicket)
 	})
 
+	// ── Rides (top-level, shared contract with mobile) ──────────────────────────
+	// Not nested under /customer: this is the customer→driver live-location
+	// publish path, a fixed contract with the mobile team. Same role set as the
+	// /customer group (a driver-mode account can also be riding as a customer).
+	r.Route(apiV1Prefix+"/rides", func(r chi.Router) {
+		r.Use(mw.Authenticate(cfg, rdb))
+		r.Use(mw.RequireNotSuspended())
+		r.Use(mw.RequireRole(mw.RoleCustomer, mw.RoleDriverActive, mw.RoleDriverPending))
+
+		// Same budget as driver location (20/min = 1 every 3s); silent 204 on
+		// overflow (not 429) so a GPS burst doesn't surface as a red error —
+		// the next update lands within the window.
+		r.With(mw.UserRateLimit(rdb, "customer_location", 20, time.Minute)).
+			Post("/{id}/customer-location", rideH.UpdateCustomerLocation)
+	})
+
 	// ── Driver ────────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/driver", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
@@ -897,8 +917,6 @@ func main() {
 				Post("/location", driverH.UpdateLocation)
 			r.With(mw.UserRateLimit(rdb, "driver_location_batch", cfg.Security.DriverLocationRateLimit, time.Minute)).
 				Post("/locations", driverH.UpdateLocationsBatch)
-			r.With(mw.UserRateLimit(rdb, "driver_location", 20, time.Minute)).
-				Post("/location", driverH.UpdateLocation)
 
 			// Demand heatmap — where riders are requesting, so a driver can
 			// reposition. Read-only; per-user limit keeps polling reasonable.
