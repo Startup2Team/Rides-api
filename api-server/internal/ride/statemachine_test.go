@@ -127,6 +127,31 @@ func TestStateMachine_CancellableStatuses(t *testing.T) {
 	assert.False(t, ride.CancellableStatuses[ride.StatusCompleted])
 }
 
+// ── CustomerLocationShareStatuses covers exactly the active-trip states ──
+
+func TestStateMachine_CustomerLocationShareStatuses(t *testing.T) {
+	allowed := []ride.Status{
+		ride.StatusConfirmed,
+		ride.StatusDriverEnRoute,
+		ride.StatusDriverArrived,
+		ride.StatusInProgress,
+	}
+	for _, st := range allowed {
+		assert.True(t, ride.CustomerLocationShareStatuses[st], "%s must allow customer location sharing", st)
+	}
+
+	rejected := []ride.Status{
+		ride.StatusSearching,   // no driver assigned yet
+		ride.StatusMatched,     // no driver assigned yet
+		ride.StatusNegotiating, // no driver assigned yet
+		ride.StatusCompleted,   // terminal
+		ride.StatusCancelled,   // terminal
+	}
+	for _, st := range rejected {
+		assert.False(t, ride.CustomerLocationShareStatuses[st], "%s must NOT allow customer location sharing", st)
+	}
+}
+
 // ── IsTerminal ────────────────────────────────────────────────────────────
 
 func TestStateMachine_IsTerminal(t *testing.T) {

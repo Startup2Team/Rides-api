@@ -97,3 +97,16 @@ var CancellableStatuses = map[Status]bool{
 func IsTerminal(s Status) bool {
 	return s == StatusCompleted || s == StatusCancelled
 }
+
+// CustomerLocationShareStatuses are the ride statuses during which the
+// customer's live GPS may be relayed to the assigned driver — whole-trip
+// sharing, per product decision (2026-08). Starts once a driver is assigned
+// (CONFIRMED) so there is always someone to share with, and ends at
+// IN_PROGRESS; excludes pre-match statuses (SEARCHING/MATCHED/NEGOTIATING —
+// no driver yet) and terminal statuses (COMPLETED/CANCELLED).
+var CustomerLocationShareStatuses = map[Status]bool{
+	StatusConfirmed:     true,
+	StatusDriverEnRoute: true,
+	StatusDriverArrived: true,
+	StatusInProgress:    true,
+}

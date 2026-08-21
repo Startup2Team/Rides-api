@@ -208,6 +208,44 @@ func (h *Handler) GetActiveRideForDriver(w http.ResponseWriter, r *http.Request)
 	respond.OK(w, ride.ToResponse())
 }
 
+// POST /api/v1/rides/{id}/customer-location
+// Customer publishes their live GPS position, relayed to the assigned driver.
+// Whole-trip sharing: only accepted while the ride is in an active status
+// (CustomerLocationShareStatuses) and only for the ride's own customer.
+func (h *Handler) UpdateCustomerLocation(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	rideID := chi.URLParam(r, "id")
+
+	var body struct {
+		Lat      float64  `json:"lat"       validate:"required,min=-90,max=90"`
+		Lng      float64  `json:"lng"       validate:"required,min=-180,max=180"`
+		SpeedKMH *float64 `json:"speed_kmh"`
+		Heading  *float64 `json:"heading"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, apperrors.ErrBadRequest)
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+
+	update := CustomerLocationUpdate{
+		Lat:      body.Lat,
+		Lng:      body.Lng,
+		SpeedKMH: body.SpeedKMH,
+		Heading:  body.Heading,
+	}
+
+	if err := h.svc.UpdateCustomerLocation(r.Context(), rideID, claims.UserID, update); err != nil {
+		respond.Error(w, err)
+		return
+	}
+
+	respond.NoContent(w)
+}
+
 // GET /api/v1/customer/rides/active
 // Returns the customer's current non-terminal ride for app-restart recovery.
 // 404 when the customer has no active ride.
