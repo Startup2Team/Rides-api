@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/rs/zerolog/log"
 
 	"github.com/workspace/ride-platform/internal/middleware"
 	"github.com/workspace/ride-platform/pkg/respond"
@@ -46,7 +47,11 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validate.Struct(body); err != nil {
-		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		// The go-playground/validator error string echoes struct/field names
+		// and constraint internals — fine in server logs, not something to
+		// hand back verbatim to an unauthenticated public client.
+		log.Warn().Err(err).Msg("waitlist: request validation failed")
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "request validation failed")
 		return
 	}
 
@@ -68,14 +73,16 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := http.StatusOK
+	// Uniform status + response shape for new vs. duplicate (role, phone): a
+	// 201-vs-200 split, or echoing the EXISTING row's referral_code on the
+	// dedupe path, would let a caller probe whether a given phone number is
+	// already on the waitlist and learn another person's referral code.
+	// referral_code is only ever populated on a genuine new signup.
+	data := map[string]interface{}{"role": signup.Role}
 	if created {
-		status = http.StatusCreated
+		data["referral_code"] = signup.ReferralCode
 	}
-	respond.JSON(w, status, map[string]interface{}{
-		"referral_code": signup.ReferralCode,
-		"role":          signup.Role,
-	})
+	respond.JSON(w, http.StatusOK, data)
 }
 
 // GET /api/v1/admin/waitlist

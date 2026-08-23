@@ -272,7 +272,7 @@ func main() {
 	inboxSvc := inbox.NewService(inboxRepo)
 	waitlistTurnstile := waitlist.NewCloudflareTurnstile(cfg.Security.TurnstileSecret)
 	waitlistMailer := waitlist.NewSMTPMailer(cfg.SMTP)
-	waitlistSvc := waitlist.NewService(waitlistRepo, telSvc, waitlistTurnstile, waitlistMailer, log)
+	waitlistSvc := waitlist.NewService(waitlistRepo, telSvc, waitlistTurnstile, waitlistMailer, log, cfg.Env == "production")
 	reportSvc := reports.NewService(reportRepo)
 	settingsSvc := settings.NewService(settingsRepo)
 	teamSvc := team.NewService(teamRepo, cfg, rdb, log)

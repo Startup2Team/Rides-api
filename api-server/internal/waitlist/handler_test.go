@@ -20,7 +20,7 @@ func newTestHandler(repo waitlist.Repo, ts *fakeTurnstile) *waitlist.Handler {
 	if ts == nil {
 		ts = &fakeTurnstile{configured: false}
 	}
-	svc := waitlist.NewService(repo, &fakeSMS{}, ts, &fakeMailer{}, zerolog.Nop())
+	svc := waitlist.NewService(repo, &fakeSMS{}, ts, &fakeMailer{}, zerolog.Nop(), false)
 	return waitlist.NewHandler(svc)
 }
 
@@ -32,11 +32,13 @@ func doSubmit(h *waitlist.Handler, body string) *httptest.ResponseRecorder {
 	return rr
 }
 
-func TestHandlerSubmit_ValidCustomer_Returns201WithReferralCode(t *testing.T) {
+func TestHandlerSubmit_ValidCustomer_Returns200WithReferralCode(t *testing.T) {
 	h := newTestHandler(nil, nil)
 	rr := doSubmit(h, `{"role":"CUSTOMER","name":"Aline","phone":"0788123456","consent_launch":true}`)
 
-	require.Equal(t, http.StatusCreated, rr.Code)
+	// Uniform 200 for new vs. duplicate signups (see the dedupe test below) —
+	// a 201-vs-200 split would let a caller distinguish new from existing.
+	require.Equal(t, http.StatusOK, rr.Code)
 	assert.Contains(t, rr.Body.String(), "ABCD1234")
 }
 
@@ -45,6 +47,10 @@ func TestHandlerSubmit_MissingConsentLaunch_Returns400(t *testing.T) {
 	rr := doSubmit(h, `{"role":"CUSTOMER","name":"Aline","phone":"0788123456","consent_launch":false}`)
 
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	// The raw go-playground/validator error ("Key: 'submitRequest.ConsentLaunch'
+	// Error:Field validation for ...") must never reach a public client.
+	assert.NotContains(t, rr.Body.String(), "Field validation")
+	assert.Contains(t, rr.Body.String(), "request validation failed")
 }
 
 func TestHandlerSubmit_InvalidRole_Returns400(t *testing.T) {
@@ -83,6 +89,11 @@ func TestHandlerSubmit_Duplicate_Returns200NotError(t *testing.T) {
 	rr := doSubmit(h, `{"role":"CUSTOMER","name":"Aline","phone":"0788123456","consent_launch":true}`)
 
 	assert.Equal(t, http.StatusOK, rr.Code, "a repeat submission must be a success, not an error")
+	// The dedupe path must never echo the EXISTING row's referral_code — that
+	// would leak (a) that this phone is already on the waitlist and (b)
+	// another party's referral code to whoever submits it a second time.
+	assert.NotContains(t, rr.Body.String(), "EXIST999", "duplicate path must not leak the existing referral_code")
+	assert.NotContains(t, rr.Body.String(), "referral_code")
 }
 
 func TestHandlerList_ReturnsSignupsEnvelope(t *testing.T) {

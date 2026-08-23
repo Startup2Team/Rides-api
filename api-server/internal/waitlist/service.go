@@ -3,14 +3,22 @@ package waitlist
 import (
 	"context"
 	"fmt"
+	"html"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/logger"
 )
+
+// notifyTimeout bounds the best-effort confirmation SMS+email that runs in a
+// detached goroutine after Submit returns — long enough to cover a slow
+// Pindo call (10s telephony timeout) plus an SMTP dial, short enough that a
+// hung third party can't leak goroutines indefinitely.
+const notifyTimeout = 15 * time.Second
 
 // SMSSender is the minimal telephony capability the waitlist service needs —
 // satisfied by *telephony.Service.SendMessage. A narrow interface so tests
@@ -39,7 +47,10 @@ const confirmationSMS = "You're on the Rides waitlist! We'll text you when we la
 const confirmationEmailSubject = "You're on the Rides waitlist"
 
 func confirmationEmailHTML(name string) string {
-	return fmt.Sprintf(`<p>Hi %s,</p><p>You're on the Rides waitlist. We'll email and text you as soon as we launch in your area.</p><p>Thanks for your interest in Rides.</p>`, name)
+	// name is user-supplied (the waitlist form's "name" field) and lands
+	// verbatim in an HTML email body — escape it so "<script>..." or a stray
+	// "<img onerror=...>" can't execute in whatever mail client renders it.
+	return fmt.Sprintf(`<p>Hi %s,</p><p>You're on the Rides waitlist. We'll email and text you as soon as we launch in your area.</p><p>Thanks for your interest in Rides.</p>`, html.EscapeString(name))
 }
 
 type Service struct {
@@ -48,10 +59,21 @@ type Service struct {
 	turnstile TurnstileVerifier
 	mailer    Mailer
 	log       zerolog.Logger
+	// isProduction gates the Turnstile fail-open/fail-closed behavior below:
+	// staging/dev may run without a Turnstile secret (skip verification),
+	// production never may (this is a public, SMS-cost-triggering endpoint).
+	isProduction bool
 }
 
-func NewService(repo Repo, sms SMSSender, turnstile TurnstileVerifier, mailer Mailer, log zerolog.Logger) *Service {
-	return &Service{repo: repo, sms: sms, turnstile: turnstile, mailer: mailer, log: log}
+// NewService wires the waitlist service. isProduction should be
+// cfg.Env == "production" — it controls whether a missing TURNSTILE_SECRET
+// fails the request closed (production) or merely skips verification
+// (staging/dev, where real Turnstile keys may not exist yet).
+func NewService(repo Repo, sms SMSSender, turnstile TurnstileVerifier, mailer Mailer, log zerolog.Logger, isProduction bool) *Service {
+	if isProduction && (turnstile == nil || !turnstile.Configured()) {
+		log.Error().Msg("waitlist: TURNSTILE_SECRET is not set in production — the public waitlist endpoint will reject all submissions until it is configured")
+	}
+	return &Service{repo: repo, sms: sms, turnstile: turnstile, mailer: mailer, log: log, isProduction: isProduction}
 }
 
 // SubmitInput is the handler-decoded, not-yet-normalized public request.
@@ -98,8 +120,15 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput, remoteIP string) (
 		if !verified {
 			return nil, false, ErrTurnstileFailed
 		}
+	} else if s.isProduction {
+		// Fail closed: without a secret we cannot prove the submitter is
+		// human, and this endpoint is unauthenticated + triggers a real SMS
+		// send. Skipping verification here would turn a missing env var into
+		// an open spam/SMS-cost relay in production.
+		s.log.Error().Msg("waitlist: TURNSTILE_SECRET not set in production — rejecting submission")
+		return nil, false, ErrTurnstileFailed
 	} else {
-		s.log.Warn().Msg("waitlist: TURNSTILE_SECRET not set — skipping Turnstile verification")
+		s.log.Warn().Msg("waitlist: TURNSTILE_SECRET not set — skipping Turnstile verification (non-production)")
 	}
 
 	name := strings.TrimSpace(in.Name)
@@ -125,14 +154,26 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput, remoteIP string) (
 		return result, false, nil
 	}
 
-	s.notify(ctx, result, name)
+	// Dispatch the confirmation SMS/email in a detached goroutine so a slow
+	// Pindo call or a hung SMTP dial never holds the HTTP response open. The
+	// context is deliberately context.Background(), not ctx (=r.Context()):
+	// the request context is cancelled the instant the client disconnects,
+	// which would kill a best-effort notification that the signup (already
+	// committed to Postgres) doesn't depend on.
+	go func() {
+		notifyCtx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+		s.notify(notifyCtx, result, name)
+	}()
 	return result, true, nil
 }
 
 // notify sends the best-effort confirmation SMS (always) and email (if an
 // address was given and SMTP is configured). Delivery failures are logged
 // and swallowed — the signup already committed to Postgres, and a flaky SMS
-// gateway must never turn into an error surfaced to the submitter.
+// gateway must never turn into an error surfaced to the submitter. Runs off
+// the request path (see the goroutine in Submit) on a timeout-bounded,
+// detached context.
 func (s *Service) notify(ctx context.Context, signup *Signup, name string) {
 	if s.sms != nil {
 		if err := s.sms.SendMessage(ctx, signup.Phone, confirmationSMS); err != nil {

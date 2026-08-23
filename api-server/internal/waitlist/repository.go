@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -161,11 +162,11 @@ func buildWhere(f ListFilter) (string, []interface{}) {
 
 // isUniqueViolation reports whether err is a Postgres unique-constraint
 // (23505) failure — matches the auth package's convention for turning a
-// collision into a retry/friendly-error rather than a raw DB error.
+// collision into a retry/friendly-error rather than a raw DB error. Checks
+// the structured pgconn.PgError code rather than substring-matching the
+// error string, which is brittle against wrapped errors and message-text
+// changes across pgx/Postgres versions.
 func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "23505") || strings.Contains(msg, "unique")
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
