@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,5 +148,58 @@ func TestIPRateLimit_DifferentIPsAreIndependent(t *testing.T) {
 	codes := fireIP(h, "203.0.113.2", limit)
 	if ok := countCode(codes, http.StatusOK); ok != limit {
 		t.Fatalf("IP 2 must be independent of IP 1: want %d OK, got %d", limit, ok)
+	}
+}
+
+// firePhone posts n JSON bodies of {"<field>": phone} through h — used to
+// exercise PhoneRateLimit/OTPRateLimit's body-driven bucketing.
+func firePhone(h http.Handler, field, phone string, n int) []int {
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		body := `{"` + field + `":"` + phone + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		codes[i] = rr.Code
+	}
+	return codes
+}
+
+// PhoneRateLimit generalizes OTPRateLimit to a non-"phone_number" JSON key —
+// the waitlist form's body uses "phone". Verify it buckets on that field and
+// isolates two different phones from each other.
+func TestPhoneRateLimit_EnforcesPerPhoneLimitOnCustomField(t *testing.T) {
+	rdb := newTestRedis(t)
+	limit := 3
+	h := PhoneRateLimit(rdb, "test_waitlist", "phone", limit, time.Minute)(okHandler)
+
+	codes := firePhone(h, "phone", "+250788111111", limit+2)
+	if ok := countCode(codes, http.StatusOK); ok != limit {
+		t.Fatalf("want %d OK, got %d", limit, ok)
+	}
+	if codes[limit] != http.StatusTooManyRequests {
+		t.Fatalf("request past the limit should be 429, got %d", codes[limit])
+	}
+
+	// A different phone number must have an independent budget.
+	other := firePhone(h, "phone", "+250788222222", limit)
+	if ok := countCode(other, http.StatusOK); ok != limit {
+		t.Fatalf("a different phone must be unaffected: want %d OK, got %d", limit, ok)
+	}
+}
+
+// OTPRateLimit must still read "phone_number" after being refactored onto
+// the shared phoneFieldRateLimit implementation.
+func TestOTPRateLimit_StillReadsPhoneNumberField(t *testing.T) {
+	rdb := newTestRedis(t)
+	limit := 2
+	h := OTPRateLimit(rdb, "test_otp", limit, time.Minute)(okHandler)
+
+	codes := firePhone(h, "phone_number", "+250788333333", limit+1)
+	if ok := countCode(codes, http.StatusOK); ok != limit {
+		t.Fatalf("want %d OK, got %d", limit, ok)
+	}
+	if codes[limit] != http.StatusTooManyRequests {
+		t.Fatalf("request past the limit should be 429, got %d", codes[limit])
 	}
 }
