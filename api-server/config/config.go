@@ -47,6 +47,7 @@ type Config struct {
 	Penalty   PenaltyConfig
 	Payments  PaymentsConfig
 	Security  SecurityConfig
+	SMTP      SMTPConfig
 	Analytics struct {
 		BatchSize int
 	}
@@ -85,6 +86,22 @@ type SecurityConfig struct {
 	SwaggerEnabled bool
 	// SwaggerBasicAuth, when "user:pass", protects /swagger with HTTP Basic auth.
 	SwaggerBasicAuth string
+	// TurnstileSecret is the Cloudflare Turnstile server-side secret used to
+	// verify the public waitlist form isn't a bot. Empty = verification is
+	// skipped (logged loudly) so staging works before real keys exist; it is
+	// enforced automatically the moment this is set.
+	TurnstileSecret string
+}
+
+// SMTPConfig holds Google SMTP credentials for the waitlist confirmation
+// email — separate from internal/email's Resend-based admin mail, and off
+// until Pacifique supplies real credentials (see waitlist.Mailer.Configured).
+type SMTPConfig struct {
+	Host     string // e.g. smtp.gmail.com
+	Port     int    // 587 (STARTTLS)
+	Username string
+	Password string
+	From     string
 }
 
 // PaymentsConfig gates real-money wallet movement. Until a payment gateway
@@ -483,6 +500,15 @@ func Load() (*Config, error) {
 	cfg.Security.MaxRequestBodyBytes = int64(getEnvInt("MAX_REQUEST_BODY_BYTES", 1<<20)) // 1 MiB
 	cfg.Security.SwaggerEnabled = getEnvBool("SWAGGER_ENABLED", cfg.Env != "production")
 	cfg.Security.SwaggerBasicAuth = getEnv("SWAGGER_BASIC_AUTH", "")
+	cfg.Security.TurnstileSecret = getEnv("TURNSTILE_SECRET", "")
+
+	// Waitlist confirmation email (Google SMTP) — unset until Pacifique
+	// provides real Google-workspace credentials; the mailer no-ops until then.
+	cfg.SMTP.Host = getEnv("SMTP_HOST", "")
+	cfg.SMTP.Port = getEnvInt("SMTP_PORT", 587)
+	cfg.SMTP.Username = getEnv("SMTP_USERNAME", "")
+	cfg.SMTP.Password = getEnv("SMTP_PASSWORD", "")
+	cfg.SMTP.From = getEnv("SMTP_FROM", "")
 
 	cfg.Analytics.BatchSize = getEnvInt("ANALYTICS_BATCH_SIZE", 100)
 

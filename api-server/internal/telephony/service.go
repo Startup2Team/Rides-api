@@ -133,6 +133,14 @@ func (s *Service) sendSMS(ctx context.Context, phone, message string) error {
 	return s.sendPindoSMS(ctx, phone, message)
 }
 
+// SendMessage delivers an arbitrary plain-text SMS (not an OTP) to an E.164
+// phone number via Pindo. Exported for callers outside auth that need a
+// one-off notification — e.g. the waitlist confirmation text — without
+// duplicating the Pindo transport.
+func (s *Service) SendMessage(ctx context.Context, phone, message string) error {
+	return s.sendSMS(ctx, phone, message)
+}
+
 // sendPindoSMS sends an SMS via Pindo (pindo.io) — the Rwanda-local gateway.
 // POST https://api.pindo.io/v1/sms/  with a Bearer token and {to, text, sender}.
 func (s *Service) sendPindoSMS(ctx context.Context, phone, message string) error {

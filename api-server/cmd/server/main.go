@@ -63,6 +63,7 @@ import (
 	"github.com/workspace/ride-platform/internal/tickets"
 	"github.com/workspace/ride-platform/internal/tracking"
 	"github.com/workspace/ride-platform/internal/upload"
+	"github.com/workspace/ride-platform/internal/waitlist"
 	"github.com/workspace/ride-platform/internal/wallet"
 	"github.com/workspace/ride-platform/pkg/adminrole"
 	"github.com/workspace/ride-platform/pkg/alerting"
@@ -220,6 +221,7 @@ func main() {
 	incidentRepo := incidents.NewRepository(db)
 	ticketRepo := tickets.NewRepository(db)
 	inboxRepo := inbox.NewRepository(db)
+	waitlistRepo := waitlist.NewRepository(db)
 	reportRepo := reports.NewRepository(db)
 	settingsRepo := settings.NewRepository(db)
 	teamRepo := team.NewRepository(db)
@@ -268,6 +270,9 @@ func main() {
 	incidentSvc := incidents.NewService(incidentRepo)
 	ticketSvc := tickets.NewService(ticketRepo)
 	inboxSvc := inbox.NewService(inboxRepo)
+	waitlistTurnstile := waitlist.NewCloudflareTurnstile(cfg.Security.TurnstileSecret)
+	waitlistMailer := waitlist.NewSMTPMailer(cfg.SMTP)
+	waitlistSvc := waitlist.NewService(waitlistRepo, telSvc, waitlistTurnstile, waitlistMailer, log, cfg.Env == "production")
 	reportSvc := reports.NewService(reportRepo)
 	settingsSvc := settings.NewService(settingsRepo)
 	teamSvc := team.NewService(teamRepo, cfg, rdb, log)
@@ -412,6 +417,7 @@ func main() {
 	incidentH := incidents.NewHandler(incidentSvc)
 	ticketH := tickets.NewHandler(ticketSvc)
 	inboxH := inbox.NewHandler(inboxSvc)
+	waitlistH := waitlist.NewHandler(waitlistSvc)
 	reportH := reports.NewHandler(reportSvc)
 	settingsH := settings.NewHandler(settingsSvc)
 	teamH := team.NewHandler(teamSvc, auditLog)
@@ -778,6 +784,15 @@ func main() {
 
 	// ── Public contact form ───────────────────────────────────────────────────
 	r.Post(apiV1Prefix+"/contact", inboxH.Submit)
+
+	// ── Public waitlist signup ────────────────────────────────────────────────
+	// Two independent rate limits before the handler ever runs: per-IP caps a
+	// single scraper/bot, per-phone (fail-closed) is the anti-SMS-bomb guard —
+	// the confirmation SMS costs real Pindo money.
+	r.With(
+		mw.IPRateLimit(cfg, rdb, "waitlist", 20, time.Hour),
+		mw.PhoneRateLimit(rdb, "waitlist", "phone", 5, 24*time.Hour),
+	).Post(apiV1Prefix+"/waitlist", waitlistH.Submit)
 	r.Get(apiV1Prefix+"/media/documents/{filename}", adminH.ServeDriverMedia)
 
 	// ── Public auth ───────────────────────────────────────────────────────────
@@ -1245,6 +1260,9 @@ func main() {
 			r.Delete("/inbox/{id}", inboxH.Delete)
 			r.Post("/inbox/{id}/archive", inboxH.Archive)
 			r.Post("/inbox/{id}/spam", inboxH.Spam)
+
+			// Waitlist (pre-launch signups)
+			r.Get("/waitlist", waitlistH.List)
 
 			// Account Assist tools (clear OTP lockouts, clear GPS flags, etc.)
 			r.Post("/customers/{id}/clear-otp-lockout", adminH.ClearOTPLockout)

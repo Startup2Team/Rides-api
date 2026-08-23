@@ -37,18 +37,20 @@ func atomicIncr(ctx context.Context, rdb redis.UniversalClient, key string, wind
 	return val, err
 }
 
-// OTPRateLimit enforces a limit on OTP send/verify requests, keyed by the phone
-// number in the REQUEST BODY (`phone_number`) — the actual OTP target.
+// phoneFieldRateLimit is the shared implementation behind OTPRateLimit and
+// PhoneRateLimit: it reads `jsonField` out of the JSON request body, buckets
+// by that phone number, and falls back to per-IP bucketing when the field is
+// missing/malformed (so a broken body can't bypass the limit entirely).
 //
 // SECURITY: it must NOT key on a client-settable header. The body phone is what
 // receives the SMS; if we keyed on a header an attacker could vary the header to
 // get a fresh bucket each request and SMS-bomb the victim whose number is in the
 // body (and bypass the limit entirely by omitting it).
 //
-// `prefix` separates buckets (e.g. "otp_send" vs "otp_verify"). Fails CLOSED:
+// `prefix` separates buckets (e.g. "otp_send" vs "waitlist"). Fails CLOSED:
 // because these are SMS-cost / brute-force surfaces, a Redis error denies the
 // request rather than allowing uncapped abuse.
-func OTPRateLimit(rdb redis.UniversalClient, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+func phoneFieldRateLimit(rdb redis.UniversalClient, prefix, jsonField string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			phone := ""
@@ -57,11 +59,12 @@ func OTPRateLimit(rdb redis.UniversalClient, prefix string, maxRequests int, win
 				if err == nil {
 					// Restore the body so the downstream handler can read it.
 					r.Body = io.NopCloser(bytes.NewReader(body))
-					var p struct {
-						PhoneNumber string `json:"phone_number"`
+					var p map[string]interface{}
+					if json.Unmarshal(body, &p) == nil {
+						if v, ok := p[jsonField].(string); ok {
+							phone = strings.TrimSpace(v)
+						}
 					}
-					_ = json.Unmarshal(body, &p)
-					phone = strings.TrimSpace(p.PhoneNumber)
 				}
 			}
 
@@ -87,6 +90,20 @@ func OTPRateLimit(rdb redis.UniversalClient, prefix string, maxRequests int, win
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// OTPRateLimit enforces a limit on OTP send/verify requests, keyed by the phone
+// number in the REQUEST BODY (`phone_number`) — the actual OTP target.
+func OTPRateLimit(rdb redis.UniversalClient, prefix string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+	return phoneFieldRateLimit(rdb, prefix, "phone_number", maxRequests, window)
+}
+
+// PhoneRateLimit is OTPRateLimit generalized to an arbitrary JSON body field —
+// for endpoints (like the public waitlist form, whose body key is `phone`
+// rather than `phone_number`) that still need the same fail-closed,
+// SMS-cost-protecting per-phone bucketing.
+func PhoneRateLimit(rdb redis.UniversalClient, prefix, jsonField string, maxRequests int, window time.Duration) func(http.Handler) http.Handler {
+	return phoneFieldRateLimit(rdb, prefix, jsonField, maxRequests, window)
 }
 
 // IPRateLimit is a general per-IP rate limiter backed by Redis.
