@@ -175,17 +175,54 @@ func TestSubmit_DriverWithoutVehicleType_Returns400(t *testing.T) {
 	assert.Equal(t, 400, ae.StatusCode)
 }
 
-func TestSubmit_InvalidPhone_Returns400(t *testing.T) {
-	svc := newService(nil, nil, nil, nil)
+// The waitlist now serves Rwanda and Uganda (and whatever format a person
+// typed), so a phone that doesn't match the Rwanda-shaped E.164 pattern is no
+// longer rejected — it's stored raw, exactly as submitted.
+func TestSubmit_NonRwandaPhone_SucceedsAndStoresRaw(t *testing.T) {
+	repo := newFakeRepo()
+	svc := newService(repo, nil, nil, nil)
+	in := validCustomerInput()
+	in.Phone = "+256772123456" // Uganda, not Rwanda-shaped
+
+	_, created, err := svc.Submit(context.Background(), in, "203.0.113.1")
+
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.Len(t, repo.createCalls, 1)
+	assert.Equal(t, "+256772123456", repo.createCalls[0].Phone, "a non-Rwanda phone must be stored as-typed, not rejected")
+}
+
+// A phone that doesn't parse as any recognized format at all (not even
+// loosely phone-shaped) must still be accepted and stored raw — there is no
+// "invalid phone" error path anymore.
+func TestSubmit_UnparseablePhone_SucceedsAndStoresRaw(t *testing.T) {
+	repo := newFakeRepo()
+	svc := newService(repo, nil, nil, nil)
 	in := validCustomerInput()
 	in.Phone = "not-a-phone"
 
-	_, _, err := svc.Submit(context.Background(), in, "203.0.113.1")
+	_, created, err := svc.Submit(context.Background(), in, "203.0.113.1")
 
-	require.Error(t, err)
-	var ae *apperrors.AppError
-	require.True(t, errors.As(err, &ae))
-	assert.Equal(t, "INVALID_PHONE", ae.Code)
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.Len(t, repo.createCalls, 1)
+	assert.Equal(t, "not-a-phone", repo.createCalls[0].Phone, "an unparseable phone must be stored raw, not rejected")
+}
+
+// A Rwanda-shaped local number must still get the best-effort upgrade to
+// E.164 (cleaner for the confirmation SMS) rather than being stored raw.
+func TestSubmit_RwandaLocalPhone_IsStillNormalizedToE164(t *testing.T) {
+	repo := newFakeRepo()
+	svc := newService(repo, nil, nil, nil)
+	in := validCustomerInput()
+	in.Phone = "0788123456"
+
+	_, created, err := svc.Submit(context.Background(), in, "203.0.113.1")
+
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.Len(t, repo.createCalls, 1)
+	assert.Equal(t, "+250788123456", repo.createCalls[0].Phone, "a Rwanda-shaped local number is still normalized best-effort")
 }
 
 func TestSubmit_ValidCustomer_CreatesAndSendsSMS(t *testing.T) {

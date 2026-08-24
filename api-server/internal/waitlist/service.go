@@ -104,16 +104,25 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput, remoteIP string) (
 		return nil, false, apperrors.New(http.StatusBadRequest, "VEHICLE_TYPE_REQUIRED", "vehicle_type is required for drivers")
 	}
 
-	// Phone is optional (mirrors email): only normalize/validate it when the
-	// submitter actually supplied one. A blank/absent phone is not an error —
-	// it's passed through empty and persisted as NULL (see repository.Create).
+	// Phone is optional (mirrors email): only touch it when the submitter
+	// actually supplied one. A blank/absent phone is not an error — it's
+	// passed through empty and persisted as NULL (see repository.Create).
+	//
+	// The waitlist now serves Rwanda AND Uganda (and takes whatever format a
+	// person typed), so this is deliberately lenient: normalizePhone is a
+	// best-effort upgrade to E.164 for the Rwanda-shaped case (cleaner for the
+	// confirmation SMS), but a number that doesn't match is no longer
+	// rejected — it's stored exactly as typed. There is no "invalid phone"
+	// error path anymore; the dedupe unique index and the best-effort,
+	// logged-and-swallowed SMS send (see notify) both work fine on a raw
+	// string.
 	var phone string
 	if trimmed := strings.TrimSpace(in.Phone); trimmed != "" {
-		normalized, ok := normalizePhone(trimmed)
-		if !ok {
-			return nil, false, apperrors.New(http.StatusBadRequest, "INVALID_PHONE", "phone number is not valid")
+		if normalized, ok := normalizePhone(trimmed); ok {
+			phone = normalized
+		} else {
+			phone = trimmed
 		}
-		phone = normalized
 	}
 
 	// Turnstile is FAIL-OPEN by deliberate product decision for this capture
