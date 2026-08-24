@@ -84,10 +84,14 @@ type fakeTurnstile struct {
 	configured bool
 	verified   bool
 	err        error
+	// calls counts Verify invocations — used to assert that an absent token
+	// short-circuits before ever calling out to Cloudflare (fail-open path).
+	calls int
 }
 
 func (f *fakeTurnstile) Configured() bool { return f.configured }
 func (f *fakeTurnstile) Verify(_ context.Context, _, _ string) (bool, error) {
+	f.calls++
 	return f.verified, f.err
 }
 
@@ -203,6 +207,35 @@ func TestSubmit_ValidCustomer_CreatesAndSendsSMS(t *testing.T) {
 	assert.Equal(t, 1, sms.calls, "a new signup must trigger exactly one confirmation SMS")
 }
 
+// FIX 2: phone is optional (mirrors email) — name + area alone is a valid
+// submission, and the absent phone must not trigger an SMS attempt.
+func TestSubmit_PhoneAbsent_SucceedsWithoutSendingSMS(t *testing.T) {
+	repo := newFakeRepo()
+	sms := &fakeSMS{}
+	// Give the async notify() goroutine an email to send too, and wait on
+	// that — notify() checks SMS first then email in the same goroutine, so
+	// by the time the (synchronized-on) email send has happened, the SMS
+	// send decision has already been made. Deterministic, no sleep needed.
+	mailer := &fakeMailer{configured: true, done: make(chan struct{}, 1)}
+	svc := newService(repo, sms, nil, mailer)
+	in := validCustomerInput()
+	in.Phone = ""
+	email := "aline@example.com"
+	in.Email = &email
+
+	signup, created, err := svc.Submit(context.Background(), in, "203.0.113.1")
+
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.NotNil(t, signup)
+	require.Len(t, repo.createCalls, 1)
+	assert.Empty(t, repo.createCalls[0].Phone, "an absent phone must be persisted as empty/NULL, not rejected")
+
+	waitForSignal(t, mailer.done)
+	assert.Equal(t, 0, sms.calls, "an absent phone must never trigger an SMS send")
+	assert.Equal(t, 1, mailer.calls, "email confirmation must still be sent when an email was supplied")
+}
+
 func TestSubmit_DuplicateRolePhone_IsIdempotentAndDoesNotResendSMS(t *testing.T) {
 	repo := newFakeRepo()
 	repo.nextCreated = false // simulate (role, phone) already existed
@@ -217,31 +250,58 @@ func TestSubmit_DuplicateRolePhone_IsIdempotentAndDoesNotResendSMS(t *testing.T)
 	assert.Equal(t, 0, sms.calls, "a duplicate submission must never re-send the confirmation SMS")
 }
 
-func TestSubmit_TurnstileConfiguredAndRejected_Returns403(t *testing.T) {
+// A PRESENT token that fails verification must still 403 — this is the one
+// case fail-open Turnstile actually blocks (a bot that loaded the widget and
+// got a bad verdict back).
+func TestSubmit_TurnstilePresentTokenRejected_Returns403(t *testing.T) {
 	repo := newFakeRepo()
 	sms := &fakeSMS{}
 	ts := &fakeTurnstile{configured: true, verified: false}
+	in := validCustomerInput()
+	in.TurnstileToken = "some-token"
 	svc := newService(repo, sms, ts, nil)
 
-	_, _, err := svc.Submit(context.Background(), validCustomerInput(), "203.0.113.1")
+	_, _, err := svc.Submit(context.Background(), in, "203.0.113.1")
 
 	require.Error(t, err)
 	var ae *apperrors.AppError
 	require.True(t, errors.As(err, &ae))
 	assert.Equal(t, 403, ae.StatusCode)
+	assert.Equal(t, 1, ts.calls, "a present token must actually be verified")
 	assert.Empty(t, repo.createCalls, "a rejected turnstile check must happen before any DB write")
 	assert.Equal(t, 0, sms.calls, "a rejected turnstile check must never trigger an SMS")
 }
 
-func TestSubmit_TurnstileConfiguredAndVerified_Succeeds(t *testing.T) {
+func TestSubmit_TurnstilePresentTokenVerified_Succeeds(t *testing.T) {
 	repo := newFakeRepo()
 	ts := &fakeTurnstile{configured: true, verified: true}
+	in := validCustomerInput()
+	in.TurnstileToken = "some-token"
 	svc := newService(repo, nil, ts, nil)
 
-	_, created, err := svc.Submit(context.Background(), validCustomerInput(), "203.0.113.1")
+	_, created, err := svc.Submit(context.Background(), in, "203.0.113.1")
 
 	require.NoError(t, err)
 	assert.True(t, created)
+	assert.Equal(t, 1, ts.calls)
+}
+
+// FIX 3 — Turnstile is fail-open: an ABSENT/empty token must never 403,
+// regardless of whether a verifier is configured, and Verify must not even be
+// called (nothing to check). The remaining backstop is rate limiting, not
+// Turnstile.
+func TestSubmit_TurnstileTokenAbsent_ConfiguredVerifier_AllowsWithoutCallingVerify(t *testing.T) {
+	repo := newFakeRepo()
+	ts := &fakeTurnstile{configured: true, verified: false} // would reject if ever called
+	in := validCustomerInput()
+	in.TurnstileToken = ""
+	svc := newService(repo, nil, ts, nil)
+
+	_, created, err := svc.Submit(context.Background(), in, "203.0.113.1")
+
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, 0, ts.calls, "an absent token must never reach Cloudflare's verify endpoint")
 }
 
 func TestSubmit_TurnstileNotConfigured_SkipsVerification(t *testing.T) {
@@ -291,9 +351,11 @@ func TestSubmit_TurnstileTransportError_Returns403NoDBWriteNoSMS(t *testing.T) {
 	repo := newFakeRepo()
 	sms := &fakeSMS{}
 	ts := &fakeTurnstile{configured: true, err: errors.New("dial challenges.cloudflare.com: network unreachable")}
+	in := validCustomerInput()
+	in.TurnstileToken = "some-token" // a transport error only happens once we attempt to verify a present token
 	svc := newService(repo, sms, ts, nil)
 
-	_, _, err := svc.Submit(context.Background(), validCustomerInput(), "203.0.113.1")
+	_, _, err := svc.Submit(context.Background(), in, "203.0.113.1")
 
 	require.Error(t, err)
 	var ae *apperrors.AppError
@@ -320,21 +382,23 @@ func TestSubmit_SMSSendFails_StillReturnsSuccess(t *testing.T) {
 	assert.Equal(t, 1, sms.calls, "the SMS attempt must actually happen, not just be skipped")
 }
 
-func TestSubmit_ProductionWithEmptyTurnstileSecret_FailsClosed(t *testing.T) {
+// FIX 3: production with no TURNSTILE_SECRET configured used to fail closed
+// (403 on every submission). That's now fail-open by deliberate product
+// decision — see the Turnstile block in Service.Submit.
+func TestSubmit_ProductionWithEmptyTurnstileSecretAndNoToken_AllowsFailOpen(t *testing.T) {
 	repo := newFakeRepo()
-	sms := &fakeSMS{}
+	sms := &fakeSMS{done: make(chan struct{}, 1)}
 	ts := &fakeTurnstile{configured: false} // TURNSTILE_SECRET unset
 	svc := newServiceEnv(repo, sms, ts, nil, true /* isProduction */)
 
-	_, _, err := svc.Submit(context.Background(), validCustomerInput(), "203.0.113.1")
+	signup, created, err := svc.Submit(context.Background(), validCustomerInput(), "203.0.113.1")
 
-	require.Error(t, err)
-	var ae *apperrors.AppError
-	require.True(t, errors.As(err, &ae))
-	assert.Equal(t, "TURNSTILE_FAILED", ae.Code)
-	assert.Equal(t, 403, ae.StatusCode)
-	assert.Empty(t, repo.createCalls, "production with no Turnstile secret must fail closed before any DB write")
-	assert.Equal(t, 0, sms.calls)
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.NotNil(t, signup)
+	require.Len(t, repo.createCalls, 1, "a fail-open submission must still be persisted")
+	waitForSignal(t, sms.done)
+	assert.Equal(t, 1, sms.calls)
 }
 
 func TestSubmit_NonProductionWithEmptyTurnstileSecret_StillSkipsAndSucceeds(t *testing.T) {

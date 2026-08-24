@@ -26,9 +26,14 @@ func NewHandler(svc *Service) *Handler {
 // than inline) so its validator tags are visible and testable directly —
 // mirrors internal/ride's createRideRequest pattern.
 type submitRequest struct {
-	Role             string  `json:"role" validate:"required,oneof=CUSTOMER DRIVER"`
-	Name             string  `json:"name" validate:"required"`
-	Phone            string  `json:"phone" validate:"required"`
+	Role string `json:"role" validate:"required,oneof=CUSTOMER DRIVER"`
+	Name string `json:"name" validate:"required"`
+	// Phone is optional (mirrors Email below) — a submitter can join the
+	// waitlist with just a name + area. Format is checked in Service.Submit
+	// (normalizePhone), not here, since it accepts Rwandan local-format
+	// numbers ("0788...") in addition to E.164, which the validator package's
+	// built-in phone tags don't understand.
+	Phone            *string `json:"phone,omitempty"`
 	Area             *string `json:"area,omitempty"`
 	VehicleType      *string `json:"vehicle_type,omitempty" validate:"omitempty,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
 	Email            *string `json:"email,omitempty" validate:"omitempty,email"`
@@ -55,10 +60,15 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var phone string
+	if body.Phone != nil {
+		phone = *body.Phone
+	}
+
 	signup, created, err := h.svc.Submit(r.Context(), SubmitInput{
 		Role:             body.Role,
 		Name:             body.Name,
-		Phone:            body.Phone,
+		Phone:            phone,
 		Email:            body.Email,
 		Area:             body.Area,
 		VehicleType:      body.VehicleType,

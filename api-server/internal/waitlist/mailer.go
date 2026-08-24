@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"strings"
 	"time"
@@ -114,7 +115,15 @@ func (m *SMTPMailer) Send(ctx context.Context, to, subject, htmlBody string) err
 		}
 	}
 
-	if err := client.Mail(m.from); err != nil {
+	// SMTP_FROM may be a display-name form ("Rides Rw <noreply@…>"); the
+	// envelope MAIL FROM must be the bare address, while the From: header
+	// below keeps the full display-name form. Fall back to the raw value if
+	// it isn't parseable as an address.
+	envelopeFrom := m.from
+	if parsed, perr := mail.ParseAddress(m.from); perr == nil {
+		envelopeFrom = parsed.Address
+	}
+	if err := client.Mail(envelopeFrom); err != nil {
 		return fmt.Errorf("smtp: mail from: %w", err)
 	}
 	if err := client.Rcpt(to); err != nil {

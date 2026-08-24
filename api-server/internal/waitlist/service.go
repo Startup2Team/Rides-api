@@ -59,19 +59,19 @@ type Service struct {
 	turnstile TurnstileVerifier
 	mailer    Mailer
 	log       zerolog.Logger
-	// isProduction gates the Turnstile fail-open/fail-closed behavior below:
-	// staging/dev may run without a Turnstile secret (skip verification),
-	// production never may (this is a public, SMS-cost-triggering endpoint).
+	// isProduction is used only to decide how loudly to log a missing
+	// TURNSTILE_SECRET at startup — Turnstile itself is fail-open in Submit
+	// (see the comment there), so this no longer gates request behavior.
 	isProduction bool
 }
 
 // NewService wires the waitlist service. isProduction should be
-// cfg.Env == "production" — it controls whether a missing TURNSTILE_SECRET
-// fails the request closed (production) or merely skips verification
-// (staging/dev, where real Turnstile keys may not exist yet).
+// cfg.Env == "production" — it only controls the severity of the startup log
+// when TURNSTILE_SECRET is unset; Submit() is fail-open in every environment
+// (see the Turnstile block in Submit for why).
 func NewService(repo Repo, sms SMSSender, turnstile TurnstileVerifier, mailer Mailer, log zerolog.Logger, isProduction bool) *Service {
 	if isProduction && (turnstile == nil || !turnstile.Configured()) {
-		log.Error().Msg("waitlist: TURNSTILE_SECRET is not set in production — the public waitlist endpoint will reject all submissions until it is configured")
+		log.Warn().Msg("waitlist: TURNSTILE_SECRET is not set in production — submissions without a token will be allowed through (fail-open); bot/spam risk is bounded by rate limits only")
 	}
 	return &Service{repo: repo, sms: sms, turnstile: turnstile, mailer: mailer, log: log, isProduction: isProduction}
 }
@@ -104,15 +104,33 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput, remoteIP string) (
 		return nil, false, apperrors.New(http.StatusBadRequest, "VEHICLE_TYPE_REQUIRED", "vehicle_type is required for drivers")
 	}
 
-	phone, ok := normalizePhone(in.Phone)
-	if !ok {
-		return nil, false, apperrors.New(http.StatusBadRequest, "INVALID_PHONE", "phone number is not valid")
+	// Phone is optional (mirrors email): only normalize/validate it when the
+	// submitter actually supplied one. A blank/absent phone is not an error —
+	// it's passed through empty and persisted as NULL (see repository.Create).
+	var phone string
+	if trimmed := strings.TrimSpace(in.Phone); trimmed != "" {
+		normalized, ok := normalizePhone(trimmed)
+		if !ok {
+			return nil, false, apperrors.New(http.StatusBadRequest, "INVALID_PHONE", "phone number is not valid")
+		}
+		phone = normalized
 	}
 
-	// Turnstile verification happens before ANY DB write or SMS — this is the
-	// bot/abuse gate for an unauthenticated, SMS-cost-triggering endpoint.
-	if s.turnstile != nil && s.turnstile.Configured() {
-		verified, verr := s.turnstile.Verify(ctx, in.TurnstileToken, remoteIP)
+	// Turnstile is FAIL-OPEN by deliberate product decision for this capture
+	// form (Pacifique, 2026-08): a PRESENT token is still verified, and a
+	// rejected/invalid token still 403s — that's the one case Turnstile
+	// actually blocks (a bot that loaded the widget and got a bad verdict).
+	// But an ABSENT/empty token — no widget loaded, JS/ad-blocker stripped
+	// it, no secret configured yet — no longer 403s. This is a low-stakes
+	// public form (name + area alone is enough to submit) and losing real
+	// signups to a missing token was worse than the residual spam risk. The
+	// backstop against abuse is the per-IP + per-phone rate limits on this
+	// route (see cmd/server/main.go's waitlist route wiring), NOT Turnstile.
+	// This is a deliberate relaxation from the earlier fail-closed hardening.
+	token := strings.TrimSpace(in.TurnstileToken)
+	switch {
+	case token != "" && s.turnstile != nil && s.turnstile.Configured():
+		verified, verr := s.turnstile.Verify(ctx, token, remoteIP)
 		if verr != nil {
 			s.log.Error().Err(verr).Msg("waitlist: turnstile verify request failed")
 			return nil, false, ErrTurnstileFailed
@@ -120,23 +138,32 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput, remoteIP string) (
 		if !verified {
 			return nil, false, ErrTurnstileFailed
 		}
-	} else if s.isProduction {
-		// Fail closed: without a secret we cannot prove the submitter is
-		// human, and this endpoint is unauthenticated + triggers a real SMS
-		// send. Skipping verification here would turn a missing env var into
-		// an open spam/SMS-cost relay in production.
-		s.log.Error().Msg("waitlist: TURNSTILE_SECRET not set in production — rejecting submission")
-		return nil, false, ErrTurnstileFailed
-	} else {
-		s.log.Warn().Msg("waitlist: TURNSTILE_SECRET not set — skipping Turnstile verification (non-production)")
+	case token == "":
+		s.log.Warn().Msg("waitlist: no turnstile token supplied — allowing (fail-open; rate limits are the remaining guard)")
+	default:
+		// Token present but no verifier configured (TURNSTILE_SECRET unset) —
+		// nothing to check it against, so treat it the same as "no token".
+		s.log.Warn().Msg("waitlist: turnstile token present but no verifier configured — allowing (fail-open)")
 	}
 
 	name := strings.TrimSpace(in.Name)
+	// Normalize email so (role,email) dedupe is case-insensitive and an
+	// empty/whitespace value is stored as NULL (not "") — otherwise
+	// "Bob@x.com" and "bob@x.com" become distinct rows (each re-emailing),
+	// and "" would pollute the partial unique index.
+	email := in.Email
+	if email != nil {
+		if trimmed := strings.ToLower(strings.TrimSpace(*email)); trimmed != "" {
+			email = &trimmed
+		} else {
+			email = nil
+		}
+	}
 	result, wasCreated, err := s.repo.Create(ctx, CreateInput{
 		Role:             in.Role,
 		Name:             name,
 		Phone:            phone,
-		Email:            in.Email,
+		Email:            email,
 		Area:             in.Area,
 		VehicleType:      in.VehicleType,
 		ReferredBy:       in.ReferredBy,
@@ -175,7 +202,7 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput, remoteIP string) (
 // the request path (see the goroutine in Submit) on a timeout-bounded,
 // detached context.
 func (s *Service) notify(ctx context.Context, signup *Signup, name string) {
-	if s.sms != nil {
+	if s.sms != nil && strings.TrimSpace(signup.Phone) != "" {
 		if err := s.sms.SendMessage(ctx, signup.Phone, confirmationSMS); err != nil {
 			s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(signup.Phone)).Msg("waitlist: confirmation SMS failed")
 		}

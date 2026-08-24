@@ -42,6 +42,15 @@ func TestHandlerSubmit_ValidCustomer_Returns200WithReferralCode(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "ABCD1234")
 }
 
+// FIX 2: phone is optional — name + area alone must be enough to submit.
+func TestHandlerSubmit_NoPhoneNoEmail_Returns200(t *testing.T) {
+	h := newTestHandler(nil, nil)
+	rr := doSubmit(h, `{"role":"CUSTOMER","name":"Aline","area":"Kimironko","consent_launch":true}`)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), "ABCD1234")
+}
+
 func TestHandlerSubmit_MissingConsentLaunch_Returns400(t *testing.T) {
 	h := newTestHandler(nil, nil)
 	rr := doSubmit(h, `{"role":"CUSTOMER","name":"Aline","phone":"0788123456","consent_launch":false}`)
