@@ -134,6 +134,12 @@ func (r *Repository) Create(ctx context.Context, in CreateInput) (signup *Signup
 			if findErr != nil {
 				return nil, false, fmt.Errorf("find existing signup: %w", findErr)
 			}
+			if existing == nil {
+				// Defensive: a contact-less insert uses no ON CONFLICT target, so
+				// it can't reach ErrNoRows today — but guard so a future change
+				// can't return a nil signup that the handler would deref.
+				return nil, false, fmt.Errorf("waitlist: dedupe hit ErrNoRows with no lookup key")
+			}
 			return existing, false, nil
 		}
 		if isUniqueViolation(scanErr) {

@@ -147,11 +147,23 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput, remoteIP string) (
 	}
 
 	name := strings.TrimSpace(in.Name)
+	// Normalize email so (role,email) dedupe is case-insensitive and an
+	// empty/whitespace value is stored as NULL (not "") — otherwise
+	// "Bob@x.com" and "bob@x.com" become distinct rows (each re-emailing),
+	// and "" would pollute the partial unique index.
+	email := in.Email
+	if email != nil {
+		if trimmed := strings.ToLower(strings.TrimSpace(*email)); trimmed != "" {
+			email = &trimmed
+		} else {
+			email = nil
+		}
+	}
 	result, wasCreated, err := s.repo.Create(ctx, CreateInput{
 		Role:             in.Role,
 		Name:             name,
 		Phone:            phone,
-		Email:            in.Email,
+		Email:            email,
 		Area:             in.Area,
 		VehicleType:      in.VehicleType,
 		ReferredBy:       in.ReferredBy,
