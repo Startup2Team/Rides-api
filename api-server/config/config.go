@@ -13,9 +13,17 @@ import (
 )
 
 type Config struct {
-	Port        string
-	Env         string
-	AdminOrigin string // CORS allowed origin for admin frontend (production URL)
+	Port string
+	Env  string
+	// AdminOrigins are the CORS-allowed browser origins in production — the
+	// admin console, the marketing/landing site(s), and any other first-party
+	// web client that POSTs to this API. Parsed from the comma-separated
+	// ADMIN_ORIGIN env var (see getEnvList) — backward compatible with the
+	// original single-value form. Consulted by both the chi CORS middleware
+	// (cmd/server/main.go) and the WebSocket origin check
+	// (internal/tracking/handler.go) via IsAllowedOrigin, so multi-origin
+	// support lives in one place.
+	AdminOrigins []string
 	// Timezone is the IANA name defining a calendar "day" platform-wide —
 	// driver daily earnings, daily penalty counters, digests. Rwanda is UTC+2,
 	// so leaving this at UTC would roll every daily figure over at 02:00 local.
@@ -51,6 +59,23 @@ type Config struct {
 	Analytics struct {
 		BatchSize int
 	}
+}
+
+// IsAllowedOrigin reports whether origin is one of the configured
+// AdminOrigins — the single place both the HTTP CORS middleware
+// (cmd/server/main.go) and the WebSocket origin check
+// (internal/tracking/handler.go) consult, so multi-origin support can't drift
+// between the two.
+func (c *Config) IsAllowedOrigin(origin string) bool {
+	if c == nil || origin == "" {
+		return false
+	}
+	for _, o := range c.AdminOrigins {
+		if o == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // Location returns the platform timezone that defines a calendar day. Load()
@@ -338,7 +363,7 @@ func Load() (*Config, error) {
 
 	cfg.Port = getEnv("PORT", "8080")
 	cfg.Env = getEnv("ENV", "development")
-	cfg.AdminOrigin = getEnv("ADMIN_ORIGIN", "")
+	cfg.AdminOrigins = getEnvList("ADMIN_ORIGIN", nil)
 
 	cfg.Database.URL = requireEnv("DATABASE_URL")
 	cfg.Database.ReadURL = getEnv("DATABASE_READ_URL", "")
@@ -583,6 +608,31 @@ func (m MatchingConfig) TierRadiiForVehicle(vehicleTypeCode string) []int {
 		roadM := speed * 1000.0 / 60.0 * float64(eta)
 		straightM := roadM / detour
 		out = append(out, int(straightM))
+	}
+	return out
+}
+
+// getEnvList parses a comma-separated list of strings, e.g.
+// "https://admin.rides.rw,https://rides.rw,https://www.rides.rw". Entries are
+// trimmed of surrounding whitespace; blank entries (trailing comma, blank env
+// var) are dropped. Backward compatible with a single value: with no comma
+// present this just returns a one-element slice.
+func getEnvList(key string, fallback []string) []string {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return fallback
 	}
 	return out
 }

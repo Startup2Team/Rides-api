@@ -52,10 +52,7 @@ func NewHandler(hub *Hub, driverSvc *driver.Service, rdb goredis.UniversalClient
 				if origin == "" {
 					return true // allow native apps
 				}
-				if cfg.AdminOrigin != "" && origin == cfg.AdminOrigin {
-					return true
-				}
-				return false
+				return cfg.IsAllowedOrigin(origin)
 			}
 			return true // dev allows all
 		},

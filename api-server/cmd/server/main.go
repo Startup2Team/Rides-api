@@ -520,14 +520,14 @@ func main() {
 	r := chi.NewRouter()
 
 	// ── CORS ──────────────────────────────────────────────────────────────────
-	// Allow the admin Next.js dev server in non-production, and any configured production origin.
+	// Allow the admin Next.js dev server in non-production, plus every
+	// configured production origin (admin console, marketing/landing
+	// site(s) — ADMIN_ORIGIN is a comma-separated list, see config.getEnvList).
 	allowedOrigins := []string{}
 	if cfg.Env != "production" {
 		allowedOrigins = append(allowedOrigins, "http://localhost:3000", "http://localhost:3001")
 	}
-	if origin := cfg.AdminOrigin; origin != "" {
-		allowedOrigins = append(allowedOrigins, origin)
-	}
+	allowedOrigins = append(allowedOrigins, cfg.AdminOrigins...)
 	r.Use(chiCors.Handler(chiCors.Options{
 		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
