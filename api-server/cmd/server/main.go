@@ -917,7 +917,18 @@ func main() {
 
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(mw.RoleDriverActive, mw.RoleDriverPending, mw.RoleCustomer))
-			r.Post("/documents", driverH.UploadDocument)
+			// Each upload reopens review (reopenForReview) and bumps updated_at,
+			// which floats the driver back to the top of admin's resubmission
+			// queue (ListDrivers ORDER BY updated_at DESC) — without a cap a
+			// driver can spam re-uploads to churn that queue. 20/hour is
+			// headroom over any genuine resubmission (a handful of documents,
+			// occasionally re-done once or twice) while capping the abuse case.
+			// UserRateLimit429 (not the silent-204 UserRateLimit), mirroring
+			// national_id_write above: a driver hitting the cap mid-resubmission
+			// needs a visible 429, not an upload that looks like it succeeded
+			// but silently did nothing.
+			r.With(mw.UserRateLimit429(rdb, "driver_documents_write", 20, time.Hour)).
+				Post("/documents", driverH.UploadDocument)
 			r.Get("/documents", driverH.ListDocuments)
 		})
 

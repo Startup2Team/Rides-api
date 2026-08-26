@@ -225,7 +225,7 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 				// mirrors role_state back to DRIVER_PENDING and re-asserts the
 				// same status through the shared helper so this path and
 				// UploadDocument's resubmission path can never drift.
-				if aerr := s.reopenForReview(ctx, existing.ID, in.UserID); aerr != nil {
+				if aerr := s.reopenForReview(ctx, existing); aerr != nil {
 					return nil, fmt.Errorf("reopen review: %w", aerr)
 				}
 			}
@@ -421,17 +421,73 @@ var resubmissionStatuses = map[string]bool{
 // this fixes. The role_state mirror is best-effort and logged: it only
 // affects whether SetAvailability's stale role_state blocks the driver from
 // seeing "you're pending", not whether an admin can act on them.
-func (s *Service) reopenForReview(ctx context.Context, profileID, userID string) error {
-	if err := s.repo.SetApprovalStatus(ctx, profileID, StatusPendingReview, "", nil); err != nil {
+//
+// profile.ApprovalStatus must be the status BEFORE this call (the caller's
+// already-fetched profile, not a re-read) — it decides whether the
+// force-offline eviction below applies.
+func (s *Service) reopenForReview(ctx context.Context, profile *Profile) error {
+	if err := s.repo.SetApprovalStatus(ctx, profile.ID, StatusPendingReview, "", nil); err != nil {
 		return fmt.Errorf("set approval status to %s: %w", StatusPendingReview, err)
 	}
-	if err := s.repo.UpdateUserRoleState(ctx, userID, "DRIVER_PENDING"); err != nil {
+	if err := s.repo.UpdateUserRoleState(ctx, profile.UserID, "DRIVER_PENDING"); err != nil {
 		s.log.Error().Err(err).
-			Str("driver_profile_id", profileID).
-			Str("user_id", userID).
+			Str("driver_profile_id", profile.ID).
+			Str("user_id", profile.UserID).
 			Msg("driver: reopened review but could not mirror role_state to DRIVER_PENDING")
 	}
+
+	// An APPROVED driver reopening review may currently be online: the
+	// approval that let them go online no longer describes what's on file
+	// (that's the whole point of reopening), but this transition only gates
+	// FUTURE go-online calls (SetAvailability requires APPROVED) — it does
+	// nothing about a session that is already online. Left alone that
+	// driver keeps is_online=TRUE, a Redis DriverState, and a pin in the
+	// Redis geo index the customer nearby-map reads from, even though the
+	// matching engine's dispatch path is approval-gated and will never send
+	// them an offer. That is exactly the Redis-vs-Postgres drift the
+	// platform must never have (a ghost pin with no way to ever get a
+	// ride). REJECTED and NEEDS_MORE_INFO can never have gotten online in
+	// the first place (SetAvailability requires APPROVED), so this only
+	// ever fires coming from APPROVED. Mirrors SuspendDriver's eviction
+	// (internal/admin/drivers.go) and is best-effort/logged like the
+	// role_state mirror above — a Redis hiccup must not fail the
+	// resubmission the driver is actively trying to complete.
+	if profile.ApprovalStatus == StatusApproved {
+		if err := s.repo.UpdateOnlineStatus(ctx, profile.UserID, false); err != nil {
+			s.log.Error().Err(err).
+				Str("driver_profile_id", profile.ID).
+				Str("user_id", profile.UserID).
+				Msg("driver: reopened review from APPROVED but could not force is_online=false")
+		}
+		s.evictOnlineDriverFromRedis(ctx, profile.ID, profile.TransportType)
+	}
 	return nil
+}
+
+// evictOnlineDriverFromRedis clears an online driver's Redis presence
+// (DriverState + geo index ZRem) — the Redis half of reopenForReview's
+// force-offline eviction from APPROVED. Split out from reopenForReview so
+// the Redis-only behavior can be unit-tested against miniredis without a
+// Postgres dependency (see reopenForReview's Postgres writes, which cannot).
+//
+// Best-effort/logged, mirroring SuspendDriver's eviction (internal/admin/
+// drivers.go): a Redis hiccup must not fail the resubmission the driver is
+// actively trying to complete. s.redis is nil in some test setups that never
+// wire a Redis client — guarded like SuspendDriver's `if s.rdb != nil`.
+func (s *Service) evictOnlineDriverFromRedis(ctx context.Context, profileID, transportType string) {
+	if s.redis == nil {
+		return
+	}
+	if err := s.redis.Set(ctx, rkeys.K.DriverState(profileID), "OFFLINE", 0).Err(); err != nil {
+		s.log.Error().Err(err).
+			Str("driver_profile_id", profileID).
+			Msg("driver: reopened review from APPROVED but could not set Redis driver state to OFFLINE")
+	}
+	if err := s.redis.ZRem(ctx, rkeys.K.DriverGeoIndex(transportType), profileID).Err(); err != nil {
+		s.log.Error().Err(err).
+			Str("driver_profile_id", profileID).
+			Msg("driver: reopened review from APPROVED but could not evict from Redis geo index")
+	}
 }
 
 // UploadDocument records a new version of a driver document (URL only — file
@@ -494,7 +550,7 @@ func (s *Service) UploadDocument(ctx context.Context, userID, documentType, file
 
 	if resubmissionStatuses[profile.ApprovalStatus] {
 		fromStatus := profile.ApprovalStatus
-		if err := s.reopenForReview(ctx, profile.ID, userID); err != nil {
+		if err := s.reopenForReview(ctx, profile); err != nil {
 			// The document is already stored; failing the request now would tell
 			// the driver the upload failed when it did not. Log loudly instead —
 			// a driver left un-reopened on unreviewed papers needs to be visible.

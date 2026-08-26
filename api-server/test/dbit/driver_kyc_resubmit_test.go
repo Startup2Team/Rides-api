@@ -141,6 +141,50 @@ func TestUploadDocument_ResubmitFromApproved_ReopensReviewAsPendingReview(t *tes
 	require.Equal(t, "APPROVED", final.ApprovalStatus)
 }
 
+func TestUploadDocument_ResubmitFromApproved_ForcesOnlineDriverOffline(t *testing.T) {
+	// LOW-1 (security-review hardening): an APPROVED, currently-online driver
+	// who swaps a document is reopened for review, but the approval_status
+	// change alone only gates FUTURE go-online calls (SetAvailability
+	// requires APPROVED) — it does nothing about a session that is already
+	// online. Without forcing is_online back to false here, that driver keeps
+	// a ghost pin on the customer nearby-map: the matching engine's dispatch
+	// path is approval-gated so they'd get no offers, but Postgres and the
+	// Redis geo index would disagree about their availability, which is
+	// exactly the drift this platform must never have. The Redis half of
+	// this eviction (DriverState + geo index ZRem) is unit-tested in
+	// isolation in internal/driver/reopen_review_test.go, since
+	// driver.Repository is tied directly to *pgxpool.Pool and cannot be
+	// unit-tested — this proves the Postgres half, which the Redis test can't.
+	ctx := context.Background()
+	authRepo := auth.NewRepository(pool)
+	driverRepo := driver.NewRepository(pool)
+	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
+
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-online", "android", nil, nil)
+	require.NoError(t, err)
+
+	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
+	require.NoError(t, err)
+	adminSvc := admin.NewService(pool, zerolog.Nop())
+	approverID := createTestAdminAccount(t, ctx)
+	require.NoError(t, adminSvc.ApproveDriver(ctx, profile.ID, approverID))
+
+	// Simulate the driver going online while APPROVED — UpdateOnlineStatus is
+	// the same repository write SetAvailability performs; its own gating
+	// (credits, expiry checks) is out of scope here.
+	require.NoError(t, driverRepo.UpdateOnlineStatus(ctx, u.ID, true))
+	online, err := driverRepo.FindProfileByUserID(ctx, u.ID)
+	require.NoError(t, err)
+	require.True(t, online.IsOnline, "setup: driver must be online before resubmitting")
+
+	err = driverSvc.UploadDocument(ctx, u.ID, documents.Selfie, "https://example.com/selfie3.jpg", "", nil)
+	require.NoError(t, err)
+
+	after, err := driverRepo.FindProfileByUserID(ctx, u.ID)
+	require.NoError(t, err)
+	require.False(t, after.IsOnline, "reopening review from APPROVED must force the driver offline in Postgres")
+}
+
 // ── Apply: re-/apply resubmission from REJECTED and NEEDS_MORE_INFO ───────
 
 func TestApply_ResubmitFromRejected_ReturnsPendingReview_NoError(t *testing.T) {
