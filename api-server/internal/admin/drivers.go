@@ -221,10 +221,36 @@ func (s *Service) RejectDriver(ctx context.Context, profileID, adminUserID, reas
 	return nil
 }
 
-// RequestDriverMoreInfo asks the driver to resubmit documents or clarify onboarding details.
-func (s *Service) RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string) error {
+// DriverMoreInfoDocument is one document-specific comment attached to a
+// RequestDriverMoreInfo call (e.g. "insurance photo is blurry") — the
+// per-document counterpart to the free-text reason, so the driver
+// notification can point at exactly what needs fixing.
+type DriverMoreInfoDocument struct {
+	DocumentType string `json:"document_type"`
+	Comment      string `json:"comment"`
+}
+
+// RequestDriverMoreInfo asks the driver to resubmit documents or clarify
+// onboarding details, moving them to NEEDS_MORE_INFO.
+//
+// This used to send NO notification at all — a driver moved to
+// NEEDS_MORE_INFO had no way to learn why short of noticing their status
+// changed on the app's next poll. It now mirrors RejectDriver's notify
+// pattern (in-app + push to every device) so the driver actually finds out,
+// and — the whole point of this loop — can then resubmit via /documents or
+// /apply, both of which reopen review through driver.Service.reopenForReview.
+func (s *Service) RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string, docs []DriverMoreInfoDocument) error {
 	if strings.TrimSpace(reason) == "" {
 		return apperrors.New(http.StatusBadRequest, "REASON_REQUIRED", "reason is required")
+	}
+	var driverUserID string
+	if err := s.db.QueryRow(ctx,
+		`SELECT user_id FROM driver_profiles WHERE id = $1`, profileID,
+	).Scan(&driverUserID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperrors.ErrNotFound
+		}
+		return err
 	}
 	tag, err := s.db.Exec(ctx, `
 		UPDATE driver_profiles
@@ -240,6 +266,19 @@ func (s *Service) RequestDriverMoreInfo(ctx context.Context, profileID, adminUse
 	if tag.RowsAffected() == 0 {
 		return apperrors.Newf(http.StatusConflict, "INVALID_STATE",
 			"driver is not in review or does not exist")
+	}
+
+	if s.notifier != nil {
+		body := reason
+		for _, d := range docs {
+			comment := strings.TrimSpace(d.Comment)
+			if comment == "" {
+				continue
+			}
+			body += fmt.Sprintf(" %s: %s.", d.DocumentType, comment)
+		}
+		s.notifier.SendToAllDevices(ctx, driverUserID, "More information needed", body,
+			"driver", map[string]string{"type": "driver_more_info_requested", "reason": reason})
 	}
 	return nil
 }
@@ -379,7 +418,20 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 	var total int
 	_ = s.db.QueryRow(ctx, "SELECT COUNT(*) "+base+where, args...).Scan(&total)
 
+	// Default order: for the review queue (PENDING_REVIEW / NEEDS_MORE_INFO),
+	// by updated_at DESC rather than created_at DESC — a resubmission (new
+	// document upload or re-/apply, see driver.Service.reopenForReview) bumps
+	// updated_at but not created_at, and without this the admin queue kept
+	// resubmitted drivers buried under their original application date
+	// instead of floating them back to the top where a reviewer will see
+	// them. Any other status filter (APPROVED, REJECTED, SUSPENDED, or none)
+	// keeps created_at DESC — newest APPLICATION first is still the right
+	// default there. "updated_at" is also exposed as an explicit sort value
+	// so the caller can request it regardless of the status filter.
 	orderBy := "dp.created_at DESC"
+	if status == "PENDING_REVIEW" || status == "NEEDS_MORE_INFO" {
+		orderBy = "dp.updated_at DESC"
+	}
 	switch sort {
 	case "acceptance_rate":
 		orderBy = "dp.acceptance_rate DESC"
@@ -387,6 +439,8 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 		orderBy = "dp.total_rides DESC"
 	case "name":
 		orderBy = "u.full_name ASC"
+	case "updated_at":
+		orderBy = "dp.updated_at DESC"
 	}
 
 	args = append(args, limit, offset)
@@ -394,7 +448,7 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 		SELECT dp.id, dp.user_id, u.phone_number, u.full_name,
 		       dp.transport_type, dp.vehicle_plate, dp.approval_status,
 		       dp.priority_tier, dp.total_rides, dp.acceptance_rate,
-		       dp.is_online, dp.city, dp.created_at,
+		       dp.is_online, dp.city, dp.created_at, dp.updated_at,
 		       EXISTS(
 		           SELECT 1 FROM rides r
 		           WHERE r.driver_id = dp.id
@@ -415,9 +469,9 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 		var priorityTier, totalRides int
 		var acceptanceRate float64
 		var isOnline, onTrip bool
-		var createdAt time.Time
+		var createdAt, updatedAt time.Time
 		if err := rows.Scan(&id, &userID, &phone, &fullName, &transportType, &plate,
-			&approvalStatus, &priorityTier, &totalRides, &acceptanceRate, &isOnline, &city, &createdAt, &onTrip); err != nil {
+			&approvalStatus, &priorityTier, &totalRides, &acceptanceRate, &isOnline, &city, &createdAt, &updatedAt, &onTrip); err != nil {
 			return nil, 0, err
 		}
 		result = append(result, map[string]interface{}{
@@ -426,6 +480,14 @@ func (s *Service) ListDrivers(ctx context.Context, status, vehicleType, search, 
 			"approval_status": approvalStatus, "priority_tier": priorityTier,
 			"total_rides": totalRides, "acceptance_rate": acceptanceRate,
 			"is_online": isOnline, "on_trip": onTrip, "city": city, "created_at": createdAt,
+			// updated_at (new): lets the caller tell a resubmission apart from
+			// the original application — reopenForReview bumps this on every
+			// document/apply resubmission but leaves created_at untouched, so
+			// updated_at > created_at is the "this driver just resubmitted"
+			// signal the admin web can badge on. Deliberately not a new
+			// resubmitted_at column: this reuses data already on the row
+			// instead of a migration for a derivable signal.
+			"updated_at": updatedAt,
 		})
 	}
 	return result, total, nil
