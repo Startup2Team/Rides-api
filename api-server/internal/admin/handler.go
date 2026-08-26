@@ -118,7 +118,11 @@ func (h *Handler) RequestDriverMoreInfo(w http.ResponseWriter, r *http.Request) 
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
-	if err := h.svc.RequestDriverMoreInfo(r.Context(), profileID, claims.UserID, body.Reason); err != nil {
+	docs := make([]DriverMoreInfoDocument, 0, len(body.Documents))
+	for _, d := range body.Documents {
+		docs = append(docs, DriverMoreInfoDocument{DocumentType: d.DocumentType, Comment: d.Comment})
+	}
+	if err := h.svc.RequestDriverMoreInfo(r.Context(), profileID, claims.UserID, body.Reason, docs); err != nil {
 		respond.Error(w, err)
 		return
 	}

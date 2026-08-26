@@ -15,7 +15,7 @@ type AdminService interface {
 	LiveRidesStats(ctx context.Context) (map[string]interface{}, error)
 	ApproveDriver(ctx context.Context, profileID, adminUserID string) error
 	RejectDriver(ctx context.Context, profileID, adminUserID, reason string) error
-	RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string) error
+	RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string, docs []DriverMoreInfoDocument) error
 	SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
 	ReinstateDriver(ctx context.Context, profileID string) error
 	// GetDriver's requesterRole gates the national ID: SuperAdmin/OpsManager
