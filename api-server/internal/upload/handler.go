@@ -393,6 +393,7 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", *out.ContentType)
 	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	_, _ = io.Copy(w, out.Body)
 }
 
