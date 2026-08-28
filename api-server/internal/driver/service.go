@@ -528,6 +528,12 @@ func (s *Service) UploadDocument(ctx context.Context, userID, documentType, file
 	}
 
 	needsVehicle := documents.RequiresVehicle(documentType)
+	if needsVehicle && (vehicleID == nil || *vehicleID == "") {
+		pVehID, pErr := s.repo.GetPrimaryVehicleID(ctx, profile.ID)
+		if pErr == nil && pVehID != nil && *pVehID != "" {
+			vehicleID = pVehID
+		}
+	}
 	switch {
 	case needsVehicle && (vehicleID == nil || *vehicleID == ""):
 		return apperrors.New(http.StatusBadRequest, "VEHICLE_REQUIRED",

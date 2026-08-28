@@ -497,6 +497,21 @@ func (r *Repository) VehicleBelongsToDriver(ctx context.Context, driverProfileID
 	return exists, err
 }
 
+// GetPrimaryVehicleID retrieves the active or newest vehicle ID for a driver profile.
+func (r *Repository) GetPrimaryVehicleID(ctx context.Context, driverProfileID string) (*string, error) {
+	var vehID string
+	err := r.db.QueryRow(ctx, `
+		SELECT id FROM driver_vehicles
+		WHERE driver_id = $1
+		ORDER BY is_active DESC, created_at DESC
+		LIMIT 1
+	`, driverProfileID).Scan(&vehID)
+	if err != nil {
+		return nil, err
+	}
+	return &vehID, nil
+}
+
 // UpsertDocument stores a new version of one document, superseding the live one.
 //
 // vehicleID scopes the document: nil for person-level types (licence, ID,
