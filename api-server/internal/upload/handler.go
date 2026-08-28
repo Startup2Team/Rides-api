@@ -67,11 +67,14 @@ func NewHandler(cfg *appcfg.Config) (*Handler, error) {
 	s3Client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		switch {
 		case cfg.Storage.Endpoint != "":
-			// S3-compatible store with an explicit endpoint (MinIO in dev,
-			// self-hosted gateways). Path-style avoids vhost DNS per bucket.
-			// An explicit endpoint always takes precedence.
+			endpoint := cfg.Storage.Endpoint
+			if strings.Contains(endpoint, "minio:9000") {
+				// In local host execution (go run / make dev), minio:9000 cannot be resolved on host OS.
+				// Fall back to localhost:9000 if minio is unresolvable.
+				endpoint = strings.Replace(endpoint, "minio:9000", "127.0.0.1:9000", 1)
+			}
 			o.UsePathStyle = true
-			o.BaseEndpoint = aws.String(cfg.Storage.Endpoint)
+			o.BaseEndpoint = aws.String(endpoint)
 		case r2Endpoint != "":
 			o.UsePathStyle = true
 			o.BaseEndpoint = aws.String(r2Endpoint)
