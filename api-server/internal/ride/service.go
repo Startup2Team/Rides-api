@@ -699,6 +699,15 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 					Type: "ride_taken", RideID: rideID,
 					Payload: map[string]interface{}{"reason": "The customer cancelled this request."},
 				})
+				// The WebSocket only reaches a driver with the app open and a live
+				// socket; one backgrounded, reconnecting, or on a second device has
+				// none, and their offer card would linger forever. Mirrors sendOffer's
+				// dual-transport pattern (engine.go).
+				if driverUserID, err := s.repo.FindDriverUserIDByProfileID(ctx, pid); err == nil {
+					s.notify.SendToAllDevices(ctx, driverUserID, "Ride no longer available",
+						"The customer cancelled this request.", "ride",
+						map[string]string{"type": "ride_taken", "ride_id": rideID})
+				}
 			}
 		}
 		s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusCancelled), 2*time.Minute)
@@ -771,6 +780,11 @@ func (s *Service) StartNegotiationTimeout(rideID string) {
 				Type: "ride_cancelled", RideID: rideID,
 				Payload: map[string]interface{}{"reason": "Negotiation timed out."},
 			})
+			if driverUserID, err := s.repo.FindDriverUserIDByProfileID(ctx, *r.DriverID); err == nil {
+				s.notify.SendToAllDevices(ctx, driverUserID, "Ride cancelled",
+					"Negotiation timed out.", "ride",
+					map[string]string{"type": "ride_cancelled", "ride_id": rideID})
+			}
 		}
 	}
 

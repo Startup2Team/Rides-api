@@ -384,6 +384,11 @@ func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candi
 					Type: "ride_taken", RideID: rideID,
 					Payload: map[string]interface{}{"reason": "Another driver accepted first."},
 				})
+				// See sendOffer's dual-transport note: a backgrounded/reconnecting
+				// driver has no live socket and would never learn they lost the race.
+				e.notify.SendToAllDevices(ctx, c.userID, "Ride no longer available",
+					"Another driver accepted first.", "ride",
+					map[string]string{"type": "ride_taken", "ride_id": rideID})
 				continue
 			}
 			// Record the winner where the rest of the system expects a single value.
@@ -396,6 +401,9 @@ func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candi
 					Type: "ride_taken", RideID: rideID,
 					Payload: map[string]interface{}{"reason": "Another driver accepted first."},
 				})
+				e.notify.SendToAllDevices(ctx, other.userID, "Ride no longer available",
+					"Another driver accepted first.", "ride",
+					map[string]string{"type": "ride_taken", "ride_id": rideID})
 			}
 			return c
 		case <-timer.C:
@@ -717,6 +725,9 @@ func (e *Engine) onAccepted(ctx context.Context, rideID string, c *candidate) {
 			Type: "ride_taken", RideID: rideID,
 			Payload: map[string]interface{}{"reason": "This ride is no longer available."},
 		})
+		e.notify.SendToAllDevices(ctx, c.userID, "Ride no longer available",
+			"This ride is no longer available.", "ride",
+			map[string]string{"type": "ride_taken", "ride_id": rideID})
 	}
 	// AssignDriver is guarded on status = SEARCHING, so a cancelled ride refuses
 	// the driver here rather than recording one.
