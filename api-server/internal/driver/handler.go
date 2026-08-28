@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -136,6 +137,27 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
+
+	momoLower := strings.ToLower(body.MomoProvider)
+	if strings.Contains(momoLower, "airtel") {
+		body.MomoProvider = "airtel"
+	} else if strings.Contains(momoLower, "mtn") {
+		body.MomoProvider = "mtn"
+	}
+
+	switch strings.ToUpper(body.TransportType) {
+	case "CAB", "CAB_TAXI":
+		body.TransportType = "CAB_TAXI"
+	case "MOTO", "MOTO_BIKE":
+		body.TransportType = "MOTO_BIKE"
+	case "HILUX", "LIGHT_HILUX":
+		body.TransportType = "LIGHT_HILUX"
+	case "FUSO", "HEAVY_FUSO":
+		body.TransportType = "HEAVY_FUSO"
+	case "RIFANI", "TUK_TUK", "TUK":
+		body.TransportType = "TUK_TUK"
+	}
+
 	if err := validate.Struct(body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
 		return

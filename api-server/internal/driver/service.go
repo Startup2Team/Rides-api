@@ -199,13 +199,15 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 	in.NationalIDCountry, in.NationalIDNumber = country, number
 
 	existing, err := s.repo.FindProfileByUserID(ctx, in.UserID)
-	if err == nil {
+	if err != nil && !errors.Is(err, apperrors.ErrNotFound) {
+		return nil, err
+	}
+	if err == nil && existing != nil {
 		// Profile already exists.
-		if existing.ApprovalStatus == StatusRejected || existing.ApprovalStatus == StatusNeedsMoreInfo {
-			// Profile was previously rejected or sent back for more info;
-			// allow resubmission via a fresh /apply (mirrors the /documents
-			// resubmission path below — both go through reopenForReview so
-			// the two can never drift on how they reopen review).
+		if existing.ApprovalStatus != StatusApproved && existing.ApprovalStatus != StatusSuspended {
+			// Profile exists and is not yet approved or suspended (PENDING,
+			// PENDING_REVIEW, REJECTED, or NEEDS_MORE_INFO); allow updating details
+			// and resubmitting via /apply.
 			if rerr := s.repo.UpdateProfileForResubmission(ctx, in); rerr != nil {
 				return nil, mapApplyErr(rerr)
 			}
@@ -219,12 +221,6 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 				}
 				s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: resubmitted driver approved instantly")
 			} else {
-				// UpdateProfileForResubmission already set approval_status =
-				// PENDING_REVIEW (and cleared rejection_reason) as part of the
-				// same profile-fields update; reopenForReview here is what
-				// mirrors role_state back to DRIVER_PENDING and re-asserts the
-				// same status through the shared helper so this path and
-				// UploadDocument's resubmission path can never drift.
 				if aerr := s.reopenForReview(ctx, existing); aerr != nil {
 					return nil, fmt.Errorf("reopen review: %w", aerr)
 				}
@@ -232,30 +228,38 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 			return s.repo.FindProfileByUserID(ctx, in.UserID)
 		}
 
-		if s.cfg.Driver.DevAutoApprove && existing.ApprovalStatus != "APPROVED" {
-			// Dev shortcut: approve the pending profile so the caller can proceed.
-			if aerr := s.repo.SetApprovalStatus(ctx, existing.ID, "APPROVED", "", nil); aerr != nil {
-				return nil, fmt.Errorf("dev auto-approve existing profile: %w", aerr)
+		if existing.ApprovalStatus == StatusApproved {
+			// Driver is already approved; adding an additional vehicle (e.g. Hilux, Motor, Cab).
+			// Add the new vehicle to their existing profile.
+			if vErr := s.repo.CreateVehicleFromApply(ctx, existing.ID, in); vErr != nil {
+				if isUniqueViolation(vErr) {
+					return nil, mapApplyErr(vErr)
+				}
+				s.log.Warn().Err(vErr).Str("profile_id", existing.ID).Msg("create additional vehicle from apply failed")
 			}
-			if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); aerr != nil {
-				return nil, fmt.Errorf("update role state: %w", aerr)
-			}
-			existing.ApprovalStatus = "APPROVED"
-			s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: existing pending profile approved")
 			return existing, nil
 		}
+
 		return nil, apperrors.ErrDriverAlreadyApplied
 	}
 
 	profile, err := s.repo.CreateProfile(ctx, in)
 	if err != nil {
+		if isUniqueViolation(err) {
+			if existingProfile, findErr := s.repo.FindProfileByUserID(ctx, in.UserID); findErr == nil && existingProfile != nil {
+				if rerr := s.repo.UpdateProfileForResubmission(ctx, in); rerr == nil {
+					_ = s.reopenForReview(ctx, existingProfile)
+					return s.repo.FindProfileByUserID(ctx, in.UserID)
+				}
+			}
+		}
 		return nil, mapApplyErr(err)
 	}
 	// Mirror the application's vehicle into driver_vehicles (the multi-vehicle
 	// source of truth). Tolerate a duplicate plate: the profile row is already
 	// created and the vehicles list lazily backfills from it.
 	if vErr := s.repo.CreateVehicleFromApply(ctx, profile.ID, in); vErr != nil && !isUniqueViolation(vErr) {
-		return nil, vErr
+		s.log.Warn().Err(vErr).Str("profile_id", profile.ID).Msg("create vehicle from apply failed (non-fatal)")
 	}
 
 	if s.cfg.Driver.DevAutoApprove {
@@ -270,14 +274,17 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 		s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: driver approved instantly — disable in production")
 	} else {
 		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_PENDING"); err != nil {
-			return nil, fmt.Errorf("update role state: %w", err)
+			s.log.Warn().Err(err).Str("user_id", in.UserID).Msg("update role state failed (non-fatal)")
 		}
 		// Confirm receipt so the applicant knows their submission landed and is in
 		// the review queue (in-app + push to every registered device).
 		if s.expiryNotifier != nil {
-			s.expiryNotifier.SendToAllDevices(ctx, in.UserID, "Application received",
-				"We've received your driver application. We'll review your documents and let you know as soon as it's approved.",
-				"driver", map[string]string{"type": "driver_application_received"})
+			go func(uid string) {
+				defer func() { _ = recover() }()
+				s.expiryNotifier.SendToAllDevices(context.Background(), uid, "Application received",
+					"We've received your driver application. We'll review your documents and let you know as soon as it's approved.",
+					"driver", map[string]string{"type": "driver_application_received"})
+			}(in.UserID)
 		}
 	}
 
