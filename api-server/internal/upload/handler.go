@@ -329,6 +329,19 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		ContentLength: aws.Int64(int64(len(data))),
 	})
 	if err != nil {
+		// Auto-heal missing bucket in dev/MinIO
+		_, _ = h.client.CreateBucket(r.Context(), &s3.CreateBucketInput{
+			Bucket: aws.String(h.cfg.Storage.Bucket),
+		})
+		_, err = h.client.PutObject(r.Context(), &s3.PutObjectInput{
+			Bucket:        aws.String(h.cfg.Storage.Bucket),
+			Key:           aws.String(objectKey),
+			Body:          bytes.NewReader(data),
+			ContentType:   aws.String(contentType),
+			ContentLength: aws.Int64(int64(len(data))),
+		})
+	}
+	if err != nil {
 		log.Error().Err(err).Str("object_key", objectKey).Msg("storage: proxy upload to bucket failed")
 		respond.Error(w, apperrors.ErrInternal)
 		return
