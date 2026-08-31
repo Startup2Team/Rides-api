@@ -68,11 +68,13 @@ services:
     # container — stricter than "bind 127.0.0.1" (which still opens a host
     # port reachable via SSH tunnel). There is no host port at all here.
     healthcheck:
-      # TCP-only check (the osrm-backend image has bash but not curl/wget) —
-      # proves the port is listening, NOT that routing actually works. Prove
-      # routing with the curl-via-docker-exec command in OSRM_DEPLOY.md
-      # step 5 after `up`.
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/5000 || exit 1"]
+      # TCP check via BASH explicitly: the osrm-backend image has bash but not
+      # curl/wget, and /dev/tcp is a bash builtin — Docker's default CMD-SHELL
+      # runs /bin/sh (dash), which lacks /dev/tcp and fails ("Directory
+      # nonexistent"), so the check MUST invoke bash. Proves the port is
+      # listening, not that routing works (verify routing with the
+      # curl-via-docker-exec in OSRM_DEPLOY.md step 5).
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5000"]
       interval: 30s
       timeout: 5s
       retries: 3
