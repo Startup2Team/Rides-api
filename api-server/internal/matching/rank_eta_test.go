@@ -200,6 +200,87 @@ func TestRankByRoutedETA_RowCountMismatch_FallsBackToStraightLineOrder(t *testin
 	assert.Equal(t, wantScores, []float64{candidates[0].score, candidates[1].score})
 }
 
+// ── all cells nil → nothing to rank by, order/scores preserved ─────────────
+
+func TestRankByRoutedETA_AllCellsNil_FallsBackToStraightLineOrder(t *testing.T) {
+	// Neither candidate has a routable path (both nil) — the old code
+	// special-cased this via `maxETA <= 0`; the absolute etaRef normalization
+	// no longer depends on what OSRM returned, so this now falls out of the
+	// per-candidate nil-cell skip naturally rather than a dedicated early
+	// return. Either way, the guarantee is the same: nothing to rank by
+	// leaves every score and the order untouched.
+	srv := httptest.NewServer(tablePayload(t, `[[null],[null]]`))
+	defer srv.Close()
+
+	e := newTestEngine(t, srv.URL, true)
+	candidates := straightLineCandidates()
+	wantOrder := []string{candidates[0].profileID, candidates[1].profileID}
+	wantScores := []float64{candidates[0].score, candidates[1].score}
+
+	require.NotPanics(t, func() {
+		e.rankByRoutedETA(context.Background(), "ride-8", geo.Point{Lat: -1.95, Lng: 30.07}, candidates)
+	})
+
+	assert.Equal(t, wantOrder, []string{candidates[0].profileID, candidates[1].profileID},
+		"all-nil OSRM cells must leave candidate order byte-for-byte unchanged")
+	assert.Equal(t, wantScores, []float64{candidates[0].score, candidates[1].score},
+		"all-nil OSRM cells must leave scores untouched")
+}
+
+// ── ETA normalization is against an ABSOLUTE ceiling (etaRef), not the
+// worst ETA in the current candidate set — so the 0.25/0.15 behavior weights
+// keep their intended influence instead of being crowded out by a relative
+// term that always maxes out at 1.0 for the set's worst candidate ─────────
+
+func TestRankByRoutedETA_AbsoluteNormalization_BehaviorWeightsRetainInfluence(t *testing.T) {
+	// driver-clean has a clean record and a 60s road ETA. driver-bad-declines
+	// is marginally faster (50s, a 10s edge) but has a decline on the books.
+	// etaRef falls back to the default 10-minute tier-ETA ceiling (600s) since
+	// this Engine's cfg leaves Matching.TierETAMinutes unset.
+	//
+	// Under the OLD relative normalization (divide by maxETA = the worst ETA
+	// in THIS pair, 60s), that same 10s edge is scaled by 0.6/60 and is
+	// enough by itself to outweigh driver-bad-declines's 0.25*0.1 decline
+	// penalty, flipping driver-bad-declines ahead of driver-clean:
+	//   old score(clean)          = 0.6*(60/60)          = 0.600
+	//   old score(bad-declines)   = 0.6*(50/60)+0.25*0.1  = 0.525
+	// i.e. the marginally-faster, worse-behaved driver would win — the exact
+	// failure mode the review flagged.
+	//
+	// Under the NEW absolute normalization (divide by etaRef = 600s), the
+	// same 10s edge is scaled by 0.6/600 — an order of magnitude smaller —
+	// so the decline penalty is not swamped and driver-clean is NOT
+	// overtaken:
+	//   new score(clean)          = 0.6*(60/600)          = 0.060
+	//   new score(bad-declines)   = 0.6*(50/600)+0.25*0.1  = 0.075
+	srv := httptest.NewServer(tablePayload(t, `[[60.0],[50.0]]`))
+	defer srv.Close()
+
+	e := newTestEngine(t, srv.URL, true)
+	require.True(t, e.router.Enabled())
+	require.Empty(t, e.cfg.Matching.TierETAMinutes, "precondition: etaRef must come from the 600s fallback, not config")
+
+	candidates := []*candidate{
+		{
+			profileID: "driver-clean", distanceM: 500, lat: -1.9441, lng: 30.0619,
+			dailyDeclines: 0, acceptanceRate: 100, score: 0.05,
+		},
+		{
+			profileID: "driver-bad-declines", distanceM: 1000, lat: -1.9500, lng: 30.0700,
+			dailyDeclines: 1, acceptanceRate: 100, score: 0.10,
+		},
+	}
+
+	e.rankByRoutedETA(context.Background(), "ride-9", geo.Point{Lat: -1.95, Lng: 30.07}, candidates)
+
+	require.Len(t, candidates, 2)
+	assert.Equal(t, "driver-clean", candidates[0].profileID,
+		"a clean-record driver must not be overtaken by a marginally-faster, worse-behaved driver — the 0.25 decline weight must retain its intended influence under absolute etaRef normalization")
+	assert.Equal(t, "driver-bad-declines", candidates[1].profileID)
+	assert.InDelta(t, 0.06, candidates[0].score, 1e-9)
+	assert.InDelta(t, 0.075, candidates[1].score, 1e-9)
+}
+
 // ── empty candidate list → no-op, no panic, no HTTP call ───────────────────
 
 func TestRankByRoutedETA_EmptyCandidates_NoOp(t *testing.T) {

@@ -666,33 +666,57 @@ func (e *Engine) rankByRoutedETA(ctx context.Context, rideID string, pickup geo.
 		return
 	}
 
-	// Normalize against the widest finite ETA OSRM actually returned, mirroring
-	// how straight-line scoring normalizes against the search radius. If every
-	// cell is nil (no route found to the pickup for any candidate), there is
-	// nothing to rank by — leave straight-line scores untouched.
-	maxETA := 0.0
-	for _, row := range result.DurationsSec {
-		if len(row) > 0 && row[0] != nil && *row[0] > maxETA {
-			maxETA = *row[0]
-		}
-	}
-	if maxETA <= 0 {
-		return
-	}
+	// Normalize against an ABSOLUTE ceiling — the widest configured tier-ETA
+	// promise — mirroring how straight-line scoring normalizes against the
+	// fixed search radius, not against the worst distance actually returned.
+	// This used to normalize against maxETA, the worst ETA in THIS candidate
+	// set: that made the worst candidate always score 1.0 on the 0.6 term
+	// regardless of its absolute ETA, so the term always consumed its full
+	// [0,1] range and crowded out the 0.25/0.15 decline+acceptance weights'
+	// intended influence — and maxETA shifted wave-to-wave as `tried` drivers
+	// left the set, so the same driver's absolute score was unstable across
+	// waves. etaRef fixes both: it's constant for the whole search.
+	etaRef := e.etaRefSeconds()
 
 	for i, c := range candidates {
 		row := result.DurationsSec[i]
 		if len(row) == 0 || row[0] == nil {
+			// No routable path for this candidate: keep its straight-line
+			// score. Both terms are now absolute references (radius vs
+			// etaRef) rather than one relative and one absolute, so mixing a
+			// straight-line score into an otherwise ETA-scored set is no
+			// longer the apples-to-oranges comparison it used to be.
 			continue
 		}
 		etaSec := *row[0]
-		normalizedETA := math.Min(etaSec, maxETA) / maxETA
+		normalizedETA := math.Min(etaSec, etaRef) / etaRef
 		normalizedDeclines := math.Min(float64(c.dailyDeclines), 10) / 10.0
 		acceptancePenalty := 1.0 - c.acceptanceRate/100.0
 		c.score = (normalizedETA * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
 	}
 
 	sortCandidates(candidates)
+}
+
+// etaRefSeconds is the absolute ETA ceiling rankByRoutedETA normalizes
+// against — the matching engine's own pickup-time budget, so a driver's
+// score is stable across waves instead of drifting with whichever ETAs the
+// current candidate set happens to contain. Uses the widest configured
+// tier-ETA promise (MATCH_TIER_ETA_MINUTES, default 10 min — the same
+// default TierRadiiForVehicle falls back to), converted to seconds. Falls
+// back to 10 minutes if TierETAMinutes is unset or every entry is <= 0, so a
+// misconfiguration can't zero/negative-divide the score.
+func (e *Engine) etaRefSeconds() float64 {
+	maxMinutes := 0
+	for _, m := range e.cfg.Matching.TierETAMinutes {
+		if m > maxMinutes {
+			maxMinutes = m
+		}
+	}
+	if maxMinutes <= 0 {
+		maxMinutes = 10
+	}
+	return float64(maxMinutes) * 60
 }
 
 // fallbackPostGIS is used on cold start when Redis GEO index is empty.
