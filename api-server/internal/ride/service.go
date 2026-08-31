@@ -37,6 +37,29 @@ type MatchingEngineInterface interface {
 
 type RouteFareRecorder interface {
 	RecordAgreedFare(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string, agreedFare float64)
+	// RoutingEnabled reports whether a real-road routing backend (OSRM) is
+	// configured. CreateRide only attempts a route lookup when true, so a
+	// disabled/absent OSRM adds zero extra Redis/DB calls to ride creation —
+	// byte-for-byte today's behavior when the feature flag is off.
+	RoutingEnabled() bool
+	// GetRouteDetails returns the real-road distance/duration/geometry for a
+	// pickup→destination pair when OSRM has (or can compute) a route, purely
+	// to enrich the ride-creation response for map drawing / an accurate ETA.
+	// It does NOT feed the fare/negotiation math — that still trusts the
+	// client-supplied distance_km exactly as before this feature, so this
+	// call can never change money committed on a ride.
+	GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error)
+}
+
+// RouteInfo is the real-road route computed at ride creation, when a routing
+// backend (OSRM) is configured and has a route for this pair. nil whenever
+// routing is disabled or the lookup failed — informational only, never used
+// for fare or negotiation bounds.
+type RouteInfo struct {
+	DistanceKM      float64
+	DurationMinutes int
+	DurationSeconds *int
+	Geometry        *string
 }
 
 // PackagesService charges a ride credit when a fare is agreed and refunds it
@@ -92,19 +115,22 @@ func (s *Service) SetFareRepository(repo FareConfigRepository) {
 }
 
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
-func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64, idempotencyKey string) (*Ride, error) {
+// The returned RouteInfo is informational only (real-road distance/duration/
+// polyline for the app to draw) — nil whenever routing (OSRM) is disabled or
+// the lookup failed; it never affects the fare that gets stored on the ride.
+func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64, idempotencyKey string) (*Ride, *RouteInfo, error) {
 	// A cancellation ban blocks BOOKING, not the account. The user keeps their
 	// trips, profile and support access — they just can't request a ride until
 	// the window elapses. Barring them at login instead (which is what we used
 	// to do) told them nothing and left them with a dead app.
 	if err := s.assertCanBook(ctx, customerID); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if idempotencyKey != "" {
 		if existing, err := s.repo.FindRideByIdempotency(ctx, customerID, idempotencyKey); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if existing != nil {
-			return existing, nil
+			return existing, nil, nil
 		}
 	}
 	// ── Concurrent-creation guard ─────────────────────────────────────────────
@@ -114,23 +140,23 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 	createLockKey := rkeys.K.CustomerCreatingRide(customerID)
 	locked, err := s.redis.SetNX(ctx, createLockKey, "1", 10*time.Second).Result()
 	if err != nil {
-		return nil, fmt.Errorf("ride: acquire create lock: %w", err)
+		return nil, nil, fmt.Errorf("ride: acquire create lock: %w", err)
 	}
 	if !locked {
-		return nil, apperrors.ErrRideAlreadyActive
+		return nil, nil, apperrors.ErrRideAlreadyActive
 	}
 	defer s.redis.Del(ctx, createLockKey)
 
 	// Also reject immediately if the customer already has a live ride in Redis.
 	// This catches the case where the client somehow bypasses the UI guard.
 	if existing, _ := s.redis.Get(ctx, rkeys.K.CustomerActiveRide(customerID)).Result(); existing != "" {
-		return nil, apperrors.ErrRideAlreadyActive
+		return nil, nil, apperrors.ErrRideAlreadyActive
 	}
 
 	key := rkeys.K.CustomerDailyCancel(customerID)
 	count, _ := s.redis.Get(ctx, key).Int()
 	if count >= s.cfg.Customer.CancelSuspendThreshold {
-		return nil, apperrors.ErrCustomerSuspended
+		return nil, nil, apperrors.ErrCustomerSuspended
 	}
 
 	var estimatedFare *float64
@@ -138,7 +164,7 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 	if s.fareRepo != nil {
 		pricingCfg, err := s.fareRepo.GetActiveConfig(ctx, transportType)
 		if err != nil {
-			return nil, fmt.Errorf("pricing config unavailable: %w", err)
+			return nil, nil, fmt.Errorf("pricing config unavailable: %w", err)
 		}
 		pricingConfigID = &pricingCfg.ID
 		if distanceKM != nil {
@@ -149,7 +175,7 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 
 	r, err := s.repo.CreateRide(ctx, customerID, transportType, pickupAddr, destAddr, pickup, dest, initialFare, estimatedFare, pricingConfigID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// 15-minute TTL: matching takes at most MaxAttempts × TimeoutSeconds (≈45s).
@@ -177,7 +203,25 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 	if err := s.repo.SaveRideIdempotency(ctx, customerID, idempotencyKey, r.ID); err != nil {
 		s.log.Warn().Err(err).Str("ride_id", r.ID).Msg("ride: failed to save idempotency key")
 	}
-	return r, nil
+
+	// Real-road route for the response only (map drawing / a precise ETA) —
+	// never used for fare or negotiation bounds, which stick to the
+	// client-supplied distanceKM exactly as before this feature. Only
+	// attempted when a routing backend is actually configured, so a disabled
+	// OSRM adds zero Redis/DB calls here — byte-for-byte today's behavior.
+	// Best-effort: a lookup failure is logged and the ride is still returned;
+	// it must never block or fail ride creation.
+	var routeInfo *RouteInfo
+	if s.routes != nil && s.routes.RoutingEnabled() {
+		dKM, dMin, dSec, geom, found, rerr := s.routes.GetRouteDetails(ctx, pickup.Lat, pickup.Lng, dest.Lat, dest.Lng, transportType)
+		if rerr != nil {
+			s.log.Warn().Err(rerr).Str("ride_id", r.ID).Msg("ride: route lookup failed at creation — response will omit route info")
+		} else if found {
+			routeInfo = &RouteInfo{DistanceKM: dKM, DurationMinutes: dMin, DurationSeconds: dSec, Geometry: geom}
+		}
+	}
+
+	return r, routeInfo, nil
 }
 
 // GetRide retrieves a ride by ID for a customer.

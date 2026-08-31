@@ -16,6 +16,11 @@ import (
 
 type RouteService interface {
 	GetRouteMetrics(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, found bool, err error)
+	// GetRouteDetails is GetRouteMetrics plus the additive real-road fields
+	// (precise duration in seconds + encoded polyline geometry), populated
+	// only when a routing backend (OSRM) is configured and has a route for
+	// this pair. Both nil when only the Haversine estimate is available.
+	GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error)
 }
 
 type Handler struct {
@@ -72,7 +77,7 @@ func (h *Handler) FareEstimate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	distanceKM, durationMinutes, found, err := h.routeSvc.GetRouteMetrics(r.Context(), pickupLat, pickupLng, destLat, destLng, transportType)
+	distanceKM, durationMinutes, durationSeconds, geometry, found, err := h.routeSvc.GetRouteDetails(r.Context(), pickupLat, pickupLng, destLat, destLng, transportType)
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -93,7 +98,7 @@ func (h *Handler) FareEstimate(w http.ResponseWriter, r *http.Request) {
 		note = fmt.Sprintf("Night surcharge of %.0f%% applies after %02d:00", cfg.NightSurchargePct*100, cfg.NightStartHour)
 	}
 
-	respond.OK(w, map[string]any{
+	resp := map[string]any{
 		"transport_type":       transportType,
 		"distance_km":          distanceKM,
 		"duration_minutes":     durationMinutes,
@@ -106,7 +111,18 @@ func (h *Handler) FareEstimate(w http.ResponseWriter, r *http.Request) {
 		"waiting_free_minutes": cfg.WaitingFreeMinutes,
 		"cancellation_fee_rwf": cfg.CancellationFeeRWF,
 		"note":                 note,
-	})
+	}
+	// Additive: only present when a routing backend (OSRM) computed a
+	// real-road route for this pair. Absent (not null) when only the
+	// Haversine estimate is available, so old app versions that don't expect
+	// these keys are unaffected either way.
+	if durationSeconds != nil {
+		resp["route_duration_seconds"] = *durationSeconds
+	}
+	if geometry != nil {
+		resp["route_geometry"] = *geometry
+	}
+	respond.OK(w, resp)
 }
 
 func (h *Handler) ListActivePricing(w http.ResponseWriter, r *http.Request) {

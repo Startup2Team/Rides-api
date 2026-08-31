@@ -65,7 +65,7 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 	pickup := geo.Point{Lat: body.PickupLat, Lng: body.PickupLng}
 	dest := geo.Point{Lat: body.DestLat, Lng: body.DestLng}
 
-	ride, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare, body.DistanceKM, body.IdempotencyKey)
+	ride, routeInfo, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare, body.DistanceKM, body.IdempotencyKey)
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -80,13 +80,28 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 		giveUpSeconds = 90
 	}
 
-	respond.Created(w, map[string]interface{}{
+	resp := map[string]interface{}{
 		"ride_id":            ride.ID,
 		"status":             ride.Status,
 		"ride_version":       ride.RideVersion,
 		"give_up_seconds":    giveUpSeconds,
 		"search_deadline_at": ride.CreatedAt.Add(time.Duration(giveUpSeconds) * time.Second).UTC().Format(time.RFC3339),
-	})
+	}
+	// Additive: only present when a routing backend (OSRM) computed a
+	// real-road route for this pickup→destination pair. Informational only —
+	// draw-the-path / precise-ETA fields, never used to derive the fare.
+	if routeInfo != nil {
+		resp["route_distance_km"] = routeInfo.DistanceKM
+		resp["route_duration_minutes"] = routeInfo.DurationMinutes
+		if routeInfo.DurationSeconds != nil {
+			resp["route_duration_seconds"] = *routeInfo.DurationSeconds
+		}
+		if routeInfo.Geometry != nil {
+			resp["route_geometry"] = *routeInfo.Geometry
+		}
+	}
+
+	respond.Created(w, resp)
 }
 
 // GET /api/v1/customer/rides/:ride_id

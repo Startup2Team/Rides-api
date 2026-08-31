@@ -45,6 +45,7 @@ type Config struct {
 	Firebase  FirebaseConfig
 	Telegram  TelegramConfig
 	GMaps     GoogleMapsConfig
+	Routing   RoutingConfig
 	MoMo      MoMoConfig
 	Storage   StorageConfig
 	Matching  MatchingConfig
@@ -209,6 +210,20 @@ type TelegramConfig struct {
 
 type GoogleMapsConfig struct {
 	APIKey string
+}
+
+// RoutingConfig configures the optional real-road routing backend (OSRM).
+type RoutingConfig struct {
+	// OSRMURL is the base URL of a self-hosted OSRM instance (e.g.
+	// http://osrm:5000 — no trailing slash needed). OSRM_URL env var.
+	//
+	// Empty (the default) turns real-road routing OFF entirely: route
+	// lookups fall back to the existing Haversine + road-factor estimate,
+	// exactly as before this feature existed. Routing is an optional
+	// accelerant, never a hard dependency — an OSRM outage or missing config
+	// must never fail a ride or a fare (see TEAM_CONTEXT.md platform
+	// invariants).
+	OSRMURL string
 }
 
 type MoMoConfig struct {
@@ -428,6 +443,7 @@ func Load() (*Config, error) {
 	cfg.Telegram.DigestTimezone = getEnv("DIGEST_TIMEZONE", cfg.Timezone)
 
 	cfg.GMaps.APIKey = getEnv("GOOGLE_MAPS_API_KEY", "")
+	cfg.Routing.OSRMURL = getEnv("OSRM_URL", "")
 
 	cfg.MoMo.APIKey = getEnv("MOMO_API_KEY", "")
 	cfg.MoMo.SubscriptionKey = getEnv("MOMO_SUBSCRIPTION_KEY", "")

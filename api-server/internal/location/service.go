@@ -13,6 +13,7 @@ import (
 
 	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/middleware"
+	"github.com/workspace/ride-platform/internal/routing"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
@@ -34,6 +35,12 @@ type RouteResult struct {
 	DurationMinutes int     `json:"duration_minutes"`
 	AvgFareRWF      *int    `json:"avg_fare_rwf,omitempty"`
 	UseCount        int     `json:"use_count"`
+	// DurationSeconds and Geometry are additive: populated only when this
+	// route was computed by OSRM (real-road). Both nil for every
+	// Haversine-estimated or pre-OSRM cached route — callers must tolerate
+	// nil, never assume they're set.
+	DurationSeconds *int    `json:"duration_seconds,omitempty"`
+	Geometry        *string `json:"geometry,omitempty"`
 }
 
 // Landmark is a pre-seeded Kigali destination.
@@ -60,14 +67,31 @@ type SavedLocation struct {
 
 // Service handles route cache, landmarks, saved locations, suggestions, mode switching.
 type Service struct {
-	db    *pgxpool.Pool
-	redis goredis.UniversalClient
-	cfg   *config.Config
-	log   zerolog.Logger
+	db     *pgxpool.Pool
+	redis  goredis.UniversalClient
+	cfg    *config.Config
+	log    zerolog.Logger
+	router *routing.Client
 }
 
 func NewService(db *pgxpool.Pool, rdb goredis.UniversalClient, cfg *config.Config, log zerolog.Logger) *Service {
 	return &Service{db: db, redis: rdb, cfg: cfg, log: log}
+}
+
+// SetRoutingClient wires the optional OSRM client. Never called (or called
+// with a Client whose Enabled() is false when OSRM_URL is unset) means every
+// route lookup keeps using today's Haversine estimate — see RoutingEnabled.
+func (s *Service) SetRoutingClient(c *routing.Client) {
+	s.router = c
+}
+
+// RoutingEnabled reports whether a real-road routing backend (OSRM) is
+// configured. Callers that would otherwise skip a route lookup entirely
+// (e.g. ride creation, which never looked one up before this feature)
+// consult this first, so a disabled/absent OSRM adds zero extra Redis/DB
+// calls — byte-for-byte today's behavior when the feature flag is off.
+func (s *Service) RoutingEnabled() bool {
+	return s.router != nil && s.router.Enabled()
 }
 
 // ── Route Cache ───────────────────────────────────────────────────────────
@@ -92,7 +116,87 @@ func (s *Service) GetRoute(ctx context.Context, pickupLat, pickupLng, destLat, d
 		return result, nil
 	}
 
+	// Total cache miss (neither Redis nor Postgres has this corridor yet). If a
+	// routing backend is configured, compute the real-road route once and cache
+	// it like any other route — from then on this corridor is served straight
+	// from cache. Any OSRM failure (down, timeout, no route) is logged and
+	// treated exactly like "no route configured": the caller falls back to the
+	// Haversine estimate. A routing outage must never fail a fare or a ride.
+	if s.RoutingEnabled() {
+		osrmResult, oerr := s.router.Route(ctx,
+			geo.Point{Lat: pickupLat, Lng: pickupLng},
+			geo.Point{Lat: destLat, Lng: destLng},
+		)
+		if oerr != nil {
+			s.log.Warn().Err(oerr).Str("cache_key", cacheKey).Msg("location: OSRM route lookup failed — falling back to haversine estimate")
+		} else {
+			return s.storeOSRMRoute(ctx, cacheKey, pickupLat, pickupLng, destLat, destLng, vehicleType, osrmResult), nil
+		}
+	}
+
 	return nil, nil
+}
+
+// osrmRouteToResult converts a routing.Client route into the RouteResult
+// shape stored in route_cache, applying the same rounding/nil-safety rules
+// regardless of caller. Pure (no I/O) so it's unit-testable without a live
+// Postgres/Redis: durationSeconds rounds to the nearest second,
+// durationMinutes rounds UP from that (never 0 — "1 minute" is the floor, not
+// "same day"), and an empty OSRM geometry becomes a nil pointer rather than a
+// meaningless empty-string polyline.
+func osrmRouteToResult(cacheKey, originHash, destHash string, rr routing.RouteResult) *RouteResult {
+	distanceKM := rr.DistanceMeters / 1000
+	durationSeconds := int(rr.DurationSec + 0.5)
+	durationMinutes := durationSeconds / 60
+	if durationSeconds%60 != 0 {
+		durationMinutes++
+	}
+	if durationMinutes < 1 {
+		durationMinutes = 1
+	}
+
+	var geometry *string
+	if rr.Geometry != "" {
+		g := rr.Geometry
+		geometry = &g
+	}
+
+	return &RouteResult{
+		CacheKey: cacheKey, OriginGeohash: originHash, DestGeohash: destHash,
+		DistanceKM: distanceKM, DurationMinutes: durationMinutes,
+		DurationSeconds: &durationSeconds, Geometry: geometry, UseCount: 1,
+	}
+}
+
+// storeOSRMRoute persists a fresh OSRM route into route_cache + Redis, exactly
+// like UpsertRoute does for a client-supplied route, and returns the
+// RouteResult to hand straight back to the caller. A Postgres write failure is
+// logged and swallowed — the caller already has the route from OSRM, so it
+// should not be denied a response just because the cache write failed; the
+// next lookup for this corridor simply calls OSRM again.
+func (s *Service) storeOSRMRoute(ctx context.Context, cacheKey string, pickupLat, pickupLng, destLat, destLng float64, vehicleType string, rr routing.RouteResult) *RouteResult {
+	originHash := Geohash6(pickupLat, pickupLng)
+	destHash := Geohash6(destLat, destLng)
+	result := osrmRouteToResult(cacheKey, originHash, destHash, rr)
+
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO route_cache (cache_key, origin_geohash, dest_geohash, vehicle_type, distance_km, duration_minutes, duration_seconds, geometry)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (cache_key) DO UPDATE
+		SET distance_km = EXCLUDED.distance_km,
+		    duration_minutes = EXCLUDED.duration_minutes,
+		    duration_seconds = EXCLUDED.duration_seconds,
+		    geometry = EXCLUDED.geometry,
+		    use_count = route_cache.use_count + 1,
+		    last_used_at = NOW()
+	`, cacheKey, originHash, destHash, vehicleType, result.DistanceKM, result.DurationMinutes, *result.DurationSeconds, result.Geometry)
+	if err != nil {
+		s.log.Warn().Err(err).Str("cache_key", cacheKey).Msg("location: failed to persist OSRM route to route_cache")
+	}
+
+	data, _ := json.Marshal(result)
+	s.redis.Set(ctx, rkeys.K.RouteCache(cacheKey), string(data), routeCacheTTL)
+	return result
 }
 
 // GetRouteMetrics returns route distance/duration for fare calculations.
@@ -100,36 +204,62 @@ func (s *Service) GetRoute(ctx context.Context, pickupLat, pickupLng, destLat, d
 // Haversine straight-line estimate (+20% road-factor) so the fare handler can
 // always return a result. The caller receives found=true in both cases; the
 // haversine path is flagged in the log for observability only.
+//
+// This is GetRouteDetails with the additive OSRM-only fields dropped — kept
+// as its own method (rather than changing its signature) because it's part of
+// fare.Handler.RouteService and callers outside this package rely on the
+// exact 4-value return.
 func (s *Service) GetRouteMetrics(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (float64, int, bool, error) {
+	distanceKM, durationMinutes, _, _, found, err := s.GetRouteDetails(ctx, pickupLat, pickupLng, destLat, destLng, vehicleType)
+	return distanceKM, durationMinutes, found, err
+}
+
+// GetRouteDetails is GetRouteMetrics plus the additive real-road fields
+// (precise duration in seconds + encoded polyline geometry) for callers that
+// draw the route or show an exact ETA — ride creation, fare estimate. Falls
+// back exactly like GetRouteMetrics: a cache miss with no routing backend
+// configured returns the Haversine estimate with durationSeconds/geometry
+// left nil. found is always true, mirroring GetRouteMetrics's contract that
+// callers can always render a fare estimate.
+func (s *Service) GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error) {
 	result, err := s.GetRoute(ctx, pickupLat, pickupLng, destLat, destLng, vehicleType)
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, nil, nil, false, err
 	}
 	if result != nil {
-		return result.DistanceKM, result.DurationMinutes, true, nil
+		return result.DistanceKM, result.DurationMinutes, result.DurationSeconds, result.Geometry, true, nil
 	}
 
-	// No cached route — compute a Haversine estimate so the fare endpoint always
-	// responds. Apply a 1.25× road-factor (straight-line underestimates road
-	// distance by ~20–25% in Kigali's hilly terrain).
-	straightKM := geo.DistanceKM(
-		geo.Point{Lat: pickupLat, Lng: pickupLng},
-		geo.Point{Lat: destLat, Lng: destLng},
-	)
-	const roadFactor = 1.25
-	estimatedKM := straightKM * roadFactor
-	// Assume 30 km/h average speed in Kigali traffic + 3 min fixed overhead.
-	estimatedMin := int(estimatedKM/30*60) + 3
-	if estimatedMin < 1 {
-		estimatedMin = 1
-	}
+	// No cached/OSRM route — compute a Haversine estimate so the caller always
+	// gets a result. Unchanged formula/behavior from before OSRM existed —
+	// see haversineEstimate.
+	straightKM, estimatedKM, estimatedMin := haversineEstimate(pickupLat, pickupLng, destLat, destLng)
 	s.log.Debug().
 		Float64("straight_km", straightKM).
 		Float64("estimated_km", estimatedKM).
 		Str("vehicle_type", vehicleType).
 		Msg("location: route cache miss — using haversine estimate")
 
-	return estimatedKM, estimatedMin, true, nil
+	return estimatedKM, estimatedMin, nil, nil, true, nil
+}
+
+// haversineEstimate is the pre-OSRM fallback: a straight-line distance with a
+// 1.25× road-factor (straight-line underestimates road distance by ~20–25% in
+// Kigali's hilly terrain) and a 30 km/h average-speed + 3 min fixed-overhead
+// duration guess. Pure (no I/O) so it's independently unit-testable; used by
+// GetRouteDetails whenever neither the cache nor OSRM has a route.
+func haversineEstimate(pickupLat, pickupLng, destLat, destLng float64) (straightKM, estimatedKM float64, estimatedMin int) {
+	straightKM = geo.DistanceKM(
+		geo.Point{Lat: pickupLat, Lng: pickupLng},
+		geo.Point{Lat: destLat, Lng: destLng},
+	)
+	const roadFactor = 1.25
+	estimatedKM = straightKM * roadFactor
+	estimatedMin = int(estimatedKM/30*60) + 3
+	if estimatedMin < 1 {
+		estimatedMin = 1
+	}
+	return straightKM, estimatedKM, estimatedMin
 }
 
 // UpsertRoute stores a route result provided by the mobile app.
@@ -662,9 +792,9 @@ func buildCacheKey(pickupLat, pickupLng, destLat, destLng float64, vehicleType s
 func (s *Service) getRouteFromDB(ctx context.Context, cacheKey string) (*RouteResult, error) {
 	r := &RouteResult{}
 	err := s.db.QueryRow(ctx, `
-		SELECT cache_key, origin_geohash, dest_geohash, distance_km, duration_minutes, avg_fare_rwf, use_count
+		SELECT cache_key, origin_geohash, dest_geohash, distance_km, duration_minutes, avg_fare_rwf, use_count, duration_seconds, geometry
 		FROM route_cache WHERE cache_key = $1
-	`, cacheKey).Scan(&r.CacheKey, &r.OriginGeohash, &r.DestGeohash, &r.DistanceKM, &r.DurationMinutes, &r.AvgFareRWF, &r.UseCount)
+	`, cacheKey).Scan(&r.CacheKey, &r.OriginGeohash, &r.DestGeohash, &r.DistanceKM, &r.DurationMinutes, &r.AvgFareRWF, &r.UseCount, &r.DurationSeconds, &r.Geometry)
 	return r, err
 }
 
