@@ -17,9 +17,12 @@ import (
 type RouteService interface {
 	GetRouteMetrics(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, found bool, err error)
 	// GetRouteDetails is GetRouteMetrics plus the additive real-road fields
-	// (precise duration in seconds + encoded polyline geometry), populated
-	// only when a routing backend (OSRM) is configured and has a route for
-	// this pair. Both nil when only the Haversine estimate is available.
+	// (precise duration in seconds + encoded polyline geometry). durationSeconds
+	// is the authoritative "this is a real OSRM route" signal: it is set only
+	// when OSRM actually computed a route for this pair (never on Haversine
+	// fallback, config-off, timeout, or NoRoute) and nil otherwise — geometry
+	// can independently be nil even on a real route (e.g. origin==destination),
+	// so callers must gate on durationSeconds, not geometry.
 	GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error)
 }
 
@@ -112,10 +115,12 @@ func (h *Handler) FareEstimate(w http.ResponseWriter, r *http.Request) {
 		"cancellation_fee_rwf": cfg.CancellationFeeRWF,
 		"note":                 note,
 	}
-	// Additive: only present when a routing backend (OSRM) computed a
-	// real-road route for this pair. Absent (not null) when only the
-	// Haversine estimate is available, so old app versions that don't expect
-	// these keys are unaffected either way.
+	// Additive: present only when OSRM returned a real road route; absent
+	// otherwise (OSRM off, timeout, NoRoute, or Haversine fallback). Old app
+	// versions that don't expect these keys are unaffected either way.
+	// distance_km/duration_minutes above stay best-available (real route when
+	// found, Haversine estimate otherwise) — that's the intended fare-estimate
+	// behavior and is unchanged here.
 	if durationSeconds != nil {
 		resp["route_duration_seconds"] = *durationSeconds
 	}

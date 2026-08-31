@@ -128,6 +128,10 @@ type TableResult struct {
 // against a pickup point by real road ETA instead of straight-line distance.
 // Kept to a single Redis-cheap HTTP call so it's safe to use from a matching
 // hot loop; callers still must not call it more than once per ranking pass.
+//
+// Intentional scaffolding: no caller yet — this is wired up by the upcoming
+// Phase 5 batched-matching work (ranking candidate drivers to a pickup by
+// real road ETA), not dead code.
 func (c *Client) Table(ctx context.Context, sources, dests []geo.Point) (TableResult, error) {
 	if !c.Enabled() {
 		return TableResult{}, fmt.Errorf("routing: OSRM not configured")

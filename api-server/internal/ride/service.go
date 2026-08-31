@@ -42,19 +42,28 @@ type RouteFareRecorder interface {
 	// disabled/absent OSRM adds zero extra Redis/DB calls to ride creation —
 	// byte-for-byte today's behavior when the feature flag is off.
 	RoutingEnabled() bool
-	// GetRouteDetails returns the real-road distance/duration/geometry for a
-	// pickup→destination pair when OSRM has (or can compute) a route, purely
-	// to enrich the ride-creation response for map drawing / an accurate ETA.
-	// It does NOT feed the fare/negotiation math — that still trusts the
-	// client-supplied distance_km exactly as before this feature, so this
-	// call can never change money committed on a ride.
+	// GetRouteDetails returns the best-available distance/duration for a
+	// pickup→destination pair — a real-road OSRM route when one was computed,
+	// else a Haversine estimate — purely to enrich the ride-creation response
+	// for map drawing / an accurate ETA. It does NOT feed the fare/negotiation
+	// math — that still trusts the client-supplied distance_km exactly as
+	// before this feature, so this call can never change money committed on a
+	// ride.
+	//
+	// durationSeconds is the authoritative "this came from a real OSRM route"
+	// signal: it is set on every OSRM-computed route (including the
+	// degenerate zero-distance case) and nil on every Haversine-fallback
+	// result. geometry is NOT a safe signal on its own — OSRM can return a
+	// real route with no polyline (e.g. origin == destination) — so callers
+	// must gate on durationSeconds, never on geometry alone.
 	GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error)
 }
 
-// RouteInfo is the real-road route computed at ride creation, when a routing
-// backend (OSRM) is configured and has a route for this pair. nil whenever
-// routing is disabled or the lookup failed — informational only, never used
-// for fare or negotiation bounds.
+// RouteInfo is the real-road route computed at ride creation. Only ever
+// constructed by realRouteInfo when OSRM actually produced a real route for
+// this pair — nil whenever routing is disabled, the lookup failed, or it fell
+// back to the Haversine estimate. Informational only, never used for fare or
+// negotiation bounds.
 type RouteInfo struct {
 	DistanceKM      float64
 	DurationMinutes int
@@ -211,17 +220,44 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 	// OSRM adds zero Redis/DB calls here — byte-for-byte today's behavior.
 	// Best-effort: a lookup failure is logged and the ride is still returned;
 	// it must never block or fail ride creation.
+	//
+	// GetRouteDetails' found is always true (it falls back to a Haversine
+	// estimate rather than reporting "not found"), so routeInfo must NOT be
+	// built off found alone — that would silently mislabel a Haversine
+	// straight-line estimate as a real-road route. realRouteInfo gates on the
+	// actual real-route signal instead.
 	var routeInfo *RouteInfo
 	if s.routes != nil && s.routes.RoutingEnabled() {
 		dKM, dMin, dSec, geom, found, rerr := s.routes.GetRouteDetails(ctx, pickup.Lat, pickup.Lng, dest.Lat, dest.Lng, transportType)
 		if rerr != nil {
 			s.log.Warn().Err(rerr).Str("ride_id", r.ID).Msg("ride: route lookup failed at creation — response will omit route info")
 		} else if found {
-			routeInfo = &RouteInfo{DistanceKM: dKM, DurationMinutes: dMin, DurationSeconds: dSec, Geometry: geom}
+			routeInfo = realRouteInfo(dKM, dMin, dSec, geom)
 		}
 	}
 
 	return r, routeInfo, nil
+}
+
+// realRouteInfo builds a RouteInfo from a GetRouteDetails result, but ONLY
+// when OSRM actually computed a real-road route. durationSeconds is the
+// authoritative signal (see RouteFareRecorder.GetRouteDetails' doc comment):
+// it is set on every OSRM-computed route, including the degenerate
+// zero-distance case, and nil on every Haversine-fallback result — geometry
+// alone is not safe to key off, since a real route can legitimately carry no
+// polyline. Returns nil for OSRM-off, timeout, NoRoute, or any
+// Haversine-fallback result, so callers never mislabel a straight-line
+// estimate as a real-road route.
+func realRouteInfo(distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string) *RouteInfo {
+	if durationSeconds == nil {
+		return nil
+	}
+	return &RouteInfo{
+		DistanceKM:      distanceKM,
+		DurationMinutes: durationMinutes,
+		DurationSeconds: durationSeconds,
+		Geometry:        geometry,
+	}
 }
 
 // GetRide retrieves a ride by ID for a customer.

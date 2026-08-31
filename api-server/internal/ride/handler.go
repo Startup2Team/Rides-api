@@ -87,9 +87,11 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 		"give_up_seconds":    giveUpSeconds,
 		"search_deadline_at": ride.CreatedAt.Add(time.Duration(giveUpSeconds) * time.Second).UTC().Format(time.RFC3339),
 	}
-	// Additive: only present when a routing backend (OSRM) computed a
-	// real-road route for this pickup→destination pair. Informational only —
-	// draw-the-path / precise-ETA fields, never used to derive the fare.
+	// Additive: present ONLY when OSRM returned a real road route for this
+	// pickup→destination pair; absent entirely on OSRM-off, timeout, NoRoute,
+	// or any Haversine-fallback result (routeInfo is nil in all those cases —
+	// see realRouteInfo in service.go). Informational only — draw-the-path /
+	// precise-ETA fields, never used to derive the fare.
 	if routeInfo != nil {
 		resp["route_distance_km"] = routeInfo.DistanceKM
 		resp["route_duration_minutes"] = routeInfo.DurationMinutes

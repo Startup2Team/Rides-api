@@ -39,6 +39,14 @@ type RouteResult struct {
 	// route was computed by OSRM (real-road). Both nil for every
 	// Haversine-estimated or pre-OSRM cached route — callers must tolerate
 	// nil, never assume they're set.
+	//
+	// DurationSeconds is the authoritative "this is a real OSRM route" signal
+	// for callers deciding whether to expose route_* fields: it is always set
+	// by osrmRouteToResult, including the degenerate zero-distance case, and
+	// always nil on the Haversine path. Geometry is NOT a safe signal on its
+	// own — OSRM can return a real route with an empty polyline (e.g.
+	// origin == destination), which osrmRouteToResult stores as nil Geometry
+	// even though the route is real. Gate on DurationSeconds, not Geometry.
 	DurationSeconds *int    `json:"duration_seconds,omitempty"`
 	Geometry        *string `json:"geometry,omitempty"`
 }
@@ -218,9 +226,12 @@ func (s *Service) GetRouteMetrics(ctx context.Context, pickupLat, pickupLng, des
 // (precise duration in seconds + encoded polyline geometry) for callers that
 // draw the route or show an exact ETA — ride creation, fare estimate. Falls
 // back exactly like GetRouteMetrics: a cache miss with no routing backend
-// configured returns the Haversine estimate with durationSeconds/geometry
-// left nil. found is always true, mirroring GetRouteMetrics's contract that
-// callers can always render a fare estimate.
+// configured (or any OSRM failure) returns the Haversine estimate with
+// durationSeconds/geometry left nil. found is always true, mirroring
+// GetRouteMetrics's contract that callers can always render a fare estimate
+// — callers must NOT treat found as "this is a real OSRM route"; gate route_*
+// display fields on durationSeconds != nil instead (see RouteResult's doc
+// comment for why geometry alone isn't a safe signal).
 func (s *Service) GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error) {
 	result, err := s.GetRoute(ctx, pickupLat, pickupLng, destLat, destLng, vehicleType)
 	if err != nil {
