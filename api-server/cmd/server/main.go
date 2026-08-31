@@ -268,8 +268,13 @@ func main() {
 	locSvc := location.NewService(db, rdb, cfg, log)
 	// Real-road routing (OSRM) is optional — Client.Enabled() is false and
 	// every route lookup keeps using the Haversine estimate whenever OSRM_URL
-	// is unset. See config.RoutingConfig.
-	locSvc.SetRoutingClient(routing.New(cfg, log))
+	// is unset. See config.RoutingConfig. Shared between location (route/fare
+	// lookups) and matching (candidate ranking) — one client, two independent
+	// consumers; matching also requires MATCH_USE_ROUTED_ETA=true (off by
+	// default) on top of OSRM being enabled.
+	routingClient := routing.New(cfg, log)
+	locSvc.SetRoutingClient(routingClient)
+	engine.SetRoutingClient(routingClient)
 
 	// ── New module services ───────────────────────────────────────────────────
 	incidentSvc := incidents.NewService(incidentRepo)

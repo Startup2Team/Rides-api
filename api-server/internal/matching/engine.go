@@ -16,6 +16,7 @@ import (
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/ride"
+	"github.com/workspace/ride-platform/internal/routing"
 	"github.com/workspace/ride-platform/internal/tracking"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
@@ -35,11 +36,16 @@ type rideServiceInterface interface {
 
 // candidate is an enriched driver result from the GEO search.
 type candidate struct {
-	profileID      string
-	userID         string
-	vehicleType    string
-	fcmToken       *string
-	distanceM      float64
+	profileID   string
+	userID      string
+	vehicleType string
+	fcmToken    *string
+	distanceM   float64
+	// lat/lng are the driver's coordinates at search time, kept only to feed
+	// rankByRoutedETA's OSRM Table sources — never used for the band gate,
+	// which stays on distanceM (straight-line, from Redis GEO).
+	lat            float64
+	lng            float64
 	dailyDeclines  int
 	acceptanceRate float64
 	score          float64
@@ -56,6 +62,12 @@ type Engine struct {
 	cfg        *config.Config
 	log        zerolog.Logger
 	rideSvc    rideServiceInterface
+
+	// router is the optional OSRM client. nil (or a Client whose Enabled() is
+	// false, or cfg.Matching.UseRoutedETA=false) means candidate ranking stays
+	// on straight-line distance exactly as before this field existed — see
+	// SetRoutingClient and rankByRoutedETA.
+	router *routing.Client
 
 	// acceptChannels maps rideID → chan bool
 	acceptChannels sync.Map
@@ -83,6 +95,14 @@ func NewEngine(
 		log:        log,
 		rideSvc:    rideSvc,
 	}
+}
+
+// SetRoutingClient wires the optional OSRM client used to rank candidates by
+// real-road ETA (rankByRoutedETA). Never called, or called with a Client whose
+// Enabled() is false, means every search keeps ranking by straight-line
+// distance — identical to location.Service.SetRoutingClient's contract.
+func (e *Engine) SetRoutingClient(c *routing.Client) {
+	e.router = c
 }
 
 // StartSearch kicks off the matching loop for a new ride in a goroutine.
@@ -194,6 +214,11 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 		if err != nil {
 			e.log.Warn().Err(err).Str("ride_id", rideID).Msg("matching: candidate search error")
 		}
+
+		// Re-rank by real-road ETA in place of straight-line distance, if both
+		// OSRM and the flag are on. No-op (candidates keep their straight-line
+		// order) when disabled or on any OSRM failure — see rankByRoutedETA.
+		e.rankByRoutedETA(ctx, rideID, pickup, candidates)
 
 		offeredAnyone := false
 		for _, tierRadius := range tiers {
@@ -588,6 +613,8 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 			vehicleType:    profile.TransportType,
 			fcmToken:       profile.FCMToken,
 			distanceM:      distM,
+			lat:            r.Latitude,
+			lng:            r.Longitude,
 			dailyDeclines:  declines,
 			acceptanceRate: profile.AcceptanceRate,
 			score:          score,
@@ -596,6 +623,76 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 
 	sortCandidates(candidates)
 	return candidates, nil
+}
+
+// rankByRoutedETA re-scores `candidates` by real-road ETA (driver → pickup)
+// from ONE OSRM Table call, in place of the straight-line distance term of
+// the scoring formula, then re-sorts. It never adds, removes, or excludes a
+// candidate, and it never touches distanceM — the band gate in runLoop
+// (c.distanceM > tierRadius) stays straight-line exactly as before. It is
+// pure reordering of who gets offered first.
+//
+// Fail-closed, two independent gates: if e.router is nil/disabled or
+// cfg.Matching.UseRoutedETA is false, this is a no-op and candidates keep
+// today's straight-line order. If the Table call itself errors, times out, or
+// returns a shape that doesn't match the candidate list, this logs and
+// returns without touching a single score — same guarantee. A driver whose
+// OSRM cell is nil (no routable path found) keeps its straight-line score
+// rather than being excluded or forced to the back, so a routing-graph gap
+// never drops an otherwise-eligible driver from the offer order.
+func (e *Engine) rankByRoutedETA(ctx context.Context, rideID string, pickup geo.Point, candidates []*candidate) {
+	if e.router == nil || !e.router.Enabled() || !e.cfg.Matching.UseRoutedETA {
+		return
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	sources := make([]geo.Point, len(candidates))
+	for i, c := range candidates {
+		sources[i] = geo.Point{Lat: c.lat, Lng: c.lng}
+	}
+
+	result, err := e.router.Table(ctx, sources, []geo.Point{pickup})
+	if err != nil {
+		e.log.Warn().Err(err).Str("ride_id", rideID).
+			Msg("matching: OSRM table lookup failed — ranking candidates by straight-line distance")
+		return
+	}
+	if len(result.DurationsSec) != len(candidates) {
+		e.log.Warn().Str("ride_id", rideID).
+			Int("candidates", len(candidates)).Int("rows", len(result.DurationsSec)).
+			Msg("matching: OSRM table row count mismatch — ranking candidates by straight-line distance")
+		return
+	}
+
+	// Normalize against the widest finite ETA OSRM actually returned, mirroring
+	// how straight-line scoring normalizes against the search radius. If every
+	// cell is nil (no route found to the pickup for any candidate), there is
+	// nothing to rank by — leave straight-line scores untouched.
+	maxETA := 0.0
+	for _, row := range result.DurationsSec {
+		if len(row) > 0 && row[0] != nil && *row[0] > maxETA {
+			maxETA = *row[0]
+		}
+	}
+	if maxETA <= 0 {
+		return
+	}
+
+	for i, c := range candidates {
+		row := result.DurationsSec[i]
+		if len(row) == 0 || row[0] == nil {
+			continue
+		}
+		etaSec := *row[0]
+		normalizedETA := math.Min(etaSec, maxETA) / maxETA
+		normalizedDeclines := math.Min(float64(c.dailyDeclines), 10) / 10.0
+		acceptancePenalty := 1.0 - c.acceptanceRate/100.0
+		c.score = (normalizedETA * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
+	}
+
+	sortCandidates(candidates)
 }
 
 // fallbackPostGIS is used on cold start when Redis GEO index is empty.
@@ -639,6 +736,8 @@ func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleT
 			vehicleType:    n.TransportType,
 			fcmToken:       n.FCMToken,
 			distanceM:      n.DistanceM,
+			lat:            n.Lat,
+			lng:            n.Lng,
 			dailyDeclines:  declines,
 			acceptanceRate: n.AcceptanceRate,
 			score:          score,
