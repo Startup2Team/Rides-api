@@ -1,0 +1,90 @@
+# Additive OSRM service — ships Rwanda car routing alongside the existing
+# prod compose project WITHOUT editing docker-compose.prod.yml.
+#
+# Run together with the prod file via TWO -f flags, mirroring the prod
+# invocation used everywhere else on this box (see Rides-api/api-server/
+# deploy/deploy.sh, the `prod)` branch — canonical, do not reconstruct):
+#
+#   cd /opt/rides/Rides-api/api-server
+#   docker compose --env-file .env -f docker-compose.prod.yml \
+#     -f docker-compose.osrm.yml up -d osrm
+#
+# Scoped to the `osrm` service only — does NOT recreate postgres/redis/api/
+# nginx/admin. Project name is the default ("api-server", derived from the
+# directory), same as every other prod invocation that omits -p.
+#
+# ── Network design (verified by read-only inspection of the box, 2026-08-31) ──
+#   - prod `api` (container api-server-api-1) is ONLY on `api-server_default`.
+#     It is NOT on rides-edge.
+#   - staging `api` (container rides-staging-api) is on BOTH
+#     `rides-staging_default` AND `rides-edge`.
+#   - `rides-edge` is the external network already used to let prod's nginx
+#     and staging's api/admin talk across the two separate compose projects
+#     (docker network create rides-edge, done once on the box).
+#
+# So `osrm` joins BOTH `default` (== api-server_default, the prod project's
+# network) AND `rides-edge` (external, shared) — the exact same two-network
+# pattern `nginx` already uses in docker-compose.prod.yml. One osrm container,
+# reachable by the same DNS name `osrm` from BOTH prod api (via
+# api-server_default) and staging api (via rides-edge). No host port, nothing
+# internet-facing, no per-env duplication.
+#
+# ── Shared instance trade-off (flagging per TEAM_CONTEXT coupling rule) ──
+# ONE osrm instance serves BOTH prod and staging. OSRM here is read-only/
+# stateless (a routing engine over a static Rwanda extract — no writes, no
+# PII, no per-request persistence), so sharing it does NOT recreate the kind
+# of coupling that caused the 2026-08-15 outage (that was containers/volumes
+# recreated under the wrong compose project, i.e. mutable state). If strict
+# prod/staging isolation is preferred instead, duplicate this file with a
+# distinct volume path, run it under `-p rides-staging`, and attach it only
+# to `rides-staging_default` — but that doubles the RAM cost (2 x mem_limit)
+# on a box that has ~900Mi free / 2.5Gi available right now, so it is not the
+# default recommendation.
+
+services:
+  osrm:
+    # Verify this is still a valid/current tag on Docker Hub before pulling —
+    # NOT confirmed live from this session (no internet access here). Pin to
+    # whatever the current stable osrm-backend release tag is; do not use
+    # `:latest` so the running image is reproducible and rollback-able like
+    # every other image on this box.
+    image: osrm/osrm-backend:v5.25.0
+    restart: always
+    command: >-
+      osrm-routed --algorithm mld /data/rwanda-latest.osrm
+    volumes:
+      # Prepared once by deploy/osrm-prep.sh (osrm-extract -> osrm-partition ->
+      # osrm-customize). Read-only: this container only serves, never writes.
+      - /opt/rides/osrm-data/rwanda:/data:ro
+    # Hard cap. Rwanda is a small extract and MLD serving is light, but this
+    # box has ~900Mi free / 2.5Gi available (buff/cache) with prod + staging
+    # already running (~1.3Gi used). 1g leaves headroom for postgres/redis/
+    # api/nginx/admin x2. Raise only with a measured reason.
+    mem_limit: 1g
+    mem_reservation: 256m
+    # No `ports:` — deliberately NOT published to the host or the internet.
+    # OSRM ships with no auth, so it must not be host- or internet-reachable.
+    # Reachability is ONLY via the two docker networks below, container-to-
+    # container — stricter than "bind 127.0.0.1" (which still opens a host
+    # port reachable via SSH tunnel). There is no host port at all here.
+    healthcheck:
+      # TCP-only check (the osrm-backend image has bash but not curl/wget) —
+      # proves the port is listening, NOT that routing actually works. Prove
+      # routing with the curl-via-docker-exec command in OSRM_DEPLOY.md
+      # step 5 after `up`.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/5000 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - default    # == api-server_default -> reachable by prod `api` as http://osrm:5000
+      - rides-edge # external, shared with staging -> reachable by `rides-staging-api` as http://osrm:5000
+
+networks:
+  # Already created on the box (`docker network create rides-edge`) and
+  # already declared in docker-compose.prod.yml. Redeclared here so this file
+  # is self-contained if ever combined differently; identical external
+  # declarations across merged compose files do not conflict.
+  rides-edge:
+    external: true
