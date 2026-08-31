@@ -254,6 +254,21 @@ type updateCustomerLocationRequest struct {
 	Heading  *float64 `json:"heading"   validate:"omitempty,gte=0,lte=360"`
 }
 
+// sanitizeOptionalTelemetry nils out an out-of-range heading/speed so a bad
+// OPTIONAL field can't fail validation and reject the whole update. Phones
+// report coords.heading/speed as -1 — a number, not null — when the
+// course/speed is unknown (stationary, coarse GPS); forwarding that -1 would
+// otherwise 400 the request and silently drop the rider's live lat/lng. Lat/Lng
+// are still validated by the caller after this runs.
+func (b *updateCustomerLocationRequest) sanitizeOptionalTelemetry() {
+	if b.Heading != nil && (*b.Heading < 0 || *b.Heading > 360) {
+		b.Heading = nil
+	}
+	if b.SpeedKMH != nil && (*b.SpeedKMH < 0 || *b.SpeedKMH > 300) {
+		b.SpeedKMH = nil
+	}
+}
+
 // POST /api/v1/rides/{id}/customer-location
 // Customer publishes their live GPS position, relayed to the assigned driver.
 // Whole-trip sharing: only accepted while the ride is in an active status
@@ -267,6 +282,10 @@ func (h *Handler) UpdateCustomerLocation(w http.ResponseWriter, r *http.Request)
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
+	// Drop out-of-range optional telemetry (e.g. the -1 "unknown" heading/speed
+	// phones report) BEFORE validation, so a bad optional field never 400s the
+	// whole update and discards the essential lat/lng. See method doc.
+	body.sanitizeOptionalTelemetry()
 	if err := validate.Struct(body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
 		return
