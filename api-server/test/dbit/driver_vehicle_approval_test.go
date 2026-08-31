@@ -6,17 +6,39 @@ import (
 	"context"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/workspace/ride-platform/config"
 	"github.com/workspace/ride-platform/internal/admin"
+	"github.com/workspace/ride-platform/internal/analytics"
 	"github.com/workspace/ride-platform/internal/auth"
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/pkg/documents"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
+	rkeys "github.com/workspace/ride-platform/pkg/redis"
 )
+
+// newDriverServiceWithRedis builds a driver.Service against the real
+// Postgres pool AND a real (miniredis-backed) Redis client. SetAvailability's
+// online transition needs a working Redis client (DriverState/geo-index
+// writes, cooldown/grace-period keys) and a working analytics.Service
+// (driver.went_online publish) — unlike the nil-redis/nil-analytics
+// driverSvc the other tests in this file use, which only ever exercise
+// Postgres-only paths (ActivateVehicle, UploadDocument) that never reach
+// SetAvailability's online branch.
+func newDriverServiceWithRedis(t *testing.T) (*driver.Service, *goredis.Client) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { rdb.Close() })
+	driverRepo := driver.NewRepository(pool)
+	ana := analytics.NewService(pool, rdb, zerolog.Nop())
+	return driver.NewService(driverRepo, rdb, ana, &config.Config{}, zerolog.Nop()), rdb
+}
 
 // Per-vehicle approval (migration 089). These are the tests
 // internal/driver's unit suite can't be — driver.Repository is tied directly
@@ -241,4 +263,171 @@ func TestAdminApproveVehicle_WrongDriver_NotFound(t *testing.T) {
 	err := adminSvc.ApproveVehicle(ctx, profileA.ID, vehicleB.ID, approverID)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, apperrors.ErrNotFound)
+}
+
+// ── SetAvailability: the go-online counterpart of ActivateVehicle's gate ──
+//
+// ActivateVehicle's own gate (TestActivateVehicle_UnapprovedVehicle_Rejected
+// above) only blocks a driver from SWITCHING onto an unapproved vehicle.
+// SetAvailability needs its OWN copy of the same check because a driver can
+// already be online with a vehicle active when it is (re)opened for review
+// (UploadDocument -> reopenForReview's per-vehicle scoping), then go
+// offline/online again without ever calling ActivateVehicle at all.
+
+// TestSetAvailability_ActiveVehiclePending_Rejected proves the go-online-time
+// half of the gate: an APPROVED driver whose ACTIVE vehicle has been sent
+// back to PENDING_REVIEW (e.g. by a scoped reopen) must not be able to go
+// online on it.
+func TestSetAvailability_ActiveVehiclePending_Rejected(t *testing.T) {
+	ctx := context.Background()
+	driverRepo := driver.NewRepository(pool)
+	adminSvc := admin.NewService(pool, zerolog.Nop())
+
+	userID, _, vehicle1 := setUpApprovedDriverWithOneVehicle(t, ctx, driverRepo, adminSvc, "goonline-pending")
+
+	// Vehicle #1 (the active one) is sent back to PENDING_REVIEW — e.g. an
+	// admin's routine audit, or a scoped document reopen — while the driver
+	// profile itself stays APPROVED (per-vehicle review is independent of the
+	// driver-level status).
+	require.NoError(t, driverRepo.SetVehicleApprovalStatus(ctx, vehicle1.ID, driver.VehicleStatusPendingReview, nil))
+
+	driverSvc, _ := newDriverServiceWithRedis(t)
+	err := driverSvc.SetAvailability(ctx, userID, true)
+	require.Error(t, err)
+	appErr, ok := err.(*apperrors.AppError)
+	require.True(t, ok)
+	assert.Equal(t, "VEHICLE_NOT_APPROVED", appErr.Code)
+	assert.Equal(t, 409, appErr.StatusCode)
+
+	after, err := driverRepo.FindProfileByUserID(ctx, userID)
+	require.NoError(t, err)
+	assert.False(t, after.IsOnline, "a rejected go-online attempt must not have flipped is_online")
+}
+
+// TestSetAvailability_LegacyNoVehicleRow_StillAllowsGoOnline is the
+// regression guard for the "no driver_vehicles row yet" data shape (a driver
+// profile that predates driver_vehicles and hasn't hit ListVehicles' lazy
+// backfill): GetActiveVehicleApprovalStatus returns "" for it, which must be
+// treated as "nothing to gate on", not as "not approved" — go-online must
+// keep working exactly as it did before migration 089.
+func TestSetAvailability_LegacyNoVehicleRow_StillAllowsGoOnline(t *testing.T) {
+	ctx := context.Background()
+	authRepo := auth.NewRepository(pool)
+	driverRepo := driver.NewRepository(pool)
+
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-legacy-1", "android", nil, nil)
+	require.NoError(t, err)
+
+	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
+	require.NoError(t, err)
+	require.NoError(t, driverRepo.SetApprovalStatus(ctx, profile.ID, "APPROVED", "", nil))
+
+	vehicles, err := driverRepo.ListVehicles(ctx, profile.ID)
+	require.NoError(t, err)
+	require.Empty(t, vehicles, "setup: this driver must have no driver_vehicles row at all (legacy shape)")
+
+	driverSvc, _ := newDriverServiceWithRedis(t)
+	err = driverSvc.SetAvailability(ctx, u.ID, true)
+	require.NoError(t, err, "a legacy driver with no driver_vehicles row must still be able to go online")
+
+	after, err := driverRepo.FindProfileByUserID(ctx, u.ID)
+	require.NoError(t, err)
+	assert.True(t, after.IsOnline)
+}
+
+// ── RejectVehicle eviction: P1 regression from the per-vehicle-approval
+// review — rejecting an ONLINE driver's ACTIVE vehicle must not leave them
+// dispatchable on it ──────────────────────────────────────────────────────
+//
+// Matching only re-checks approval at ActivateVehicle/SetAvailability's entry
+// gates; it never re-checks a driver already pinned in the Redis geo index.
+// Without this eviction, an admin rejecting the active vehicle of an
+// already-online driver (the exact scenario RejectVehicle's own doc comment
+// describes — stale insurance found during a routine audit) would leave that
+// driver online and geo-pinned on a REJECTED vehicle.
+func TestAdminRejectVehicle_ActiveVehicleOfOnlineDriver_ForcesOfflineAndEvictsFromGeoIndex(t *testing.T) {
+	ctx := context.Background()
+	driverRepo := driver.NewRepository(pool)
+	adminSvc := admin.NewService(pool, zerolog.Nop())
+
+	userID, profile, vehicle1 := setUpApprovedDriverWithOneVehicle(t, ctx, driverRepo, adminSvc, "reject-evict")
+	approverID := createTestAdminAccount(t, ctx)
+
+	// Driver is online and geo-pinned — exactly what SetAvailability + a
+	// location update would have written while vehicle #1 was still APPROVED
+	// (seeded directly, same pattern as
+	// internal/driver.TestEvictOnlineDriverFromRedis_ClearsStateAndGeoIndex,
+	// rather than driving the full location-update flow).
+	require.NoError(t, driverRepo.UpdateOnlineStatus(ctx, userID, true))
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { rdb.Close() })
+	adminSvc.SetRedis(rdb)
+	require.NoError(t, rdb.Set(ctx, rkeys.K.DriverState(profile.ID), "AVAILABLE", 0).Err())
+	require.NoError(t, rdb.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
+		Name: profile.ID, Longitude: 30.0619, Latitude: -1.9441,
+	}).Err())
+	// A different driver in the same geo index must survive untouched.
+	require.NoError(t, rdb.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
+		Name: "unrelated-driver", Longitude: 30.0, Latitude: -1.9,
+	}).Err())
+
+	require.NoError(t, adminSvc.RejectVehicle(ctx, profile.ID, vehicle1.ID, approverID, "stale insurance"))
+
+	gotV1, err := driverRepo.GetVehicle(ctx, profile.ID, vehicle1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, driver.VehicleStatusRejected, gotV1.ApprovalStatus)
+
+	after, err := driverRepo.FindProfileByUserID(ctx, userID)
+	require.NoError(t, err)
+	assert.False(t, after.IsOnline,
+		"rejecting an online driver's ACTIVE vehicle must force is_online=false")
+
+	state, err := rdb.Get(ctx, rkeys.K.DriverState(profile.ID)).Result()
+	require.NoError(t, err)
+	assert.Equal(t, "OFFLINE", state,
+		"rejecting an online driver's ACTIVE vehicle must set the Redis driver state to OFFLINE")
+
+	_, err = rdb.ZScore(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), profile.ID).Result()
+	assert.ErrorIs(t, err, goredis.Nil,
+		"the evicted driver must no longer be a member of the matching geo index")
+
+	score, err := rdb.ZScore(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), "unrelated-driver").Result()
+	require.NoError(t, err, "an unrelated driver in the same geo index must not be evicted")
+	assert.NotZero(t, score)
+}
+
+// TestAdminRejectVehicle_NonActiveVehicleOfOnlineDriver_DoesNotEvict is the
+// non-regression check: rejecting a vehicle that is NOT the driver's active
+// one must leave an online driver exactly as they were — this eviction only
+// fires when the rejected row is is_active.
+func TestAdminRejectVehicle_NonActiveVehicleOfOnlineDriver_DoesNotEvict(t *testing.T) {
+	ctx := context.Background()
+	driverRepo := driver.NewRepository(pool)
+	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
+	adminSvc := admin.NewService(pool, zerolog.Nop())
+
+	userID, profile, vehicle1 := setUpApprovedDriverWithOneVehicle(t, ctx, driverRepo, adminSvc, "reject-no-evict")
+	approverID := createTestAdminAccount(t, ctx)
+	require.NoError(t, driverRepo.UpdateOnlineStatus(ctx, userID, true))
+
+	vehicle2, err := driverSvc.CreateVehicle(ctx, userID, driver.CreateVehicleInput{
+		VehicleTypeCode: "CAB_TAXI",
+		PlateNumber:     uniquePlate(),
+	})
+	require.NoError(t, err)
+	require.False(t, vehicle2.IsActive)
+
+	require.NoError(t, adminSvc.RejectVehicle(ctx, profile.ID, vehicle2.ID, approverID, "wrong plate photo"))
+
+	after, err := driverRepo.FindProfileByUserID(ctx, userID)
+	require.NoError(t, err)
+	assert.True(t, after.IsOnline,
+		"rejecting a NON-active vehicle must not force an online driver offline")
+
+	gotV1, err := driverRepo.GetVehicle(ctx, profile.ID, vehicle1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, driver.VehicleStatusApproved, gotV1.ApprovalStatus,
+		"the active vehicle's own approval must be untouched by a different vehicle's rejection")
+	assert.True(t, gotV1.IsActive)
 }

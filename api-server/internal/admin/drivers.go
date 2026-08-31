@@ -609,7 +609,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 	docs, _ := s.listDriverDocuments(ctx, id)
 
 	// Every vehicle on file, each with its OWN approval_status (migration
-	// 088) — so the admin sees vehicle #2 sitting in PENDING_REVIEW right
+	// 089) — so the admin sees vehicle #2 sitting in PENDING_REVIEW right
 	// alongside vehicle #1 the driver is actively approved and earning on,
 	// instead of only ever seeing one undifferentiated "the driver's vehicle".
 	vehicles, _ := s.listDriverVehicles(ctx, id)
@@ -716,23 +716,90 @@ func (s *Service) ApproveVehicle(ctx context.Context, profileID, vehicleID, admi
 // APPROVED vehicle can be rejected directly (e.g. an admin discovers stale
 // insurance during a routine audit, not just during initial review) — there
 // is no equivalent driver-level operation to reuse a restriction from.
+//
+// If the rejected vehicle is the driver's ACTIVE one, matching only re-checks
+// approval at ActivateVehicle/SetAvailability's entry gates — it never
+// re-checks a driver already pinned in the Redis geo index. Left alone, an
+// already-online driver would keep being dispatched on a now-REJECTED
+// vehicle (this is the exact scenario an admin doing a routine audit hits:
+// finding stale insurance on a vehicle the driver is actively earning on).
+// So when the rejected row is is_active AND the driver is online, force them
+// offline the same way reopenForReview (internal/driver/service.go) and
+// SuspendDriver (this file) already do: Postgres is_online=false, Redis
+// DriverState+geo ZRem, and an FCM notification — WS alone never reaches a
+// closed app (the zombie-negotiation incident). Best-effort/logged past the
+// core UPDATE: the vehicle rejection itself must not fail because of a
+// downstream Redis hiccup.
 func (s *Service) RejectVehicle(ctx context.Context, profileID, vehicleID, adminUserID, reason string) error {
 	var reasonArg any
 	if reason != "" {
 		reasonArg = reason
 	}
-	tag, err := s.db.Exec(ctx, `
+	var wasActive bool
+	err := s.db.QueryRow(ctx, `
 		UPDATE driver_vehicles
 		SET approval_status = 'REJECTED', rejection_reason = $3, updated_at = NOW()
 		WHERE id = $1 AND driver_id = $2
-	`, vehicleID, profileID, reasonArg)
+		RETURNING is_active
+	`, vehicleID, profileID, reasonArg).Scan(&wasActive)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperrors.ErrNotFound
+		}
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return apperrors.ErrNotFound
+	if !wasActive {
+		return nil
 	}
+	s.evictOnlineDriverForRejectedActiveVehicle(ctx, profileID, reason)
 	return nil
+}
+
+// evictOnlineDriverForRejectedActiveVehicle force-offlines profileID if (and
+// only if) they are currently online — split out of RejectVehicle so the
+// "was this driver online" read and the eviction stay together and the
+// caller doesn't have to thread transportType/userID through by hand.
+// Best-effort/logged throughout: a Redis or notification hiccup must not
+// surface as a failure of the vehicle-rejection request that already
+// succeeded.
+func (s *Service) evictOnlineDriverForRejectedActiveVehicle(ctx context.Context, profileID, reason string) {
+	var driverUserID, transportType string
+	var wasOnline bool
+	if err := s.db.QueryRow(ctx,
+		`SELECT user_id, transport_type, is_online FROM driver_profiles WHERE id = $1`, profileID,
+	).Scan(&driverUserID, &transportType, &wasOnline); err != nil {
+		s.log.Error().Err(err).Str("driver_profile_id", profileID).
+			Msg("admin: rejected active vehicle but could not load driver profile to check for eviction")
+		return
+	}
+	if !wasOnline {
+		return
+	}
+
+	if _, err := s.db.Exec(ctx,
+		`UPDATE driver_profiles SET is_online = FALSE, updated_at = NOW() WHERE id = $1`, profileID,
+	); err != nil {
+		s.log.Error().Err(err).Str("driver_profile_id", profileID).
+			Msg("admin: rejected active vehicle of an online driver but could not force is_online=false")
+	}
+	if s.rdb != nil {
+		if err := s.rdb.Set(ctx, rkeys.K.DriverState(profileID), "OFFLINE", 0).Err(); err != nil {
+			s.log.Error().Err(err).Str("driver_profile_id", profileID).
+				Msg("admin: rejected active vehicle but could not set Redis driver state to OFFLINE")
+		}
+		if err := s.rdb.ZRem(ctx, rkeys.K.DriverGeoIndex(transportType), profileID).Err(); err != nil {
+			s.log.Error().Err(err).Str("driver_profile_id", profileID).
+				Msg("admin: rejected active vehicle but could not evict from Redis geo index")
+		}
+	}
+	if s.notifier != nil {
+		body := "Your active vehicle's approval was withdrawn, so you've been taken offline."
+		if reason != "" {
+			body = fmt.Sprintf("Your active vehicle's approval was withdrawn, so you've been taken offline. Reason: %s", reason)
+		}
+		s.notifier.SendToAllDevices(ctx, driverUserID, "Vehicle approval withdrawn", body,
+			"driver", map[string]string{"type": "vehicle_rejected_forced_offline", "reason": reason})
+	}
 }
 
 // SetDriverNationalID is the ONLY path (besides the driver's own pre-approval
