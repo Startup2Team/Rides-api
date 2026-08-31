@@ -116,6 +116,24 @@ func (s *Service) ApproveDriver(ctx context.Context, profileID, adminUserID stri
 		return err
 	}
 
+	// Per-vehicle approval (migration 089): a driver's active vehicle is born
+	// PENDING_REVIEW and NOTHING else ever reviews it on the normal
+	// application path — sync it to APPROVED alongside the driver here, or
+	// every newly-approved driver would immediately hit VEHICLE_NOT_APPROVED
+	// on their first go-online. Best-effort/logged, not transactional with the
+	// approval above (ApproveDriver already isn't wrapped in a tx — see the
+	// free-trial/bonus grants below, same pattern): a Postgres hiccup here
+	// must not roll back an otherwise-successful driver approval, but must be
+	// loud, since it leaves an APPROVED driver blocked from going online until
+	// an admin separately approves the vehicle.
+	if _, verr := s.db.Exec(ctx, `
+		UPDATE driver_vehicles SET approval_status = 'APPROVED', rejection_reason = NULL, updated_at = NOW()
+		WHERE driver_id = $1 AND is_active = TRUE AND approval_status <> 'APPROVED'
+	`, profileID); verr != nil {
+		s.log.Error().Err(verr).Str("driver_profile_id", profileID).
+			Msg("admin: driver approved but could not sync active vehicle's approval status — driver may be blocked from going online by VEHICLE_NOT_APPROVED")
+	}
+
 	if s.packages != nil {
 		if err := s.packages.GrantFreeTrialIfEligible(ctx, driverUserID, transportType); err != nil {
 			s.log.Error().Err(err).
@@ -590,6 +608,12 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 	// selfie) so the admin can review the actual photos before approving.
 	docs, _ := s.listDriverDocuments(ctx, id)
 
+	// Every vehicle on file, each with its OWN approval_status (migration
+	// 088) — so the admin sees vehicle #2 sitting in PENDING_REVIEW right
+	// alongside vehicle #1 the driver is actively approved and earning on,
+	// instead of only ever seeing one undifferentiated "the driver's vehicle".
+	vehicles, _ := s.listDriverVehicles(ctx, id)
+
 	// Restrict full exposure to SuperAdmin/OpsManager (DB-1 round 2) —
 	// SupportStaff still sees the driver detail page, just with the number
 	// masked, same shape as every other surface that isn't a document review.
@@ -617,10 +641,98 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 		"authorization_expiry_date": authorizationExpiryDate,
 		"created_at":                createdAt,
 		"documents":                 docs,
+		"vehicles":                  vehicles,
 		"national_id_number":        nationalIDNumber,
 		"national_id_country":       nationalIDCountry,
 		"gender":                    gender,
 	}, nil
+}
+
+// listDriverVehicles returns a lightweight summary of every vehicle on file
+// for a driver — id, plate, make/model and its OWN approval_status/is_active —
+// for the admin detail view (GetDriver). Read-only, no pagination: a driver
+// has at most a handful of vehicles, nothing like the rides/documents lists
+// that need LIMIT/OFFSET.
+func (s *Service) listDriverVehicles(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, plate_number, make, model, approval_status, rejection_reason, is_active
+		FROM driver_vehicles
+		WHERE driver_id = $1
+		ORDER BY is_active DESC, created_at ASC
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id, plate, approvalStatus string
+		var makeName, model, rejectionReason *string
+		var isActive bool
+		if err := rows.Scan(&id, &plate, &makeName, &model, &approvalStatus, &rejectionReason, &isActive); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{
+			"id":               id,
+			"plate_number":     plate,
+			"make":             makeName,
+			"model":            model,
+			"approval_status":  approvalStatus,
+			"rejection_reason": rejectionReason,
+			"is_active":        isActive,
+		})
+	}
+	return result, rows.Err()
+}
+
+// ApproveVehicle approves ONE of a driver's vehicles (migration 089,
+// per-vehicle approval) — independent of every other vehicle that driver
+// owns and of driver_profiles.approval_status itself. The WHERE clause
+// matches on BOTH vehicleID and profileID together: this is the IDOR guard
+// (an admin URL carries both {id} and {vehicleId}) — if the vehicle exists
+// but belongs to a DIFFERENT driver, RowsAffected is 0 and the caller gets a
+// 404, the same "don't confirm someone else's resource exists" shape
+// VehicleBelongsToDriver / resolveVehicleForDocument already use elsewhere in
+// this codebase.
+func (s *Service) ApproveVehicle(ctx context.Context, profileID, vehicleID, adminUserID string) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE driver_vehicles
+		SET approval_status = 'APPROVED', rejection_reason = NULL, updated_at = NOW()
+		WHERE id = $1 AND driver_id = $2
+	`, vehicleID, profileID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// RejectVehicle rejects ONE of a driver's vehicles, same IDOR guard as
+// ApproveVehicle. Unlike RejectDriver (which requires the driver to be
+// PENDING_REVIEW), this has no FROM-status restriction: a previously
+// APPROVED vehicle can be rejected directly (e.g. an admin discovers stale
+// insurance during a routine audit, not just during initial review) — there
+// is no equivalent driver-level operation to reuse a restriction from.
+func (s *Service) RejectVehicle(ctx context.Context, profileID, vehicleID, adminUserID, reason string) error {
+	var reasonArg any
+	if reason != "" {
+		reasonArg = reason
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE driver_vehicles
+		SET approval_status = 'REJECTED', rejection_reason = $3, updated_at = NOW()
+		WHERE id = $1 AND driver_id = $2
+	`, vehicleID, profileID, reasonArg)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
 }
 
 // SetDriverNationalID is the ONLY path (besides the driver's own pre-approval
@@ -714,7 +826,7 @@ func (s *Service) GetDriverReferrals(ctx context.Context, profileID string) ([]m
 // file has been looked at, and can quote a digest when it is disputed.
 func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT document_type, file_url, uploaded_at, review_status, sha256,
+		SELECT document_type, file_url, uploaded_at, review_status, sha256, vehicle_id,
 		       (SELECT count(*) - 1 FROM driver_documents h
 		         WHERE h.driver_id = d.driver_id AND h.document_type = d.document_type) AS prior_versions
 		FROM driver_documents d
@@ -730,9 +842,13 @@ func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]
 	for rows.Next() {
 		var docType, fileURL, reviewStatus string
 		var sha *string
+		// vehicleID lets the admin tell vehicle A's insurance from vehicle B's —
+		// previously every vehicle-level document looked identical here, with no
+		// way to know which of a driver's several vehicles it belonged to.
+		var vehicleID *string
 		var priorVersions int
 		var uploadedAt time.Time
-		if err := rows.Scan(&docType, &fileURL, &uploadedAt, &reviewStatus, &sha, &priorVersions); err != nil {
+		if err := rows.Scan(&docType, &fileURL, &uploadedAt, &reviewStatus, &sha, &vehicleID, &priorVersions); err != nil {
 			return nil, err
 		}
 		result = append(result, map[string]interface{}{
@@ -741,6 +857,7 @@ func (s *Service) listDriverDocuments(ctx context.Context, profileID string) ([]
 			"uploaded_at":    uploadedAt,
 			"review_status":  reviewStatus,
 			"sha256":         sha,
+			"vehicle_id":     vehicleID,
 			"prior_versions": priorVersions,
 		})
 	}
@@ -787,13 +904,27 @@ func (s *Service) resolveVehicleForDocument(ctx context.Context, profileID strin
 	}
 
 	// No vehicle row at all — build one from the profile's legacy fields.
+	//
+	// approval_status inherits the driver's OWN approval: an admin-registered
+	// driver is created APPROVED directly (CreateDriverFromAdmin never goes
+	// through ApproveDriver's sync — see there), so their first vehicle,
+	// backfilled here the moment a document is attached, must be born
+	// APPROVED too, or every admin-registered driver would be immediately
+	// blocked from going online (migration 089, VEHICLE_NOT_APPROVED) despite
+	// having been explicitly pre-approved. A driver_profiles.approval_status
+	// this CASE doesn't recognise as APPROVED (PENDING_REVIEW, REJECTED,
+	// NEEDS_MORE_INFO, SUSPENDED) maps to PENDING_REVIEW, the column default —
+	// driver_vehicles' CHECK constraint only allows PENDING_REVIEW/APPROVED/
+	// REJECTED, a narrower vocabulary than the driver machine, so this can
+	// never write a value that constraint would reject.
 	err = s.db.QueryRow(ctx, `
 		INSERT INTO driver_vehicles (
 			driver_id, vehicle_type_id, plate_number,
-			passenger_seats, load_capacity_kg, is_active
+			passenger_seats, load_capacity_kg, is_active, approval_status
 		)
 		SELECT dp.id, vt.id, dp.vehicle_plate,
-		       dp.passenger_seats, dp.load_capacity_kg, TRUE
+		       dp.passenger_seats, dp.load_capacity_kg, TRUE,
+		       CASE WHEN dp.approval_status = 'APPROVED' THEN 'APPROVED' ELSE 'PENDING_REVIEW' END
 		  FROM driver_profiles dp
 		  JOIN vehicle_types vt ON vt.code = dp.transport_type
 		 WHERE dp.id = $1

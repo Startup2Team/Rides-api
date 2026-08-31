@@ -198,7 +198,9 @@ func TestApproveDriver_NoNationalIDOnFile_AllowedWhenFlagOff(t *testing.T) {
 	}
 	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
 	require.NoError(t, err)
-	assert.Equal(t, 2, execCount)
+	// 3: approval_status -> APPROVED, role_state -> DRIVER_ACTIVE, and (migration
+	// 088) syncing the driver's active vehicle's approval_status to APPROVED.
+	assert.Equal(t, 3, execCount)
 }
 
 // TestApproveDriver_NoNationalIDOnFile_RejectedWhenFlagOn locks in that the

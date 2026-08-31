@@ -13,6 +13,7 @@ package driver
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,20 +21,37 @@ import (
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
+// Per-vehicle approval-status values (migration 089) — the per-vehicle
+// counterpart of the driver-level constants in service.go
+// (StatusPendingReview/StatusApproved/StatusRejected). Deliberately a
+// NARROWER vocabulary than the driver machine: no NEEDS_MORE_INFO or
+// SUSPENDED at the vehicle level, enforced by a CHECK constraint in the
+// migration, not just convention here.
+const (
+	VehicleStatusPendingReview = "PENDING_REVIEW"
+	VehicleStatusApproved      = "APPROVED"
+	VehicleStatusRejected      = "REJECTED"
+)
+
 // Vehicle is a row in driver_vehicles.
 type Vehicle struct {
-	ID              string    `json:"id"`
-	DriverID        string    `json:"driver_id"`
-	VehicleTypeID   string    `json:"vehicle_type_id"`
-	VehicleTypeCode string    `json:"vehicle_type_code"`
-	PlateNumber     string    `json:"plate_number"`
-	Make            *string   `json:"make,omitempty"`
-	Model           *string   `json:"model,omitempty"`
-	Year            *int      `json:"year,omitempty"`
-	Color           *string   `json:"color,omitempty"`
-	PassengerSeats  *int      `json:"passenger_seats,omitempty"`
-	LoadCapacityKg  *float64  `json:"load_capacity_kg,omitempty"`
-	IsActive        bool      `json:"is_active"`
+	ID              string   `json:"id"`
+	DriverID        string   `json:"driver_id"`
+	VehicleTypeID   string   `json:"vehicle_type_id"`
+	VehicleTypeCode string   `json:"vehicle_type_code"`
+	PlateNumber     string   `json:"plate_number"`
+	Make            *string  `json:"make,omitempty"`
+	Model           *string  `json:"model,omitempty"`
+	Year            *int     `json:"year,omitempty"`
+	Color           *string  `json:"color,omitempty"`
+	PassengerSeats  *int     `json:"passenger_seats,omitempty"`
+	LoadCapacityKg  *float64 `json:"load_capacity_kg,omitempty"`
+	IsActive        bool     `json:"is_active"`
+	// ApprovalStatus gates activation (Service.ActivateVehicle) and going
+	// online while this is the active vehicle (Service.SetAvailability) — see
+	// the VehicleStatus* constants above.
+	ApprovalStatus  string    `json:"approval_status"`
+	RejectionReason *string   `json:"rejection_reason,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -77,7 +95,8 @@ func scanVehicle(row pgx.Row) (*Vehicle, error) {
 	err := row.Scan(
 		&v.ID, &v.DriverID, &v.VehicleTypeID, &v.VehicleTypeCode,
 		&v.PlateNumber, &v.Make, &v.Model, &v.Year, &v.Color,
-		&v.PassengerSeats, &v.LoadCapacityKg, &v.IsActive, &v.CreatedAt, &v.UpdatedAt,
+		&v.PassengerSeats, &v.LoadCapacityKg, &v.IsActive,
+		&v.ApprovalStatus, &v.RejectionReason, &v.CreatedAt, &v.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -88,7 +107,8 @@ func scanVehicle(row pgx.Row) (*Vehicle, error) {
 const vehicleSelectCols = `
 	dv.id, dv.driver_id, dv.vehicle_type_id, vt.code,
 	dv.plate_number, dv.make, dv.model, dv.year, dv.color,
-	dv.passenger_seats, dv.load_capacity_kg, dv.is_active, dv.created_at, dv.updated_at
+	dv.passenger_seats, dv.load_capacity_kg, dv.is_active,
+	dv.approval_status, dv.rejection_reason, dv.created_at, dv.updated_at
 `
 
 func (r *Repository) ListVehicles(ctx context.Context, driverProfileID string) ([]*Vehicle, error) {
@@ -273,6 +293,53 @@ func (r *Repository) ActivateVehicle(ctx context.Context, driverProfileID, vehic
 	return r.GetVehicle(ctx, driverProfileID, vehicleID)
 }
 
+// SetVehicleApprovalStatus is the admin-facing per-vehicle review decision
+// (POST /admin/drivers/{id}/vehicles/{vehicleId}/approve|reject) — sets ONE
+// vehicle's approval_status, leaving the driver's own driver_profiles.
+// approval_status and every other vehicle of theirs untouched. This is what
+// lets a driver keep earning on an already-approved vehicle while a second
+// one is reviewed independently.
+func (r *Repository) SetVehicleApprovalStatus(ctx context.Context, vehicleID, status string, rejectionReason *string) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE driver_vehicles
+		SET approval_status = $1, rejection_reason = $2, updated_at = NOW()
+		WHERE id = $3
+	`, status, rejectionReason, vehicleID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return apperrors.ErrNotFound
+	}
+	return nil
+}
+
+// SetActiveVehicleApprovalStatus syncs the driver's currently ACTIVE
+// vehicle's approval_status to match a DRIVER-level approval transition. Used
+// only by callers that just approved the driver as a whole (admin.
+// ApproveDriver's production path, and Apply's DEV_AUTO_APPROVE_DRIVERS
+// shortcut) — without this, every driver's very first vehicle would be born
+// PENDING_REVIEW (the column default) and stay that way forever, since
+// nothing else ever reviews it once the one-time driver-level approval has
+// already happened. It is deliberately one-directional: rejecting or
+// suspending a DRIVER does not cascade to REJECT their vehicle — a vehicle's
+// own paperwork does not become invalid just because the driver's account
+// was suspended, and un-suspending must not silently re-approve a vehicle an
+// admin separately rejected.
+//
+// 0 rows affected (a driver with no driver_vehicles row yet, e.g. a legacy
+// profile that predates driver_vehicles and hasn't hit the lazy backfill in
+// Service.ListVehicles) is not an error — there is nothing to sync yet, and
+// the eventual backfill inherits the driver's approval status directly (see
+// Service.ListVehicles and internal/admin's resolveVehicleForDocument).
+func (r *Repository) SetActiveVehicleApprovalStatus(ctx context.Context, driverProfileID, status string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE driver_vehicles SET approval_status = $1, updated_at = NOW()
+		WHERE driver_id = $2 AND is_active = TRUE
+	`, status, driverProfileID)
+	return err
+}
+
 // ── Service layer ─────────────────────────────────────────────────────────────
 
 // ListVehicles returns the driver's vehicles. Drivers who applied before
@@ -304,6 +371,22 @@ func (s *Service) ListVehicles(ctx context.Context, userID string) ([]*Vehicle, 
 			// return the empty list rather than failing the read.
 			s.log.Warn().Err(err).Str("driver_profile_id", profile.ID).Msg("vehicles: lazy backfill from profile failed")
 			return list, nil
+		}
+		// The freshly-created row is born PENDING_REVIEW (the column default).
+		// That is correct for a driver who is not yet approved, but WRONG for a
+		// driver who is already APPROVED and has been working on this exact
+		// vehicle all along — migration 089's backfill covers every
+		// driver_vehicles row that existed AT DEPLOY TIME, but this lazy path
+		// creates a row LATER, for a driver profile that predates
+		// driver_vehicles entirely and never triggered it before. Without this
+		// sync, an already-working driver would be newly blocked from going
+		// online (VEHICLE_NOT_APPROVED) the moment their vehicle row happens to
+		// get backfilled — exactly the disruption this feature must not cause.
+		if profile.ApprovalStatus == StatusApproved {
+			if verr := s.repo.SetActiveVehicleApprovalStatus(ctx, profile.ID, VehicleStatusApproved); verr != nil {
+				s.log.Warn().Err(verr).Str("driver_profile_id", profile.ID).
+					Msg("vehicles: backfilled vehicle row but could not sync its approval status to the already-approved driver")
+			}
 		}
 		s.log.Info().Str("driver_profile_id", profile.ID).Msg("vehicles: backfilled vehicle row from legacy profile")
 		return s.repo.ListVehicles(ctx, profile.ID)
@@ -353,8 +436,17 @@ func (s *Service) DeleteVehicle(ctx context.Context, userID, vehicleID string) e
 }
 
 // ActivateVehicle switches the driver's active vehicle, enforcing the
-// production rules: the driver must be APPROVED, and switching is forbidden
-// while a ride is in progress (the customer agreed to a specific vehicle).
+// production rules: the driver must be APPROVED, the TARGET vehicle must
+// itself be APPROVED (a newly added, not-yet-reviewed vehicle cannot be put
+// to work just because the driver account is fine), and switching is
+// forbidden while a ride is in progress (the customer agreed to a specific
+// vehicle).
+//
+// The approval-status gate deliberately lives here (Service), not in
+// Repository.ActivateVehicle — DeleteVehicle's internal auto-reassignment of
+// is_active to the next vehicle (vehicles.go, repo-to-repo call) must always
+// be able to place the pointer somewhere, approved or not; only this
+// driver-initiated switch is gated.
 func (s *Service) ActivateVehicle(ctx context.Context, userID, vehicleID string) (*Vehicle, error) {
 	profile, err := s.repo.FindProfileByUserID(ctx, userID)
 	if err != nil {
@@ -365,6 +457,14 @@ func (s *Service) ActivateVehicle(ctx context.Context, userID, vehicleID string)
 	}
 	if s.repo.HasActiveRide(ctx, userID) {
 		return nil, apperrors.New(409, "VEHICLE_SWITCH_ON_RIDE", "You cannot switch vehicles during an active ride.")
+	}
+	target, err := s.repo.GetVehicle(ctx, profile.ID, vehicleID)
+	if err != nil {
+		return nil, err
+	}
+	if target.ApprovalStatus != VehicleStatusApproved {
+		return nil, apperrors.New(http.StatusConflict, "VEHICLE_NOT_APPROVED",
+			"This vehicle is awaiting approval and cannot be activated yet.")
 	}
 	v, err := s.repo.ActivateVehicle(ctx, profile.ID, vehicleID)
 	if err != nil {
