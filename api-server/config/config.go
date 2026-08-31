@@ -298,6 +298,17 @@ type MatchingConfig struct {
 	// TierWindowSeconds is how long a broadcast waits for any driver in the band
 	// to accept before moving outward.
 	TierWindowSeconds int
+	// UseRoutedETA switches candidate ranking from straight-line Redis-GEO
+	// distance to real-road ETA (OSRM /table, one call per search: the ≤30 GEO
+	// candidates as sources, the pickup as the single destination). Gated
+	// INDEPENDENTLY of OSRM_URL being set: OSRM can be on for fare/route
+	// lookups (location.Service) without this also being on, and this can
+	// never take effect without OSRM configured (Client.Enabled() is checked
+	// too). Default false — off means byte-for-byte today's straight-line
+	// ranking, and any Table error/timeout falls back to it live regardless of
+	// this flag. Only reorders WHO is offered first; the band gate
+	// (c.distanceM vs tier radius) stays straight-line.
+	UseRoutedETA bool
 }
 
 type RideConfig struct {
@@ -489,6 +500,9 @@ func Load() (*Config, error) {
 	// the server moved on while the driver's screen still showed 5 seconds left,
 	// so a tap in that gap got NOT_YOUR_OFFER for no visible reason.
 	cfg.Matching.TierWindowSeconds = getEnvInt("MATCH_TIER_WINDOW_SECONDS", 15)
+	// Off by default: OSRM being ON (OSRM_URL) is a separate switch. Both must
+	// be true for candidate ranking to use real-road ETA — see UseRoutedETA doc.
+	cfg.Matching.UseRoutedETA = getEnvBool("MATCH_USE_ROUTED_ETA", false)
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
