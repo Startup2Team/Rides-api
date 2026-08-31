@@ -874,6 +874,28 @@ func (r *Repository) GetCompletionRate(ctx context.Context, driverProfileID stri
 	return rate, err
 }
 
+// GetActiveVehicleApprovalStatus returns the approval_status of the driver's
+// currently active vehicle, used by Service.SetAvailability to refuse
+// go-online on an unapproved vehicle (migration 089).
+//
+// An empty string (no error) means "no driver_vehicles row is active" — a
+// legacy profile that predates driver_vehicles and has not yet hit the lazy
+// backfill in Service.ListVehicles. That is not the same thing as "not
+// approved": SetAvailability treats it as "nothing to gate on", identical to
+// go-online behaviour before this migration, rather than blocking a driver
+// over a data-shape quirk that predates the vehicle table entirely.
+func (r *Repository) GetActiveVehicleApprovalStatus(ctx context.Context, driverProfileID string) (string, error) {
+	var status string
+	err := r.db.QueryRow(ctx, `
+		SELECT approval_status FROM driver_vehicles
+		WHERE driver_id = $1 AND is_active = TRUE
+	`, driverProfileID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return status, err
+}
+
 // HasActiveRide returns true if the driver has a ride in a non-terminal state in the DB.
 // Used to cross-check a stale Redis driver:active_ride key before blocking offline transitions.
 func (r *Repository) HasActiveRide(ctx context.Context, driverUserID string) bool {

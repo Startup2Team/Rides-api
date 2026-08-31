@@ -103,6 +103,40 @@ func (h *Handler) RejectDriver(w http.ResponseWriter, r *http.Request) {
 	respond.NoContent(w)
 }
 
+// POST /api/v1/admin/drivers/:id/vehicles/:vehicleId/approve
+func (h *Handler) ApproveVehicle(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	profileID := chi.URLParam(r, "id")
+	vehicleID := chi.URLParam(r, "vehicleId")
+	if err := h.svc.ApproveVehicle(r.Context(), profileID, vehicleID, claims.UserID); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "vehicle.approve", "driver_vehicle", vehicleID,
+		"Approved driver vehicle", map[string]any{"driver_profile_id": profileID})
+	respond.NoContent(w)
+}
+
+// POST /api/v1/admin/drivers/:id/vehicles/:vehicleId/reject
+func (h *Handler) RejectVehicle(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	profileID := chi.URLParam(r, "id")
+	vehicleID := chi.URLParam(r, "vehicleId")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := h.svc.RejectVehicle(r.Context(), profileID, vehicleID, claims.UserID, body.Reason); err != nil {
+		respond.Error(w, err)
+		return
+	}
+	adminID, role := adminCtx(r)
+	h.audit.Record(r.Context(), adminID, role, "vehicle.reject", "driver_vehicle", vehicleID,
+		"Rejected driver vehicle", map[string]any{"driver_profile_id": profileID, "reason": body.Reason})
+	respond.NoContent(w)
+}
+
 // POST /api/v1/admin/drivers/:id/request-more-info
 func (h *Handler) RequestDriverMoreInfo(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)

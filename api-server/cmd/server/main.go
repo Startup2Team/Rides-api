@@ -1198,6 +1198,11 @@ func main() {
 			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
 			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
+			// Per-vehicle approval (migration 089): approve/reject ONE of this
+			// driver's vehicles, independent of every other vehicle they own and
+			// of the driver's own approval_status.
+			r.Post("/drivers/{id}/vehicles/{vehicleId}/approve", adminH.ApproveVehicle)
+			r.Post("/drivers/{id}/vehicles/{vehicleId}/reject", adminH.RejectVehicle)
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 			r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)
