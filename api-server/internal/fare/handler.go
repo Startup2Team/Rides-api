@@ -16,6 +16,14 @@ import (
 
 type RouteService interface {
 	GetRouteMetrics(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, found bool, err error)
+	// GetRouteDetails is GetRouteMetrics plus the additive real-road fields
+	// (precise duration in seconds + encoded polyline geometry). durationSeconds
+	// is the authoritative "this is a real OSRM route" signal: it is set only
+	// when OSRM actually computed a route for this pair (never on Haversine
+	// fallback, config-off, timeout, or NoRoute) and nil otherwise — geometry
+	// can independently be nil even on a real route (e.g. origin==destination),
+	// so callers must gate on durationSeconds, not geometry.
+	GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error)
 }
 
 type Handler struct {
@@ -72,7 +80,7 @@ func (h *Handler) FareEstimate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	distanceKM, durationMinutes, found, err := h.routeSvc.GetRouteMetrics(r.Context(), pickupLat, pickupLng, destLat, destLng, transportType)
+	distanceKM, durationMinutes, durationSeconds, geometry, found, err := h.routeSvc.GetRouteDetails(r.Context(), pickupLat, pickupLng, destLat, destLng, transportType)
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -93,7 +101,7 @@ func (h *Handler) FareEstimate(w http.ResponseWriter, r *http.Request) {
 		note = fmt.Sprintf("Night surcharge of %.0f%% applies after %02d:00", cfg.NightSurchargePct*100, cfg.NightStartHour)
 	}
 
-	respond.OK(w, map[string]any{
+	resp := map[string]any{
 		"transport_type":       transportType,
 		"distance_km":          distanceKM,
 		"duration_minutes":     durationMinutes,
@@ -106,7 +114,20 @@ func (h *Handler) FareEstimate(w http.ResponseWriter, r *http.Request) {
 		"waiting_free_minutes": cfg.WaitingFreeMinutes,
 		"cancellation_fee_rwf": cfg.CancellationFeeRWF,
 		"note":                 note,
-	})
+	}
+	// Additive: present only when OSRM returned a real road route; absent
+	// otherwise (OSRM off, timeout, NoRoute, or Haversine fallback). Old app
+	// versions that don't expect these keys are unaffected either way.
+	// distance_km/duration_minutes above stay best-available (real route when
+	// found, Haversine estimate otherwise) — that's the intended fare-estimate
+	// behavior and is unchanged here.
+	if durationSeconds != nil {
+		resp["route_duration_seconds"] = *durationSeconds
+	}
+	if geometry != nil {
+		resp["route_geometry"] = *geometry
+	}
+	respond.OK(w, resp)
 }
 
 func (h *Handler) ListActivePricing(w http.ResponseWriter, r *http.Request) {
