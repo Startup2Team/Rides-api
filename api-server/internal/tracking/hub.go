@@ -117,6 +117,15 @@ func (h *Hub) handlePubSubMessage(channel, payload string) {
 				h.log.Warn().Str("ride_id", rideID).Msg("ws: customer send buffer full (pubsub)")
 			}
 		}
+	} else if strings.HasPrefix(channel, "ws:broadcast:drivers") {
+		h.mu.RLock()
+		for _, client := range h.drivers {
+			select {
+			case client.Send <- msg:
+			default:
+			}
+		}
+		h.mu.RUnlock()
 	}
 }
 
@@ -262,4 +271,33 @@ func (h *Hub) ActiveConnectionsCount() (drivers, customers int) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.drivers), len(h.customers)
+}
+
+// BroadcastToAllDrivers sends a real-time WebSocket message to all connected drivers.
+func (h *Hub) BroadcastToAllDrivers(msg Message) {
+	h.mu.RLock()
+	for _, client := range h.drivers {
+		select {
+		case client.Send <- msg:
+		default:
+			h.log.Warn().Str("driver_id", client.UserID).Msg("ws: driver broadcast send buffer full")
+		}
+	}
+	h.mu.RUnlock()
+
+	if h.rdb != nil {
+		payload, err := json.Marshal(msg)
+		if err == nil {
+			h.rdb.Publish(context.Background(), "ws:broadcast:drivers", string(payload))
+		}
+	}
+}
+
+func (h *Hub) NotifyPackageCatalogUpdated() {
+	h.BroadcastToAllDrivers(Message{
+		Type: "PACKAGE_CATALOG_UPDATED",
+		Payload: map[string]interface{}{
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	})
 }

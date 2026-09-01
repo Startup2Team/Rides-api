@@ -350,6 +350,7 @@ func main() {
 	pkgH.SetBonus(bonusSvc)       // auto-grant purchase bonuses
 	pkgH.SetLedger(ledgerSvc)     // v4 entitlements
 	pkgH.SetPurchase(purchaseSvc) // v4 purchase + MoMo
+	pkgH.SetNotifier(hub)         // real-time WebSocket notifier for catalog updates
 	bonusH := bonus.NewHandler(bonusSvc)
 	walletH := wallet.NewHandler(walletSvc)
 	var uploadH *upload.Handler
