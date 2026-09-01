@@ -1108,6 +1108,7 @@ func main() {
 			r.Delete("/recent/{id}", locH.DeleteRecentLocation)
 			r.Get("/route", locH.GetRoute)
 			r.Post("/route", locH.UpsertRoute)
+			r.Get("/live-route", locH.LiveRoute)
 		})
 	})
 

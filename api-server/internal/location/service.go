@@ -273,6 +273,61 @@ func haversineEstimate(pickupLat, pickupLng, destLat, destLng float64) (straight
 	return straightKM, estimatedKM, estimatedMin
 }
 
+// ── Live route (in-trip routing, OSRM-backed) ────────────────────────────
+
+// LiveRouteResult is the response shape for GetLiveRoute — a client-facing
+// reshaping of RouteResult for the live in-trip routing endpoint. Available
+// is the fail-closed signal callers must branch on: false means no genuine
+// real-road route could be produced (OSRM disabled/erroring, or the corridor
+// is only cached from before OSRM existed), and every other field is zero.
+// True means DistanceMeters/DurationSeconds/Geometry are populated from an
+// actual OSRM route (cached or freshly computed).
+type LiveRouteResult struct {
+	Available       bool     `json:"available"`
+	DistanceMeters  *float64 `json:"distance_meters,omitempty"`
+	DurationSeconds *int     `json:"duration_seconds,omitempty"`
+	Geometry        *string  `json:"geometry,omitempty"`
+}
+
+// toLiveRouteResult converts a route-cache lookup into the live-route
+// endpoint's response. Gates strictly on DurationSeconds — per RouteResult's
+// doc comment that is the only reliable "this is a real OSRM route" signal.
+// A pre-OSRM/warm-cache row can have DistanceKM/DurationMinutes populated
+// (from UpsertRoute or WarmLandmarkRoutes) with no geometry at all; treating
+// that as "available" would draw a misleading straight-line "road" on the
+// map. Pure (no I/O) so it's independently unit-testable.
+func toLiveRouteResult(r *RouteResult) LiveRouteResult {
+	if r == nil || r.DurationSeconds == nil {
+		return LiveRouteResult{Available: false}
+	}
+	meters := r.DistanceKM * 1000
+	return LiveRouteResult{
+		Available:       true,
+		DistanceMeters:  &meters,
+		DurationSeconds: r.DurationSeconds,
+		Geometry:        r.Geometry,
+	}
+}
+
+// GetLiveRoute is GetRoute reshaped for the live in-trip routing endpoint
+// (the free OSRM replacement for the mobile app's billable Mapbox Directions
+// call while a ride is in progress). Same route_cache/Redis/OSRM lookup and
+// geohash6 bucketing as GetRoute — repeated calls as a driver moves within a
+// ~1.2km cell are served from Redis, not OSRM.
+//
+// Never returns an error: any GetRoute failure is logged here and reported
+// to the caller as Available:false, matching the endpoint's fail-closed
+// contract — an OSRM outage or cache lookup failure must never fail the
+// request, only tell the client to keep using its own Mapbox fallback.
+func (s *Service) GetLiveRoute(ctx context.Context, originLat, originLng, destLat, destLng float64, vehicleType string) LiveRouteResult {
+	result, err := s.GetRoute(ctx, originLat, originLng, destLat, destLng, vehicleType)
+	if err != nil {
+		s.log.Warn().Err(err).Msg("location: live route lookup failed — client falls back to its own routing")
+		return LiveRouteResult{Available: false}
+	}
+	return toLiveRouteResult(result)
+}
+
 // UpsertRoute stores a route result provided by the mobile app.
 func (s *Service) UpsertRoute(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string, distanceKM float64, durationMinutes int) (*RouteResult, error) {
 	originHash := Geohash6(pickupLat, pickupLng)
