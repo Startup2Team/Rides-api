@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/workspace/ride-platform/config"
+	"github.com/workspace/ride-platform/internal/analytics"
 	"github.com/workspace/ride-platform/internal/auth"
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/ride"
@@ -43,8 +44,18 @@ func newTestRideServiceWithNotify(t *testing.T) (*ride.Service, *ride.Repository
 	notifySvc := notification.New(&config.Config{}, zerolog.Nop())
 	notifySvc.SetRepository(notification.NewRepository(pool))
 
+	// CancelRide unconditionally calls s.analytics.Publish (ride.cancelled),
+	// which immediately dereferences the receiver (s.db, s.log) with no nil
+	// guard — a nil *analytics.Service here is not "no analytics", it's a nil
+	// pointer dereference panic the instant CancelRide runs. Every other
+	// caller of ride.NewService (main.go) always passes a real one; give this
+	// service a real, test-DB-backed one too, same as
+	// newDriverServiceWithRedis does for driver.Service in
+	// driver_vehicle_approval_test.go.
+	ana := analytics.NewService(pool, rdb, zerolog.Nop())
+
 	repo := ride.NewRepository(pool)
-	svc := ride.NewService(repo, rdb, notifySvc, nil, hub, &config.Config{}, zerolog.Nop())
+	svc := ride.NewService(repo, rdb, notifySvc, ana, hub, &config.Config{}, zerolog.Nop())
 	return svc, repo, rdb
 }
 
