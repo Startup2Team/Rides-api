@@ -1,0 +1,11 @@
+-- Durable backstop for the in-memory negotiation-inactivity timer
+-- (ride.Service.StartNegotiationTimeout uses time.AfterFunc, which is wiped
+-- on every deploy/restart). Persisting the deadline lets a periodic sweep
+-- (ride.Service.CancelExpiredNegotiations) find and cancel any ride stuck in
+-- NEGOTIATING past it, independent of process restarts.
+--
+-- Nullable and additive: NULL for every row that predates this migration and
+-- for any ride never in NEGOTIATING; the sweep's WHERE clause naturally
+-- excludes NULLs, so this has zero effect until StartNegotiationTimeout /
+-- ResetNegotiationTimeout start populating it going forward.
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS negotiation_deadline_at TIMESTAMPTZ;

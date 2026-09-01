@@ -253,6 +253,9 @@ func main() {
 	// Logout guard: ForceOffline driver-fault cancels any active ride first, so
 	// signing out is no longer a penalty-free escape from an agreed ride.
 	driverSvc.SetActiveRideCanceller(rideSvc)
+	// Server-side auto-arrival: a location update within the pickup geofence
+	// auto-fires DRIVER_ARRIVED without the driver tapping the button.
+	driverSvc.SetArrivalMarker(rideSvc)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
 	engine := matching.NewEngine(rideRepo, driverRepo, rdb, notifySvc, anaSvc, hub, cfg, log, rideSvc)
 	negSvc := negotiation.NewService(negRepo, rideRepo, rdb, hub, telSvc, anaSvc, cfg, log)
@@ -499,6 +502,28 @@ func main() {
 					log.Error().Err(err).Msg("abandonment: failed to scan for abandoned rides")
 				} else if n > 0 {
 					log.Warn().Int("count", n).Msg("abandonment: cancelled rides with silent drivers")
+				}
+			}
+		}
+	}()
+
+	// ── Negotiation-deadline sweep ────────────────────────────────────────────
+	// Durable backstop for StartNegotiationTimeout's in-memory timer, which a
+	// deploy/restart wipes with no recovery — a ride could otherwise sit
+	// NEGOTIATING forever. Every 30s we cancel any ride still NEGOTIATING past
+	// its persisted deadline. No-op (and cheap) when nothing has expired.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := rideSvc.CancelExpiredNegotiations(bgCtx); err != nil {
+					log.Error().Err(err).Msg("negotiation-sweep: failed to scan for expired negotiations")
+				} else if n > 0 {
+					log.Warn().Int("count", n).Msg("negotiation-sweep: cancelled stale NEGOTIATING rides")
 				}
 			}
 		}
