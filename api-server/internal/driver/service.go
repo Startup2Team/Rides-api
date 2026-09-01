@@ -107,6 +107,15 @@ type WSNotifier interface {
 	NotifyCustomer(rideID, msgType string, payload map[string]interface{})
 }
 
+// ArrivalMarker lets UpdateLocation/UpdateLocationBatch auto-transition a ride
+// to DRIVER_ARRIVED when a driver's GPS ping lands inside the pickup geofence,
+// without the driver ever tapping the manual "Arrived" button. Implemented by
+// ride.Service.MarkDriverArrivedIfNear and injected in main (driver → ride
+// would be an import cycle, same reason as ActiveRideCanceller above).
+type ArrivalMarker interface {
+	MarkDriverArrivedIfNear(ctx context.Context, rideID, driverProfileID string, point geo.Point) error
+}
+
 // Service handles driver business logic.
 type Service struct {
 	repo           *Repository
@@ -118,6 +127,7 @@ type Service struct {
 	creditChecker  CreditChecker
 	expiryNotifier expiryNotifier
 	rideCanceller  ActiveRideCanceller
+	arrivalMarker  ArrivalMarker
 }
 
 func NewService(repo *Repository, rdb goredis.UniversalClient, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
@@ -138,6 +148,13 @@ func (s *Service) SetActiveRideCanceller(c ActiveRideCanceller) {
 // customer in real time — see relayLocationToCustomer.
 func (s *Service) SetWSNotifier(n WSNotifier) {
 	s.wsNotifier = n
+}
+
+// SetArrivalMarker wires the ride service so a location update can auto-fire
+// the DRIVER_ARRIVED transition when the driver reaches the pickup geofence —
+// see maybeAutoMarkArrived.
+func (s *Service) SetArrivalMarker(m ArrivalMarker) {
+	s.arrivalMarker = m
 }
 
 // DemandHeatmap returns bucketed pickup demand over the last windowMin minutes,
@@ -904,9 +921,41 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		}
 
 		_ = s.repo.UpsertLocation(bgCtx, profile.ID, newPoint, update.SpeedKMH, update.Heading)
+		s.maybeAutoMarkArrived(bgCtx, profile.ID, newPoint)
 	}()
 
 	return nil
+}
+
+// maybeAutoMarkArrived is the server-geofence auto-arrival check: it fires
+// only when this driver has an active ride currently DRIVER_EN_ROUTE, gated
+// by a single cheap Redis read before ever calling into ride.Service (which
+// hits Postgres) — the overwhelming majority of pings (driver has no active
+// ride, or the ride isn't in this narrow window) never pay that cost. Called
+// from the background telemetry goroutine, never on the request's critical
+// path: arrival is a best-effort convenience on top of the manual "Arrived"
+// button, which keeps working unchanged as the fallback if this never fires
+// or errors.
+func (s *Service) maybeAutoMarkArrived(ctx context.Context, driverProfileID string, point geo.Point) {
+	if s.arrivalMarker == nil {
+		return
+	}
+	rideID, err := s.redis.Get(ctx, rkeys.K.DriverActiveRide(driverProfileID)).Result()
+	if err != nil || rideID == "" {
+		return
+	}
+	// "DRIVER_EN_ROUTE" mirrors ride.StatusDriverEnRoute's string value — this
+	// package can't import package ride (see ArrivalMarker's doc), so this is
+	// a cheap pre-filter hint only. MarkDriverArrivedIfNear re-checks status
+	// authoritatively against Postgres before transitioning anything.
+	state, err := s.redis.Get(ctx, rkeys.K.RideState(rideID)).Result()
+	if err != nil || state != "DRIVER_EN_ROUTE" {
+		return
+	}
+	if err := s.arrivalMarker.MarkDriverArrivedIfNear(ctx, rideID, driverProfileID, point); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Str("driver_id", driverProfileID).
+			Msg("driver: auto-arrival check failed")
+	}
 }
 
 // UpdateLocationBatch processes a batch of GPS coordinates from the driver asynchronously.
@@ -985,6 +1034,10 @@ func (s *Service) UpdateLocationBatch(ctx context.Context, userID string, batch 
 
 			_ = s.repo.UpsertLocation(bgCtx, profile.ID, pt, update.SpeedKMH, update.Heading)
 		}
+		// Auto-arrival check against the latest (most recent) point only — the
+		// same one already used for plausibility above, not every historical
+		// point in the batch.
+		s.maybeAutoMarkArrived(bgCtx, profile.ID, newPoint)
 	}()
 
 	return nil

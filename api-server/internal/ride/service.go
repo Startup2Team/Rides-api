@@ -3,6 +3,7 @@ package ride
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -870,6 +871,7 @@ func (s *Service) StartNegotiationTimeout(rideID string) {
 
 	t := time.AfterFunc(negotiationTimeoutDuration, fire)
 	s.negTimers.Store(rideID, t)
+	s.persistNegotiationDeadline(rideID)
 }
 
 // ResetNegotiationTimeout resets the inactivity clock back to the full 5 minutes.
@@ -886,6 +888,23 @@ func (s *Service) ResetNegotiationTimeout(rideID string) {
 			}
 		}
 		t.Reset(negotiationTimeoutDuration)
+		s.persistNegotiationDeadline(rideID)
+	}
+}
+
+// persistNegotiationDeadline mirrors the in-memory timer's deadline into
+// Postgres for CancelExpiredNegotiations, the durable backstop that survives
+// a restart wiping negTimers. Best-effort: it's auxiliary bookkeeping for a
+// secondary backstop, not the ride's authoritative state, so a write failure
+// is logged and never blocks the negotiation flow that triggered it — and
+// StartNegotiationTimeout/ResetNegotiationTimeout have no request-scoped
+// context to plumb through (called from background timer callbacks and from
+// the TimeoutManager interface), so this deliberately uses a fresh
+// background context, same as the timer's own "fire" callback below.
+func (s *Service) persistNegotiationDeadline(rideID string) {
+	deadline := time.Now().Add(negotiationTimeoutDuration)
+	if err := s.repo.SetNegotiationDeadline(context.Background(), rideID, deadline); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: failed to persist negotiation deadline")
 	}
 }
 
@@ -1049,6 +1068,51 @@ func (s *Service) SetDriverArrived(ctx context.Context, rideID, driverUserID str
 		"Your driver is at the pickup point.", "ride",
 		map[string]string{"type": "driver_arrived", "ride_id": rideID})
 	s.startPickupExpiryTimer(rideID)
+	return nil
+}
+
+// MarkDriverArrivedIfNear implements driver.ArrivalMarker — invoked from the
+// driver's location-update path (UpdateLocation/UpdateLocationBatch) so a
+// driver who physically reaches the pickup point is transitioned to
+// DRIVER_ARRIVED even if they never tap the manual "Arrived" button. Reuses
+// MarkDriverArrived for the actual transition, so the consequences (Postgres
+// write, Redis cache, WS, FCM, analytics, pickup-expiry arming) are byte-for-
+// byte identical to the existing server-geofence path; only the trigger
+// differs — the manual button keeps working unchanged.
+//
+// Idempotent and race-safe: MarkDriverArrived's Postgres write is the
+// conditional `UPDATE ... WHERE status = 'DRIVER_EN_ROUTE'` in repo.Transition,
+// so two concurrent GPS pings (or a ping racing the manual tap) can only ever
+// have one winner — the loser gets ErrInvalidTransition, swallowed here as a
+// no-op rather than surfaced as a location-update failure.
+//
+// The ride row is re-fetched from Postgres (not trusted from the caller's
+// Redis-cached status hint) so the driver-id and pickup-point checks below are
+// authoritative, not a TOCTOU race against a stale cache.
+func (s *Service) MarkDriverArrivedIfNear(ctx context.Context, rideID, driverProfileID string, point geo.Point) error {
+	r, err := s.repo.FindByID(ctx, rideID)
+	if err != nil {
+		return fmt.Errorf("auto-arrival: load ride: %w", err)
+	}
+	if r.Status != StatusDriverEnRoute || r.DriverID == nil || *r.DriverID != driverProfileID {
+		return nil
+	}
+	// Same DevSkipGeofence escape hatch as withinRadius (manual start/arrive) —
+	// "NEVER true in production" per its doc comment.
+	if !s.cfg.Ride.DevSkipGeofence {
+		distM := geo.DistanceKM(point, r.PickupPoint) * 1000
+		if distM > float64(s.cfg.Ride.ArrivalRadiusM) {
+			return nil
+		}
+	}
+	if err := s.MarkDriverArrived(ctx, rideID, driverProfileID); err != nil {
+		if errors.Is(err, apperrors.ErrInvalidTransition) {
+			// Lost the race — already transitioned by a concurrent ping or the
+			// manual tap in the same instant. Not an error.
+			return nil
+		}
+		return fmt.Errorf("auto-arrival: mark arrived: %w", err)
+	}
 	return nil
 }
 

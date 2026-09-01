@@ -532,6 +532,19 @@ func (repo *Repository) SetDriverArrived(ctx context.Context, rideID string) err
 	return err
 }
 
+// SetNegotiationDeadline persists when the current negotiation-inactivity
+// window expires, so a periodic sweep can cancel the ride if the in-memory
+// timer (wiped by a restart) never fires — see CancelExpiredNegotiations.
+// Called on both the initial 5-minute arm and every reset (counter-offer),
+// so the persisted value always tracks the live in-memory deadline.
+func (repo *Repository) SetNegotiationDeadline(ctx context.Context, rideID string, deadline time.Time) error {
+	_, err := repo.db.Exec(ctx,
+		`UPDATE rides SET negotiation_deadline_at = $1, updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $2`,
+		deadline, rideID,
+	)
+	return err
+}
+
 func (repo *Repository) SetCompleted(ctx context.Context, rideID string) error {
 	_, err := repo.db.Exec(ctx,
 		`UPDATE rides SET completed_at = NOW(), updated_at = NOW(), ride_version = ride_version + 1 WHERE id = $1`, rideID,
@@ -803,6 +816,65 @@ func (repo *Repository) FindAbandonCandidates(ctx context.Context, activeMinutes
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// ExpiredNegotiation is the projection the negotiation-deadline sweep scans:
+// a ride still NEGOTIATING past its persisted deadline. DriverID is always
+// set in practice (matching assigns the driver before the ride ever reaches
+// NEGOTIATING), but kept a pointer defensively — same shape as Ride.DriverID.
+type ExpiredNegotiation struct {
+	ID            string
+	CustomerID    string
+	DriverID      *string
+	TransportType string
+}
+
+// FindExpiredNegotiations returns rides still NEGOTIATING whose persisted
+// deadline (see SetNegotiationDeadline) has passed — the durable backstop for
+// StartNegotiationTimeout's in-memory timer, which is wiped on every
+// deploy/restart. Rows with no deadline (pre-migration rides, or any ride
+// that never reached NEGOTIATING) never match.
+func (repo *Repository) FindExpiredNegotiations(ctx context.Context) ([]*ExpiredNegotiation, error) {
+	rows, err := repo.db.Query(ctx, `
+		SELECT id, customer_id, driver_id, transport_type
+		FROM rides
+		WHERE status = 'NEGOTIATING' AND negotiation_deadline_at < NOW()
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ExpiredNegotiation
+	for rows.Next() {
+		n := &ExpiredNegotiation{}
+		if err := rows.Scan(&n.ID, &n.CustomerID, &n.DriverID, &n.TransportType); err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// CancelIfStillNegotiating atomically cancels a ride ONLY if it is still
+// NEGOTIATING with an expired deadline at the moment of the write, not just
+// at the moment it was selected by FindExpiredNegotiations. This closes the
+// race where the ride progressed (fare agreed → CONFIRMED) or the deadline
+// was pushed out (counter-offer → SetNegotiationDeadline) between the scan
+// and this call — and, on top of that, makes the WHERE clause itself the
+// mutual-exclusion point across replicas: two sweepers racing the same row
+// can only ever have one whose UPDATE matches, so the bool return is the same
+// exactly-once gate as Cancel/CancelWithFee.
+func (repo *Repository) CancelIfStillNegotiating(ctx context.Context, rideID string) (bool, error) {
+	tag, err := repo.db.Exec(ctx, `
+		UPDATE rides
+		SET status = 'CANCELLED', cancel_reason = 'negotiation_timeout', cancelled_by_role = 'SYSTEM',
+		    updated_at = NOW(), ride_version = ride_version + 1
+		WHERE id = $1 AND status = 'NEGOTIATING' AND negotiation_deadline_at < NOW()
+	`, rideID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // SetPickupExpired marks a ride's pickup window as expired.
