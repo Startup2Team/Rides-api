@@ -198,6 +198,32 @@ func (r *Repository) CreateVehicleFromApply(ctx context.Context, profileID strin
 	return err
 }
 
+// safetyFieldChanged is the WHERE/CASE fragment shared by UpdateVehicle's
+// approval_status and rejection_reason resets below: true when the caller
+// actually supplied a SAFETY-RELEVANT field (plate number or either capacity
+// measure — vehicle type isn't editable via UpdateVehicleInput at all, so it
+// can't drift here) AND the new value differs from what's stored. A no-op
+// edit (same plate resubmitted, or only cosmetic fields like make/model/
+// year/color touched) must not bounce an already-approved vehicle back into
+// review. IS DISTINCT FROM is the null-safe equality Postgres needs here
+// (in.PassengerSeats/in.LoadCapacityKg can themselves be NULL).
+const safetyFieldChanged = `(
+	($3 IS NOT NULL AND $3 IS DISTINCT FROM plate_number) OR
+	($8 IS NOT NULL AND $8 IS DISTINCT FROM passenger_seats) OR
+	($9 IS NOT NULL AND $9 IS DISTINCT FROM load_capacity_kg)
+)`
+
+// UpdateVehicle applies a driver's edit and, in the SAME statement, resets
+// approval_status back to PENDING_REVIEW (clearing any prior
+// rejection_reason) whenever a safety-relevant field actually changed — see
+// safetyFieldChanged. Doing this as a CASE in the UPDATE itself (rather than
+// a read-diff-write in Go) keeps it atomic against a concurrent PATCH on the
+// same vehicle and costs no extra round trip. Cosmetic-only edits (make,
+// model, year, color) leave approval_status untouched, so a driver fixing a
+// typo in the vehicle color doesn't lose an already-APPROVED status.
+//
+// Service.UpdateVehicle is responsible for evicting an online driver if this
+// reset lands on their currently ACTIVE vehicle (evictIfActiveVehicleNotApproved).
 func (r *Repository) UpdateVehicle(ctx context.Context, driverProfileID, vehicleID string, in UpdateVehicleInput) (*Vehicle, error) {
 	if _, err := r.GetVehicle(ctx, driverProfileID, vehicleID); err != nil {
 		return nil, err
@@ -211,6 +237,8 @@ func (r *Repository) UpdateVehicle(ctx context.Context, driverProfileID, vehicle
 			color = COALESCE($7, color),
 			passenger_seats = COALESCE($8, passenger_seats),
 			load_capacity_kg = COALESCE($9, load_capacity_kg),
+			approval_status = CASE WHEN `+safetyFieldChanged+` THEN 'PENDING_REVIEW' ELSE approval_status END,
+			rejection_reason = CASE WHEN `+safetyFieldChanged+` THEN NULL ELSE rejection_reason END,
 			updated_at = NOW()
 		WHERE id = $1 AND driver_id = $2
 	`, vehicleID, driverProfileID, in.PlateNumber, in.Make, in.Model, in.Year, in.Color, in.PassengerSeats, in.LoadCapacityKg)
@@ -417,14 +445,32 @@ func (s *Service) UpdateVehicle(ctx context.Context, userID, vehicleID string, i
 	if err != nil {
 		return nil, err
 	}
+	// Fetched up front (not just for the active-ride check): also needed after
+	// the update to know whether the JUST-EDITED vehicle is the driver's active
+	// one, for the evict-if-now-unapproved check below.
+	before, gErr := s.repo.GetVehicle(ctx, profile.ID, vehicleID)
+	if gErr != nil {
+		return nil, gErr
+	}
 	// Editing the active vehicle's identity (plate/type/capacity) mid-ride would
 	// change the vehicle the customer agreed to — block it, same rule as switching.
-	if s.repo.HasActiveRide(ctx, userID) {
-		if v, gErr := s.repo.GetVehicle(ctx, profile.ID, vehicleID); gErr == nil && v.IsActive {
-			return nil, apperrors.New(409, "VEHICLE_LOCKED_ON_RIDE", "You cannot edit the active vehicle during an active ride.")
-		}
+	if before.IsActive && s.repo.HasActiveRide(ctx, userID) {
+		return nil, apperrors.New(409, "VEHICLE_LOCKED_ON_RIDE", "You cannot edit the active vehicle during an active ride.")
 	}
-	return s.repo.UpdateVehicle(ctx, profile.ID, vehicleID, in)
+	updated, err := s.repo.UpdateVehicle(ctx, profile.ID, vehicleID, in)
+	if err != nil {
+		return nil, err
+	}
+	// Repository.UpdateVehicle resets approval_status to PENDING_REVIEW when a
+	// safety-relevant field (plate/capacity) actually changed. If that just
+	// happened to the driver's ACTIVE vehicle and they're currently online,
+	// they must not keep matching on a now-unreviewed vehicle — evict exactly
+	// like DeleteVehicle and admin.RejectVehicle already do for the same
+	// situation (P1 from the per-vehicle-approval review).
+	if before.IsActive && updated.ApprovalStatus != VehicleStatusApproved && profile.IsOnline {
+		s.evictIfActiveVehicleNotApproved(ctx, profile)
+	}
+	return updated, nil
 }
 
 func (s *Service) DeleteVehicle(ctx context.Context, userID, vehicleID string) error {
