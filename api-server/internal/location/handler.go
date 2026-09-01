@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
@@ -187,6 +188,75 @@ func (h *Handler) GetRoute(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, map[string]interface{}{
 		"route": result,
 	})
+}
+
+// parseCoordParam parses a required lat/lng query param, bounds-checked
+// against [min, max]. Used only by LiveRoute — every other handler in this
+// file that takes coordinates (GetRoute, UpsertRoute, saved locations) was
+// already shipped without range validation and is left as-is; this endpoint
+// is new, so it gets the check from day one.
+func parseCoordParam(v string, min, max float64) (float64, error) {
+	if v == "" {
+		return 0, fmt.Errorf("required")
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("must be a number")
+	}
+	if f < min || f > max {
+		return 0, fmt.Errorf("out of range [%g, %g]", min, max)
+	}
+	return f, nil
+}
+
+// GET /api/v1/locations/live-route?origin_lat=&origin_lng=&dest_lat=&dest_lng=&vehicle_type=
+//
+// Live in-trip routing for the mobile app's on-map polyline + ETA while a
+// ride is in progress (driver → pickup, or pickup → destination) — the free,
+// self-hosted-OSRM replacement for the billable Mapbox Directions call.
+// Reuses the exact same route_cache/OSRM lookup as GET /locations/route and
+// POST /customer/rides, bucketed to the same ~1.2km geohash6 cells, so
+// repeated calls as a driver moves within a cell are served from Redis, not
+// OSRM. vehicle_type is optional (routing doesn't vary by vehicle; passing
+// it only chooses which cache bucket is reused/populated).
+//
+// FAIL-CLOSED CONTRACT (mobile team: branch on the response body, never on
+// HTTP status): this endpoint ALWAYS returns 200 with the standard envelope
+// {"data": {"available": bool, ...}}. available=false means OSRM is
+// disabled, erroring, timed out, or the corridor has no real-road route
+// cached yet — the client MUST fall back to its existing Mapbox Directions
+// call in that case; every other field is omitted. available=true carries
+// distance_meters, duration_seconds, and geometry (precision-5 encoded
+// polyline). The only non-200 responses are 400 (missing/invalid
+// coordinates) and 401 (unauthenticated, via the route group's auth
+// middleware) — an OSRM outage or missing config never produces a 5xx or an
+// error body here.
+func (h *Handler) LiveRoute(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	originLat, err := parseCoordParam(q.Get("origin_lat"), -90, 90)
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "origin_lat: "+err.Error())
+		return
+	}
+	originLng, err := parseCoordParam(q.Get("origin_lng"), -180, 180)
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "origin_lng: "+err.Error())
+		return
+	}
+	destLat, err := parseCoordParam(q.Get("dest_lat"), -90, 90)
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "dest_lat: "+err.Error())
+		return
+	}
+	destLng, err := parseCoordParam(q.Get("dest_lng"), -180, 180)
+	if err != nil {
+		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", "dest_lng: "+err.Error())
+		return
+	}
+
+	result := h.svc.GetLiveRoute(r.Context(), originLat, originLng, destLat, destLng, q.Get("vehicle_type"))
+	respond.OK(w, result)
 }
 
 // ── Saved Locations ───────────────────────────────────────────────────────
