@@ -57,6 +57,7 @@ import (
 	"github.com/workspace/ride-platform/internal/rating"
 	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
+	"github.com/workspace/ride-platform/internal/routing"
 	"github.com/workspace/ride-platform/internal/settings"
 	"github.com/workspace/ride-platform/internal/team"
 	"github.com/workspace/ride-platform/internal/telephony"
@@ -265,6 +266,15 @@ func main() {
 	adminSvc := admin.NewService(db, log)
 	adminSvc.SetRedis(rdb)
 	locSvc := location.NewService(db, rdb, cfg, log)
+	// Real-road routing (OSRM) is optional — Client.Enabled() is false and
+	// every route lookup keeps using the Haversine estimate whenever OSRM_URL
+	// is unset. See config.RoutingConfig. Shared between location (route/fare
+	// lookups) and matching (candidate ranking) — one client, two independent
+	// consumers; matching also requires MATCH_USE_ROUTED_ETA=true (off by
+	// default) on top of OSRM being enabled.
+	routingClient := routing.New(cfg, log)
+	locSvc.SetRoutingClient(routingClient)
+	engine.SetRoutingClient(routingClient)
 
 	// ── New module services ───────────────────────────────────────────────────
 	incidentSvc := incidents.NewService(incidentRepo)
@@ -1188,6 +1198,11 @@ func main() {
 			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
 			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
+			// Per-vehicle approval (migration 089): approve/reject ONE of this
+			// driver's vehicles, independent of every other vehicle they own and
+			// of the driver's own approval_status.
+			r.Post("/drivers/{id}/vehicles/{vehicleId}/approve", adminH.ApproveVehicle)
+			r.Post("/drivers/{id}/vehicles/{vehicleId}/reject", adminH.RejectVehicle)
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 			r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)

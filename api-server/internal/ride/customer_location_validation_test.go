@@ -52,4 +52,31 @@ func TestUpdateCustomerLocationRequest_Validation(t *testing.T) {
 	}
 }
 
+// Regression: phones report heading/speed as -1 when unknown. sanitizeOptional-
+// Telemetry must drop out-of-range optional values so a bad heading/speed no
+// longer 400s the whole customer-location update (which carries the lat/lng).
+func TestSanitizeOptionalTelemetry(t *testing.T) {
+	t.Run("the -1 unknown sentinel is dropped, then the body validates", func(t *testing.T) {
+		b := updateCustomerLocationRequest{Lat: -1.94, Lng: 30.06, Heading: ptr(-1.0), SpeedKMH: ptr(-1.0)}
+		b.sanitizeOptionalTelemetry()
+		assert.Nil(t, b.Heading, "heading -1 must be dropped")
+		assert.Nil(t, b.SpeedKMH, "speed -1 must be dropped")
+		assert.NoError(t, validate.Struct(b), "essential lat/lng must survive")
+	})
+	t.Run("out-of-range high values are dropped too", func(t *testing.T) {
+		b := updateCustomerLocationRequest{Lat: 0, Lng: 0, Heading: ptr(720.0), SpeedKMH: ptr(999.0)}
+		b.sanitizeOptionalTelemetry()
+		assert.Nil(t, b.Heading)
+		assert.Nil(t, b.SpeedKMH)
+	})
+	t.Run("valid heading/speed are preserved", func(t *testing.T) {
+		b := updateCustomerLocationRequest{Lat: 0, Lng: 0, Heading: ptr(180.0), SpeedKMH: ptr(40.0)}
+		b.sanitizeOptionalTelemetry()
+		if assert.NotNil(t, b.Heading) {
+			assert.Equal(t, 180.0, *b.Heading)
+		}
+		assert.NotNil(t, b.SpeedKMH)
+	})
+}
+
 func ptr(f float64) *float64 { return &f }

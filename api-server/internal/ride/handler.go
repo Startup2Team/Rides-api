@@ -65,7 +65,7 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 	pickup := geo.Point{Lat: body.PickupLat, Lng: body.PickupLng}
 	dest := geo.Point{Lat: body.DestLat, Lng: body.DestLng}
 
-	ride, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare, body.DistanceKM, body.IdempotencyKey)
+	ride, routeInfo, err := h.svc.CreateRide(r.Context(), claims.UserID, body.TransportType, body.PickupAddr, body.DestAddr, pickup, dest, body.InitialFare, body.DistanceKM, body.IdempotencyKey)
 	if err != nil {
 		respond.Error(w, err)
 		return
@@ -80,13 +80,30 @@ func (h *Handler) CreateRide(w http.ResponseWriter, r *http.Request) {
 		giveUpSeconds = 90
 	}
 
-	respond.Created(w, map[string]interface{}{
+	resp := map[string]interface{}{
 		"ride_id":            ride.ID,
 		"status":             ride.Status,
 		"ride_version":       ride.RideVersion,
 		"give_up_seconds":    giveUpSeconds,
 		"search_deadline_at": ride.CreatedAt.Add(time.Duration(giveUpSeconds) * time.Second).UTC().Format(time.RFC3339),
-	})
+	}
+	// Additive: present ONLY when OSRM returned a real road route for this
+	// pickup→destination pair; absent entirely on OSRM-off, timeout, NoRoute,
+	// or any Haversine-fallback result (routeInfo is nil in all those cases —
+	// see realRouteInfo in service.go). Informational only — draw-the-path /
+	// precise-ETA fields, never used to derive the fare.
+	if routeInfo != nil {
+		resp["route_distance_km"] = routeInfo.DistanceKM
+		resp["route_duration_minutes"] = routeInfo.DurationMinutes
+		if routeInfo.DurationSeconds != nil {
+			resp["route_duration_seconds"] = *routeInfo.DurationSeconds
+		}
+		if routeInfo.Geometry != nil {
+			resp["route_geometry"] = *routeInfo.Geometry
+		}
+	}
+
+	respond.Created(w, resp)
 }
 
 // GET /api/v1/customer/rides/:ride_id
@@ -237,6 +254,21 @@ type updateCustomerLocationRequest struct {
 	Heading  *float64 `json:"heading"   validate:"omitempty,gte=0,lte=360"`
 }
 
+// sanitizeOptionalTelemetry nils out an out-of-range heading/speed so a bad
+// OPTIONAL field can't fail validation and reject the whole update. Phones
+// report coords.heading/speed as -1 — a number, not null — when the
+// course/speed is unknown (stationary, coarse GPS); forwarding that -1 would
+// otherwise 400 the request and silently drop the rider's live lat/lng. Lat/Lng
+// are still validated by the caller after this runs.
+func (b *updateCustomerLocationRequest) sanitizeOptionalTelemetry() {
+	if b.Heading != nil && (*b.Heading < 0 || *b.Heading > 360) {
+		b.Heading = nil
+	}
+	if b.SpeedKMH != nil && (*b.SpeedKMH < 0 || *b.SpeedKMH > 300) {
+		b.SpeedKMH = nil
+	}
+}
+
 // POST /api/v1/rides/{id}/customer-location
 // Customer publishes their live GPS position, relayed to the assigned driver.
 // Whole-trip sharing: only accepted while the ride is in an active status
@@ -250,6 +282,10 @@ func (h *Handler) UpdateCustomerLocation(w http.ResponseWriter, r *http.Request)
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
+	// Drop out-of-range optional telemetry (e.g. the -1 "unknown" heading/speed
+	// phones report) BEFORE validation, so a bad optional field never 400s the
+	// whole update and discards the essential lat/lng. See method doc.
+	body.sanitizeOptionalTelemetry()
 	if err := validate.Struct(body); err != nil {
 		respond.ErrorMsg(w, http.StatusBadRequest, "VALIDATION", err.Error())
 		return

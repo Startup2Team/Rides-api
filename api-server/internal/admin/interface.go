@@ -18,6 +18,12 @@ type AdminService interface {
 	RequestDriverMoreInfo(ctx context.Context, profileID, adminUserID, reason string, docs []DriverMoreInfoDocument) error
 	SuspendDriver(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
 	ReinstateDriver(ctx context.Context, profileID string) error
+	// ApproveVehicle/RejectVehicle are the per-vehicle counterpart of
+	// ApproveDriver/RejectDriver (migration 089) — they set ONE vehicle's
+	// approval_status, independent of every other vehicle that driver owns
+	// and of driver_profiles.approval_status itself.
+	ApproveVehicle(ctx context.Context, profileID, vehicleID, adminUserID string) error
+	RejectVehicle(ctx context.Context, profileID, vehicleID, adminUserID, reason string) error
 	// GetDriver's requesterRole gates the national ID: SuperAdmin/OpsManager
 	// see it in full, everyone else (SupportStaff, unknown) gets it masked.
 	GetDriver(ctx context.Context, profileID, requesterRole string) (map[string]interface{}, error)

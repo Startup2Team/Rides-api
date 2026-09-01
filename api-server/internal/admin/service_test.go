@@ -255,7 +255,10 @@ func TestApproveDriver_Success(t *testing.T) {
 	})
 	err := svc.ApproveDriver(context.Background(), "profile-xyz", "admin-uuid")
 	require.NoError(t, err)
-	assert.Equal(t, 2, execCount)
+	// 3: approval_status -> APPROVED, role_state -> DRIVER_ACTIVE, and (migration
+	// 088) syncing the driver's active vehicle's approval_status to APPROVED so
+	// they are not immediately blocked from going online by VEHICLE_NOT_APPROVED.
+	assert.Equal(t, 3, execCount)
 }
 
 func TestApproveDriver_DBError(t *testing.T) {
