@@ -71,6 +71,12 @@ type Engine struct {
 
 	// acceptChannels maps rideID → chan bool
 	acceptChannels sync.Map
+
+	// batcher is the optional Phase-B batched-dispatch pre-pass. nil (the
+	// default) means StartSearch spawns each ride's search immediately, exactly
+	// as before this field existed. Constructed once in NewEngine only when
+	// cfg.Matching.BatchedDispatch is true — the flag is read once at startup.
+	batcher *dispatchBatcher
 }
 
 func NewEngine(
@@ -84,7 +90,7 @@ func NewEngine(
 	log zerolog.Logger,
 	rideSvc rideServiceInterface,
 ) *Engine {
-	return &Engine{
+	e := &Engine{
 		rideRepo:   rideRepo,
 		driverRepo: driverRepo,
 		redis:      rdb,
@@ -95,6 +101,12 @@ func NewEngine(
 		log:        log,
 		rideSvc:    rideSvc,
 	}
+	if cfg != nil && cfg.Matching.BatchedDispatch {
+		e.batcher = newDispatchBatcher(e)
+		log.Info().Int("window_ms", cfg.Matching.BatchWindowMs).
+			Msg("matching: batched dispatch ENABLED")
+	}
+	return e
 }
 
 // SetRoutingClient wires the optional OSRM client used to rank candidates by
@@ -111,6 +123,30 @@ func (e *Engine) SetRoutingClient(c *routing.Client) {
 // it the worst case was data-dependent (candidates × offer timeout) with nothing
 // in code enforcing a ceiling, and the customer's screen had no timeout either.
 func (e *Engine) StartSearch(rideID string, pickup geo.Point, transportType string) {
+	// Batched dispatch (opt-in, MATCH_BATCHED_DISPATCH): hand the ride to the
+	// batcher, which collects concurrent same-bucket rides for a short window
+	// and assigns drivers globally before launching each ride's search seeded
+	// with its assigned driver. Enqueue is cheap and non-blocking. When the
+	// flag is off e.batcher is nil and this is byte-for-byte the old behavior.
+	if e.batcher != nil {
+		e.batcher.enqueue(pendingRide{
+			rideID:      rideID,
+			pickup:      pickup,
+			vehicleType: transportType,
+			enqueuedAt:  time.Now(),
+		})
+		return
+	}
+	e.launchSearch(pendingRide{rideID: rideID, pickup: pickup, vehicleType: transportType}, nil)
+}
+
+// launchSearch spawns one ride's search goroutine with the standard GiveUp
+// deadline. seed, when non-nil, is the batched-dispatch driver offered first
+// (see runLoop). This is the single place the search deadline is applied, so
+// the batcher and the direct path share identical timeout semantics; the
+// deadline starts here (at flush), never at enqueue, so batching's window never
+// shortens the actual search budget.
+func (e *Engine) launchSearch(pr pendingRide, seed *candidate) {
 	giveUp := time.Duration(e.cfg.Matching.GiveUpSeconds) * time.Second
 	if giveUp <= 0 {
 		giveUp = 90 * time.Second
@@ -118,7 +154,7 @@ func (e *Engine) StartSearch(rideID string, pickup geo.Point, transportType stri
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), giveUp)
 		defer cancel()
-		e.runLoop(ctx, rideID, pickup, transportType)
+		e.runLoop(ctx, pr.rideID, pr.pickup, pr.vehicleType, seed)
 	}()
 }
 
@@ -150,7 +186,13 @@ func (e *Engine) NotifyAccept(rideID, driverID string, accepted bool) bool {
 // Internal matching loop
 // ──────────────────────────────────────────────────────────────────────────
 
-func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, transportType string) {
+// runLoop is a ride's search executor. seed, when non-nil, is a driver chosen
+// by the batched-dispatch pre-pass to be offered FIRST (a single-driver batch)
+// before the normal banded broadcast; nil means the classic broadcast-only
+// search. Everything after the seed offer — the bands, the second-chance pass,
+// give-up — is unchanged, so a seeded ride whose driver declines self-heals via
+// the exact same path a non-batched ride takes.
+func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, transportType string, seed *candidate) {
 	// Bands are derived from the ETA promise and THIS vehicle type's speed, so a
 	// Fuso search widens over shorter distances than a moto search for the same
 	// promised wait. Pure arithmetic on load-time values — no query.
@@ -183,6 +225,31 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	// One second-chance pass per search: enough to re-ask the silent ones once,
 	// without turning the search into a nag loop against the same dead phones.
 	secondChanceUsed := false
+
+	// Batched-dispatch seed: offer the globally-assigned driver FIRST, as a
+	// single-driver batch, before the normal banded broadcast. This reuses the
+	// EXACT executor (matching:lock, pending_drivers, atomic claimed_by,
+	// onAccepted), so a seeded offer can never double-assign a driver and honors
+	// accept-auth identically. On decline/timeout/offline the driver is marked
+	// tried (and, if an explicit decline, declined) and the ride falls straight
+	// through to today's broadcast — the seed only reorders who is asked first,
+	// it never strands the ride.
+	if seed != nil && seed.profileID != "" {
+		if ctx.Err() == nil && e.hub.IsDriverConnected(seed.profileID) {
+			if cur, err := e.rideRepo.FindByID(ctx, rideID); err == nil && cur != nil && cur.Status == ride.StatusSearching {
+				e.log.Info().Str("ride_id", rideID).Str("driver_id", seed.profileID).
+					Msg("matching: offering batched-assignment seed driver first")
+				if winner := e.offerToBatch(ctx, rideID, []*candidate{seed}, window, declined); winner != nil {
+					e.onAccepted(ctx, rideID, winner)
+					return
+				}
+			}
+		}
+		// Don't immediately re-offer the seed in the first broadcast wave. If it
+		// declined, offerToBatch already recorded it in `declined`; marking it
+		// tried keeps a silent seed out of the wave until the second-chance pass.
+		tried[seed.profileID] = true
+	}
 
 	for {
 		if ctx.Err() != nil {
