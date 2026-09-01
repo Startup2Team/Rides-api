@@ -951,6 +951,8 @@ func main() {
 				Get("/demand-heatmap", driverH.DemandHeatmap)
 
 			r.Get("/packages", pkgH.ListPackages)
+			r.Get("/packages/catalog", pkgH.ListPackages)
+			r.Get("/packages/campaigns", pkgH.ListActiveCampaigns)
 			r.Get("/campaigns/active", pkgH.ListActiveCampaigns)
 			// Cap purchase attempts per driver so a loop can't spam MoMo prompts
 			// (each one pushes a PIN request to the payer's phone).
@@ -993,6 +995,14 @@ func main() {
 			r.Get("/earnings/weekly", driverH.WeeklyEarnings)
 			r.Get("/stats", driverH.Stats)
 		})
+	})
+
+	// ── Public Packages Catalog & Offers ──────────────────────────────────────
+	r.Route(apiV1Prefix+"/packages", func(r chi.Router) {
+		r.Get("/", pkgH.ListPackages)
+		r.Get("/catalog", pkgH.ListPackages)
+		r.Get("/campaigns", pkgH.ListActiveCampaigns)
+		r.Get("/offers", pkgH.ListPackages)
 	})
 
 	// ── Users (mode switch, saved locations, notifications) ──────────────────
