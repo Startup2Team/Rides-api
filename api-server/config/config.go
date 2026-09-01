@@ -357,14 +357,6 @@ type MatchingConfig struct {
 type RideConfig struct {
 	StartRadiusM    int
 	CompleteRadiusM int
-	// ArrivalRadiusM gates server-side auto-arrival: when a driver's GPS ping
-	// while DRIVER_EN_ROUTE lands within this radius of the ride's pickup
-	// point, the server transitions the ride to DRIVER_ARRIVED on its own —
-	// the manual "Arrived" button (StartRadiusM-gated) keeps working
-	// unchanged as a fallback. Tighter than StartRadiusM (150m) on purpose:
-	// this fires with no human confirming the driver is actually there, so it
-	// should only trip once they're genuinely at the curb.
-	ArrivalRadiusM int
 	// DevSkipGeofence bypasses arrival/start/complete radius checks.
 	// NEVER set true in production.
 	DevSkipGeofence bool
@@ -566,7 +558,6 @@ func Load() (*Config, error) {
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
-	cfg.Ride.ArrivalRadiusM = getEnvInt("AUTO_ARRIVAL_RADIUS_M", 75)
 	cfg.Ride.DevSkipGeofence = getEnvBool("DEV_SKIP_GEOFENCE", false)
 	cfg.Ride.MaxInProgressMinutes = getEnvInt("RIDE_MAX_IN_PROGRESS_MINUTES", 120)
 	cfg.Ride.NoShowVerifyRadiusM = getEnvInt("NO_SHOW_VERIFY_RADIUS_M", 400)
