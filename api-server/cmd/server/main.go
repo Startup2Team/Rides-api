@@ -1500,9 +1500,12 @@ func main() {
 	// Mobile uses EXPO_PUBLIC_WS_BASE_URL = ws://host/api/v1, so paths must be
 	// /api/v1/ws/driver and /api/v1/ws/customer.
 	r.Route(apiV1Prefix+"/ws", func(r chi.Router) {
-		r.Use(mw.Authenticate(cfg, rdb))
-		r.Get("/driver", trackH.DriverWS)
-		r.Get("/customer", trackH.CustomerWS)
+		r.Get("/admin", trackH.AdminWS)
+		r.Group(func(r chi.Router) {
+			r.Use(mw.Authenticate(cfg, rdb))
+			r.Get("/driver", trackH.DriverWS)
+			r.Get("/customer", trackH.CustomerWS)
+		})
 	})
 
 	// Wire matching engine into ride service
