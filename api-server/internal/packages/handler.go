@@ -32,6 +32,7 @@ type BonusAfterPurchase interface {
 
 type PackageNotifier interface {
 	NotifyPackageCatalogUpdated()
+	NotifyDriverCreditsUpdated(driverProfileID string)
 }
 
 // Handler exposes package and credit HTTP endpoints.
@@ -64,6 +65,12 @@ func (h *Handler) SetNotifier(n PackageNotifier) { h.notifier = n }
 func (h *Handler) broadcastCatalogUpdate() {
 	if h.notifier != nil {
 		h.notifier.NotifyPackageCatalogUpdated()
+	}
+}
+
+func (h *Handler) broadcastCreditsUpdate(driverID string) {
+	if h.notifier != nil {
+		h.notifier.NotifyDriverCreditsUpdated(driverID)
 	}
 }
 
@@ -589,6 +596,9 @@ func (h *Handler) AdminConfirmPurchase(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, err)
 		return
+	}
+	if p != nil {
+		h.broadcastCreditsUpdate("")
 	}
 	h.audit.Record(r.Context(), adminID, role, "package_purchase.admin_confirm", "package_purchases", id,
 		fmt.Sprintf("Admin manually settled purchase %s (success=%t) → %s", id, success, p.Status),

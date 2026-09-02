@@ -301,3 +301,33 @@ func (h *Hub) NotifyPackageCatalogUpdated() {
 		},
 	})
 }
+
+func (h *Hub) NotifyDriverCreditsUpdated(driverProfileID string) {
+	msg := Message{
+		Type: "DRIVER_CREDITS_UPDATED",
+		Payload: map[string]interface{}{
+			"driver_id":  driverProfileID,
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	}
+	if driverProfileID != "" {
+		h.SendToDriver(driverProfileID, msg)
+	} else {
+		h.BroadcastToAllDrivers(msg)
+	}
+}
+
+func (h *Hub) NotifyDriverAccountApproved(driverProfileID string) {
+	msg := Message{
+		Type: "DRIVER_ACCOUNT_APPROVED",
+		Payload: map[string]interface{}{
+			"driver_id":  driverProfileID,
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	}
+	if driverProfileID != "" {
+		h.SendToDriver(driverProfileID, msg)
+	} else {
+		h.BroadcastToAllDrivers(msg)
+	}
+}

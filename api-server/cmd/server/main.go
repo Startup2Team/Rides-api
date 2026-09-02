@@ -362,6 +362,7 @@ func main() {
 		// Admin-uploaded driver documents go to the same bucket as mobile ones.
 		adminH.SetObjectStore(uh)
 	}
+	adminH.SetNotifier(hub)
 
 	// Daily operations digest + the /stats and /pending bot commands. Built
 	// here because it needs the upload handler for its storage health check.
