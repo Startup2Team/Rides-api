@@ -288,14 +288,16 @@ func (h *Handler) SetAvailability(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		IsOnline bool `json:"is_online"`
+		IsOnline bool     `json:"is_online"`
+		Lat      *float64 `json:"lat"`
+		Lng      *float64 `json:"lng"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respond.Error(w, apperrors.ErrBadRequest)
 		return
 	}
 
-	if err := h.svc.SetAvailability(r.Context(), claims.UserID, body.IsOnline); err != nil {
+	if err := h.svc.SetAvailabilityWithLocation(r.Context(), claims.UserID, body.IsOnline, body.Lat, body.Lng); err != nil {
 		respond.Error(w, err)
 		return
 	}

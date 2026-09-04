@@ -846,6 +846,20 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 	return s.repo.UpdateOnlineStatus(ctx, userID, isOnline)
 }
 
+func (s *Service) SetAvailabilityWithLocation(ctx context.Context, userID string, isOnline bool, lat, lng *float64) error {
+	err := s.SetAvailability(ctx, userID, isOnline)
+	if err != nil {
+		return err
+	}
+	if isOnline && lat != nil && lng != nil && (*lat != 0 || *lng != 0) {
+		_ = s.UpdateLocation(ctx, userID, LocationUpdate{
+			Lat: *lat,
+			Lng: *lng,
+		})
+	}
+	return nil
+}
+
 // UpdateLocation processes a GPS update: plausibility check, Redis write, DB write (async).
 func (s *Service) UpdateLocation(ctx context.Context, userID string, update LocationUpdate) error {
 	newPoint := geo.Point{Lat: update.Lat, Lng: update.Lng}
