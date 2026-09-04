@@ -195,6 +195,9 @@ func (r *Repository) CreateVehicleFromApply(ctx context.Context, profileID strin
 		PassengerSeats:  seats,
 		LoadCapacityKg:  load,
 	}, true)
+	if err != nil && isUniqueViolation(err) {
+		return nil
+	}
 	return err
 }
 

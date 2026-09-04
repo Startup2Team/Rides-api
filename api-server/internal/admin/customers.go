@@ -18,12 +18,12 @@ func (s *Service) ListCustomers(ctx context.Context, status, search, sort string
 	var args []interface{}
 	n := 1
 
-	wheres = append(wheres, "u.role_state = 'CUSTOMER_ONLY'")
+	wheres = append(wheres, "u.role_state IN ('CUSTOMER_ONLY', 'CUSTOMER')")
 
 	if status == "Suspended" {
 		wheres = append(wheres, "u.is_suspended = TRUE")
 	} else if status == "Active" {
-		wheres = append(wheres, "u.is_suspended = FALSE AND u.role_state = 'CUSTOMER_ONLY'")
+		wheres = append(wheres, "u.is_suspended = FALSE AND u.role_state IN ('CUSTOMER_ONLY', 'CUSTOMER')")
 	}
 	if search != "" {
 		wheres = append(wheres, fmt.Sprintf("(u.phone_number ILIKE $%d OR u.full_name ILIKE $%d OR u.email ILIKE $%d)", n, n, n))

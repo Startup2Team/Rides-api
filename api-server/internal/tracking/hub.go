@@ -46,6 +46,7 @@ func (c *Client) Done() {
 type Hub struct {
 	drivers   map[string]*Client
 	customers map[string]*Client
+	admins    map[string]*Client
 	rdb       goredis.UniversalClient
 	mu        sync.RWMutex
 	log       zerolog.Logger
@@ -56,6 +57,7 @@ func NewHub(rdb goredis.UniversalClient, log zerolog.Logger) *Hub {
 	h := &Hub{
 		drivers:   make(map[string]*Client),
 		customers: make(map[string]*Client),
+		admins:    make(map[string]*Client),
 		rdb:       rdb,
 		log:       log,
 	}
@@ -117,6 +119,15 @@ func (h *Hub) handlePubSubMessage(channel, payload string) {
 				h.log.Warn().Str("ride_id", rideID).Msg("ws: customer send buffer full (pubsub)")
 			}
 		}
+	} else if strings.HasPrefix(channel, "ws:broadcast:drivers") {
+		h.mu.RLock()
+		for _, client := range h.drivers {
+			select {
+			case client.Send <- msg:
+			default:
+			}
+		}
+		h.mu.RUnlock()
 	}
 }
 
@@ -140,6 +151,16 @@ func (h *Hub) RegisterDriver(userID string, client *Client) {
 	// Publish presence to Redis so matching on ANY replica can see this driver.
 	h.MarkDriverPresent(context.Background(), userID)
 	h.log.Info().Str("driver_profile_id", userID).Msg("ws: driver connected")
+
+	// Broadcast presence change to Web Admin in 0ms
+	h.BroadcastToAdmins(Message{
+		Type: "DRIVER_PRESENCE_CHANGED",
+		Payload: map[string]interface{}{
+			"driver_id":  userID,
+			"is_online":  true,
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	})
 }
 
 // UnregisterDriver removes a driver client.
@@ -150,6 +171,52 @@ func (h *Hub) UnregisterDriver(userID string) {
 
 	h.rdb.Del(context.Background(), rkeys.K.DriverWSPresence(userID))
 	h.log.Info().Str("driver_profile_id", userID).Msg("ws: driver disconnected")
+
+	// Broadcast presence change to Web Admin in 0ms
+	h.BroadcastToAdmins(Message{
+		Type: "DRIVER_PRESENCE_CHANGED",
+		Payload: map[string]interface{}{
+			"driver_id":  userID,
+			"is_online":  false,
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	})
+}
+
+func (h *Hub) RegisterAdmin(userID string, client *Client) {
+	h.mu.Lock()
+	if existing, ok := h.admins[userID]; ok {
+		existing.Done()
+	}
+	h.admins[userID] = client
+	h.mu.Unlock()
+	h.log.Info().Str("admin_id", userID).Msg("ws: admin connected")
+}
+
+func (h *Hub) UnregisterAdmin(userID string) {
+	h.mu.Lock()
+	delete(h.admins, userID)
+	h.mu.Unlock()
+	h.log.Info().Str("admin_id", userID).Msg("ws: admin disconnected")
+}
+
+func (h *Hub) BroadcastToAdmins(msg Message) {
+	h.mu.RLock()
+	for _, client := range h.admins {
+		select {
+		case client.Send <- msg:
+		default:
+			h.log.Warn().Str("admin_id", client.UserID).Msg("ws: admin broadcast send buffer full")
+		}
+	}
+	h.mu.RUnlock()
+
+	if h.rdb != nil {
+		payload, err := json.Marshal(msg)
+		if err == nil {
+			h.rdb.Publish(context.Background(), "ws:broadcast:admins", string(payload))
+		}
+	}
 }
 
 // MarkDriverPresent refreshes the driver's Redis presence marker. Called on
@@ -262,4 +329,63 @@ func (h *Hub) ActiveConnectionsCount() (drivers, customers int) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.drivers), len(h.customers)
+}
+
+// BroadcastToAllDrivers sends a real-time WebSocket message to all connected drivers.
+func (h *Hub) BroadcastToAllDrivers(msg Message) {
+	h.mu.RLock()
+	for _, client := range h.drivers {
+		select {
+		case client.Send <- msg:
+		default:
+			h.log.Warn().Str("driver_id", client.UserID).Msg("ws: driver broadcast send buffer full")
+		}
+	}
+	h.mu.RUnlock()
+
+	if h.rdb != nil {
+		payload, err := json.Marshal(msg)
+		if err == nil {
+			h.rdb.Publish(context.Background(), "ws:broadcast:drivers", string(payload))
+		}
+	}
+}
+
+func (h *Hub) NotifyPackageCatalogUpdated() {
+	h.BroadcastToAllDrivers(Message{
+		Type: "PACKAGE_CATALOG_UPDATED",
+		Payload: map[string]interface{}{
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	})
+}
+
+func (h *Hub) NotifyDriverCreditsUpdated(driverProfileID string) {
+	msg := Message{
+		Type: "DRIVER_CREDITS_UPDATED",
+		Payload: map[string]interface{}{
+			"driver_id":  driverProfileID,
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	}
+	if driverProfileID != "" {
+		h.SendToDriver(driverProfileID, msg)
+	} else {
+		h.BroadcastToAllDrivers(msg)
+	}
+}
+
+func (h *Hub) NotifyDriverAccountApproved(driverProfileID string) {
+	msg := Message{
+		Type: "DRIVER_ACCOUNT_APPROVED",
+		Payload: map[string]interface{}{
+			"driver_id":  driverProfileID,
+			"updated_at": time.Now().Format(time.RFC3339),
+		},
+	}
+	if driverProfileID != "" {
+		h.SendToDriver(driverProfileID, msg)
+	} else {
+		h.BroadcastToAllDrivers(msg)
+	}
 }

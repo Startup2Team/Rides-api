@@ -18,6 +18,10 @@ import (
 )
 
 // Handler exposes admin HTTP endpoints.
+type DriverNotifier interface {
+	NotifyDriverAccountApproved(driverProfileID string)
+}
+
 type Handler struct {
 	svc   AdminService
 	auth  AuthService
@@ -26,7 +30,8 @@ type Handler struct {
 	// store persists admin-uploaded driver documents in object storage. Nil when
 	// storage is unconfigured, in which case UploadDriverFile falls back to
 	// (non-durable) local disk.
-	store ObjectStore
+	store    ObjectStore
+	notifier DriverNotifier
 }
 
 func NewHandler(svc AdminService, auth AuthService, auditLog *audit.Logger, env string) *Handler {
@@ -36,6 +41,9 @@ func NewHandler(svc AdminService, auth AuthService, auditLog *audit.Logger, env 
 // SetObjectStore wires the shared upload/object-storage client. Call it during
 // startup once the storage handler is built.
 func (h *Handler) SetObjectStore(s ObjectStore) { h.store = s }
+
+// SetNotifier wires the real-time WebSocket notifier.
+func (h *Handler) SetNotifier(n DriverNotifier) { h.notifier = n }
 
 // adminCtx pulls the admin id + role off the request claims for audit entries.
 func adminCtx(r *http.Request) (id, role string) {
@@ -83,6 +91,9 @@ func (h *Handler) ApproveDriver(w http.ResponseWriter, r *http.Request) {
 	}
 	adminID, role := adminCtx(r)
 	h.audit.Record(r.Context(), adminID, role, "driver.approve", "driver", profileID, "Approved driver application", nil)
+	if h.notifier != nil {
+		h.notifier.NotifyDriverAccountApproved(profileID)
+	}
 	respond.NoContent(w)
 }
 

@@ -207,7 +207,7 @@ const profileSelectCols = `
 	COALESCE(dp.momo_provider, ''),
 	COALESCE(dp.province, ''), COALESCE(dp.district, ''), COALESCE(dp.sector, ''),
 	COALESCE(dp.cell, ''), COALESCE(dp.village, ''),
-	COALESCE(dp.gender, ''),
+	COALESCE(u.gender, ''),
 	dp.passenger_seats, dp.load_capacity_kg,
 	dp.approval_status, dp.approved_by, dp.approved_at,
 	dp.rejection_reason, dp.suspension_reason,
@@ -378,6 +378,18 @@ func (r *Repository) SetOwnNationalID(ctx context.Context, userID, country, numb
 // an attribute of the person, who already has a users row from auth — so this
 // can never be a separate, non-atomic write: either both the application and
 // the ID capture land, or neither does.
+func setUserGenderTx(ctx context.Context, tx pgx.Tx, userID, gender string) error {
+	if gender == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE users
+		SET gender = $1, updated_at = NOW()
+		WHERE id = $2
+	`, gender, userID)
+	return err
+}
+
 func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -392,9 +404,8 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 			city, momo_pay_code, momo_provider,
 			province, district, sector, cell, village,
 			passenger_seats, load_capacity_kg,
-			license_expiry_date, insurance_expiry_date, authorization_expiry_date,
-			gender
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+			license_expiry_date, insurance_expiry_date, authorization_expiry_date
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id
 	`,
 		in.UserID, in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
@@ -402,13 +413,16 @@ func (r *Repository) CreateProfile(ctx context.Context, in ApplyInput) (*Profile
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
-		in.Gender,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := setUserNationalIDTx(ctx, tx, in.UserID, in.NationalIDCountry, in.NationalIDNumber); err != nil {
+		return nil, err
+	}
+
+	if err := setUserGenderTx(ctx, tx, in.UserID, in.Gender); err != nil {
 		return nil, err
 	}
 
@@ -424,14 +438,21 @@ func (r *Repository) UpdateProfileFields(ctx context.Context, profileID string, 
 		SET city          = COALESCE($1, city),
 		    momo_pay_code = COALESCE($2, momo_pay_code),
 		    momo_provider = COALESCE($3, momo_provider),
-		    gender        = COALESCE($4, gender),
 		    updated_at    = NOW()
-		WHERE id = $5
-	`, city, momoPayCode, momoProvider, gender, profileID)
+		WHERE id = $4
+	`, city, momoPayCode, momoProvider, profileID)
 	if err != nil {
 		return err
 	}
-	// fcm_token lives on users table
+	if gender != nil && *gender != "" {
+		_, err = r.db.Exec(ctx,
+			`UPDATE users SET gender = $1, updated_at = NOW()
+			 WHERE id = (SELECT user_id FROM driver_profiles WHERE id = $2)`,
+			*gender, profileID)
+		if err != nil {
+			return err
+		}
+	}
 	if fcmToken != nil {
 		_, err = r.db.Exec(ctx,
 			`UPDATE users SET fcm_token = $1, updated_at = NOW()
@@ -474,6 +495,21 @@ func (r *Repository) VehicleBelongsToDriver(ctx context.Context, driverProfileID
 		)
 	`, vehicleID, driverProfileID).Scan(&exists)
 	return exists, err
+}
+
+// GetPrimaryVehicleID retrieves the active or newest vehicle ID for a driver profile.
+func (r *Repository) GetPrimaryVehicleID(ctx context.Context, driverProfileID string) (*string, error) {
+	var vehID string
+	err := r.db.QueryRow(ctx, `
+		SELECT id FROM driver_vehicles
+		WHERE driver_id = $1
+		ORDER BY is_active DESC, created_at DESC
+		LIMIT 1
+	`, driverProfileID).Scan(&vehID)
+	if err != nil {
+		return nil, err
+	}
+	return &vehID, nil
 }
 
 // UpsertDocument stores a new version of one document, superseding the live one.
@@ -943,21 +979,23 @@ func (r *Repository) UpdateProfileForResubmission(ctx context.Context, in ApplyI
 		    license_expiry_date = $15,
 		    insurance_expiry_date = $16,
 		    authorization_expiry_date = $17,
-		    gender = COALESCE(NULLIF($18, ''), gender),
 		    approval_status = 'PENDING_REVIEW',
 		    rejection_reason = NULL,
 		    updated_at = NOW()
-		WHERE user_id = $19
+		WHERE user_id = $18
 	`,
 		in.TransportType, in.VehiclePlate, in.LicenseNumber, in.DateOfBirth,
 		in.City, in.MomoPayCode, in.MomoProvider,
 		in.Province, in.District, in.Sector, in.Cell, in.Village,
 		in.PassengerSeats, in.LoadCapacityKg,
 		in.LicenseExpiryDate, in.InsuranceExpiryDate, in.AuthorizationExpiryDate,
-		in.Gender,
 		in.UserID,
 	)
 	if err != nil {
+		return err
+	}
+
+	if err := setUserGenderTx(ctx, tx, in.UserID, in.Gender); err != nil {
 		return err
 	}
 

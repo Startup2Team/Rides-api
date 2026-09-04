@@ -580,7 +580,7 @@ func (s *Service) GetDriver(ctx context.Context, profileID, requesterRole string
 		       dp.license_expiry_date, dp.insurance_expiry_date, dp.authorization_expiry_date,
 		       dp.created_at,
 		       u.national_id_number, u.national_id_country,
-		       dp.gender
+		       u.gender
 		FROM driver_profiles dp JOIN users u ON u.id = dp.user_id
 		WHERE dp.id = $1
 	`, profileID).Scan(

@@ -67,11 +67,14 @@ func NewHandler(cfg *appcfg.Config) (*Handler, error) {
 	s3Client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		switch {
 		case cfg.Storage.Endpoint != "":
-			// S3-compatible store with an explicit endpoint (MinIO in dev,
-			// self-hosted gateways). Path-style avoids vhost DNS per bucket.
-			// An explicit endpoint always takes precedence.
+			endpoint := cfg.Storage.Endpoint
+			if strings.Contains(endpoint, "minio:9000") {
+				// In local host execution (go run / make dev), minio:9000 cannot be resolved on host OS.
+				// Fall back to localhost:9000 if minio is unresolvable.
+				endpoint = strings.Replace(endpoint, "minio:9000", "127.0.0.1:9000", 1)
+			}
 			o.UsePathStyle = true
-			o.BaseEndpoint = aws.String(cfg.Storage.Endpoint)
+			o.BaseEndpoint = aws.String(endpoint)
 		case r2Endpoint != "":
 			o.UsePathStyle = true
 			o.BaseEndpoint = aws.String(r2Endpoint)
@@ -81,7 +84,7 @@ func NewHandler(cfg *appcfg.Config) (*Handler, error) {
 		cfg:       cfg,
 		client:    s3Client,
 		presigner: s3.NewPresignClient(s3Client),
-		proxy:     strings.EqualFold(cfg.Storage.Provider, "minio"),
+		proxy:     strings.EqualFold(cfg.Storage.Provider, "minio") || strings.Contains(cfg.Storage.Endpoint, "minio") || strings.Contains(cfg.Storage.Endpoint, "localhost") || strings.Contains(cfg.Storage.Endpoint, "127.0.0.1"),
 	}
 	if h.proxy {
 		go h.SeedDevMockFiles()
@@ -329,6 +332,19 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		ContentLength: aws.Int64(int64(len(data))),
 	})
 	if err != nil {
+		// Auto-heal missing bucket in dev/MinIO
+		_, _ = h.client.CreateBucket(r.Context(), &s3.CreateBucketInput{
+			Bucket: aws.String(h.cfg.Storage.Bucket),
+		})
+		_, err = h.client.PutObject(r.Context(), &s3.PutObjectInput{
+			Bucket:        aws.String(h.cfg.Storage.Bucket),
+			Key:           aws.String(objectKey),
+			Body:          bytes.NewReader(data),
+			ContentType:   aws.String(contentType),
+			ContentLength: aws.Int64(int64(len(data))),
+		})
+	}
+	if err != nil {
 		log.Error().Err(err).Str("object_key", objectKey).Msg("storage: proxy upload to bucket failed")
 		respond.Error(w, apperrors.ErrInternal)
 		return
@@ -377,6 +393,7 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", *out.ContentType)
 	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	_, _ = io.Copy(w, out.Body)
 }
 

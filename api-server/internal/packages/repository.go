@@ -42,19 +42,39 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
-// ListPackages returns active packages for a given vehicle type code.
+// ListPackages returns active packages for a given vehicle type code (or all active packages if vehicleTypeCode is empty).
 func (r *Repository) ListPackages(ctx context.Context, vehicleTypeCode string) ([]*Package, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
-		       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
-		       rp.is_promotional, rp.is_active, rp.created_at, rp.deleted_at
-		FROM ride_packages rp
-		JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
-		WHERE vt.code = $1
-		  AND rp.is_active = TRUE
-		  AND rp.deleted_at IS NULL
-		ORDER BY rp.price_rwf ASC
-	`, vehicleTypeCode)
+	var query string
+	var args []any
+
+	if vehicleTypeCode != "" {
+		query = `
+			SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
+			       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
+			       rp.is_promotional, rp.is_active, rp.created_at, rp.deleted_at
+			FROM ride_packages rp
+			JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
+			WHERE vt.code = $1
+			  AND rp.is_active = TRUE
+			  AND rp.deleted_at IS NULL
+			ORDER BY rp.price_rwf ASC
+		`
+		args = []any{vehicleTypeCode}
+	} else {
+		query = `
+			SELECT rp.id, rp.name, rp.vehicle_type_id, vt.code,
+			       rp.ride_count, rp.bonus_rides, rp.validity_days, rp.price_rwf,
+			       rp.is_promotional, rp.is_active, rp.created_at, rp.deleted_at
+			FROM ride_packages rp
+			JOIN vehicle_types vt ON vt.id = rp.vehicle_type_id
+			WHERE rp.is_active = TRUE
+			  AND rp.deleted_at IS NULL
+			ORDER BY rp.price_rwf ASC
+		`
+		args = []any{}
+	}
+
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

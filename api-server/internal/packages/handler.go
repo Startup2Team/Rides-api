@@ -30,6 +30,11 @@ type BonusAfterPurchase interface {
 	AfterPackagePurchase(ctx context.Context, driverID, creditID, vehicleTypeID string, expiresAt time.Time) (any, error)
 }
 
+type PackageNotifier interface {
+	NotifyPackageCatalogUpdated()
+	NotifyDriverCreditsUpdated(driverProfileID string)
+}
+
 // Handler exposes package and credit HTTP endpoints.
 type Handler struct {
 	svc      *Service
@@ -38,6 +43,7 @@ type Handler struct {
 	bonus    BonusAfterPurchase // optional; nil = bonus disabled
 	ledger   *LedgerService     // v4 entitlement ledger
 	purchase *PurchaseService   // v4 purchase + MoMo lifecycle
+	notifier PackageNotifier
 }
 
 func NewHandler(svc *Service, auditLog *audit.Logger, cfg *config.Config) *Handler {
@@ -52,6 +58,21 @@ func (h *Handler) SetLedger(l *LedgerService) { h.ledger = l }
 
 // SetPurchase wires the v4 purchase/MoMo service.
 func (h *Handler) SetPurchase(p *PurchaseService) { h.purchase = p }
+
+// SetNotifier wires the real-time WebSocket notifier.
+func (h *Handler) SetNotifier(n PackageNotifier) { h.notifier = n }
+
+func (h *Handler) broadcastCatalogUpdate() {
+	if h.notifier != nil {
+		h.notifier.NotifyPackageCatalogUpdated()
+	}
+}
+
+func (h *Handler) broadcastCreditsUpdate(driverID string) {
+	if h.notifier != nil {
+		h.notifier.NotifyDriverCreditsUpdated(driverID)
+	}
+}
 
 // GET /api/v1/driver/entitlements — v4 vehicle-type balances from the ledger.
 func (h *Handler) GetEntitlements(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +345,7 @@ func (h *Handler) AdminCreatePackage(w http.ResponseWriter, r *http.Request) {
 	adminID, role := adminCtx(r)
 	h.audit.Record(r.Context(), adminID, role, "package.create", "ride_packages", pkg.ID, fmt.Sprintf("Created package %s (price: %d RWF)", pkg.Name, pkg.PriceRWF), map[string]any{"package": pkg})
 
+	h.broadcastCatalogUpdate()
 	respond.Created(w, pkg)
 }
 
@@ -349,6 +371,7 @@ func (h *Handler) AdminUpdatePackage(w http.ResponseWriter, r *http.Request) {
 	adminID, role := adminCtx(r)
 	h.audit.Record(r.Context(), adminID, role, "package.update", "ride_packages", pkg.ID, fmt.Sprintf("Updated package %s", pkg.Name), map[string]any{"updates": input})
 
+	h.broadcastCatalogUpdate()
 	respond.OK(w, pkg)
 }
 
@@ -376,6 +399,7 @@ func (h *Handler) AdminTogglePackage(w http.ResponseWriter, r *http.Request) {
 	}
 	h.audit.Record(r.Context(), adminID, role, action, "ride_packages", id, fmt.Sprintf("Toggled package active status to %t", body.IsActive), map[string]any{"is_active": body.IsActive})
 
+	h.broadcastCatalogUpdate()
 	respond.OK(w, map[string]string{"status": "success"})
 }
 
@@ -405,7 +429,8 @@ func (h *Handler) AdminDeletePackage(w http.ResponseWriter, r *http.Request) {
 	adminID, role := adminCtx(r)
 	h.audit.Record(r.Context(), adminID, role, "package.delete", "ride_packages", id, fmt.Sprintf("Soft-deleted package %s", pkgName), map[string]any{"package_id": id})
 
-	respond.OK(w, map[string]string{"status": "success"})
+	h.broadcastCatalogUpdate()
+	respond.OK(w, map[string]string{"status": "deleted"})
 }
 
 // GET /api/v1/admin/campaigns
@@ -571,6 +596,9 @@ func (h *Handler) AdminConfirmPurchase(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, err)
 		return
+	}
+	if p != nil {
+		h.broadcastCreditsUpdate("")
 	}
 	h.audit.Record(r.Context(), adminID, role, "package_purchase.admin_confirm", "package_purchases", id,
 		fmt.Sprintf("Admin manually settled purchase %s (success=%t) → %s", id, success, p.Status),
