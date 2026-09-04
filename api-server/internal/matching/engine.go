@@ -16,6 +16,7 @@ import (
 	"github.com/workspace/ride-platform/internal/driver"
 	"github.com/workspace/ride-platform/internal/notification"
 	"github.com/workspace/ride-platform/internal/ride"
+	"github.com/workspace/ride-platform/internal/routing"
 	"github.com/workspace/ride-platform/internal/tracking"
 	"github.com/workspace/ride-platform/pkg/geo"
 	rkeys "github.com/workspace/ride-platform/pkg/redis"
@@ -35,11 +36,16 @@ type rideServiceInterface interface {
 
 // candidate is an enriched driver result from the GEO search.
 type candidate struct {
-	profileID      string
-	userID         string
-	vehicleType    string
-	fcmToken       *string
-	distanceM      float64
+	profileID   string
+	userID      string
+	vehicleType string
+	fcmToken    *string
+	distanceM   float64
+	// lat/lng are the driver's coordinates at search time, kept only to feed
+	// rankByRoutedETA's OSRM Table sources — never used for the band gate,
+	// which stays on distanceM (straight-line, from Redis GEO).
+	lat            float64
+	lng            float64
 	dailyDeclines  int
 	acceptanceRate float64
 	score          float64
@@ -57,8 +63,20 @@ type Engine struct {
 	log        zerolog.Logger
 	rideSvc    rideServiceInterface
 
+	// router is the optional OSRM client. nil (or a Client whose Enabled() is
+	// false, or cfg.Matching.UseRoutedETA=false) means candidate ranking stays
+	// on straight-line distance exactly as before this field existed — see
+	// SetRoutingClient and rankByRoutedETA.
+	router *routing.Client
+
 	// acceptChannels maps rideID → chan bool
 	acceptChannels sync.Map
+
+	// batcher is the optional Phase-B batched-dispatch pre-pass. nil (the
+	// default) means StartSearch spawns each ride's search immediately, exactly
+	// as before this field existed. Constructed once in NewEngine only when
+	// cfg.Matching.BatchedDispatch is true — the flag is read once at startup.
+	batcher *dispatchBatcher
 }
 
 func NewEngine(
@@ -72,7 +90,7 @@ func NewEngine(
 	log zerolog.Logger,
 	rideSvc rideServiceInterface,
 ) *Engine {
-	return &Engine{
+	e := &Engine{
 		rideRepo:   rideRepo,
 		driverRepo: driverRepo,
 		redis:      rdb,
@@ -83,6 +101,20 @@ func NewEngine(
 		log:        log,
 		rideSvc:    rideSvc,
 	}
+	if cfg != nil && cfg.Matching.BatchedDispatch {
+		e.batcher = newDispatchBatcher(e)
+		log.Info().Int("window_ms", cfg.Matching.BatchWindowMs).
+			Msg("matching: batched dispatch ENABLED")
+	}
+	return e
+}
+
+// SetRoutingClient wires the optional OSRM client used to rank candidates by
+// real-road ETA (rankByRoutedETA). Never called, or called with a Client whose
+// Enabled() is false, means every search keeps ranking by straight-line
+// distance — identical to location.Service.SetRoutingClient's contract.
+func (e *Engine) SetRoutingClient(c *routing.Client) {
+	e.router = c
 }
 
 // StartSearch kicks off the matching loop for a new ride in a goroutine.
@@ -91,6 +123,30 @@ func NewEngine(
 // it the worst case was data-dependent (candidates × offer timeout) with nothing
 // in code enforcing a ceiling, and the customer's screen had no timeout either.
 func (e *Engine) StartSearch(rideID string, pickup geo.Point, transportType string) {
+	// Batched dispatch (opt-in, MATCH_BATCHED_DISPATCH): hand the ride to the
+	// batcher, which collects concurrent same-bucket rides for a short window
+	// and assigns drivers globally before launching each ride's search seeded
+	// with its assigned driver. Enqueue is cheap and non-blocking. When the
+	// flag is off e.batcher is nil and this is byte-for-byte the old behavior.
+	if e.batcher != nil {
+		e.batcher.enqueue(pendingRide{
+			rideID:      rideID,
+			pickup:      pickup,
+			vehicleType: transportType,
+			enqueuedAt:  time.Now(),
+		})
+		return
+	}
+	e.launchSearch(pendingRide{rideID: rideID, pickup: pickup, vehicleType: transportType}, nil)
+}
+
+// launchSearch spawns one ride's search goroutine with the standard GiveUp
+// deadline. seed, when non-nil, is the batched-dispatch driver offered first
+// (see runLoop). This is the single place the search deadline is applied, so
+// the batcher and the direct path share identical timeout semantics; the
+// deadline starts here (at flush), never at enqueue, so batching's window never
+// shortens the actual search budget.
+func (e *Engine) launchSearch(pr pendingRide, seed *candidate) {
 	giveUp := time.Duration(e.cfg.Matching.GiveUpSeconds) * time.Second
 	if giveUp <= 0 {
 		giveUp = 90 * time.Second
@@ -98,7 +154,7 @@ func (e *Engine) StartSearch(rideID string, pickup geo.Point, transportType stri
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), giveUp)
 		defer cancel()
-		e.runLoop(ctx, rideID, pickup, transportType)
+		e.runLoop(ctx, pr.rideID, pr.pickup, pr.vehicleType, seed)
 	}()
 }
 
@@ -130,7 +186,13 @@ func (e *Engine) NotifyAccept(rideID, driverID string, accepted bool) bool {
 // Internal matching loop
 // ──────────────────────────────────────────────────────────────────────────
 
-func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, transportType string) {
+// runLoop is a ride's search executor. seed, when non-nil, is a driver chosen
+// by the batched-dispatch pre-pass to be offered FIRST (a single-driver batch)
+// before the normal banded broadcast; nil means the classic broadcast-only
+// search. Everything after the seed offer — the bands, the second-chance pass,
+// give-up — is unchanged, so a seeded ride whose driver declines self-heals via
+// the exact same path a non-batched ride takes.
+func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, transportType string, seed *candidate) {
 	// Bands are derived from the ETA promise and THIS vehicle type's speed, so a
 	// Fuso search widens over shorter distances than a moto search for the same
 	// promised wait. Pure arithmetic on load-time values — no query.
@@ -164,6 +226,31 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 	// without turning the search into a nag loop against the same dead phones.
 	secondChanceUsed := false
 
+	// Batched-dispatch seed: offer the globally-assigned driver FIRST, as a
+	// single-driver batch, before the normal banded broadcast. This reuses the
+	// EXACT executor (matching:lock, pending_drivers, atomic claimed_by,
+	// onAccepted), so a seeded offer can never double-assign a driver and honors
+	// accept-auth identically. On decline/timeout/offline the driver is marked
+	// tried (and, if an explicit decline, declined) and the ride falls straight
+	// through to today's broadcast — the seed only reorders who is asked first,
+	// it never strands the ride.
+	if seed != nil && seed.profileID != "" {
+		if ctx.Err() == nil && e.hub.IsDriverConnected(seed.profileID) {
+			if cur, err := e.rideRepo.FindByID(ctx, rideID); err == nil && cur != nil && cur.Status == ride.StatusSearching {
+				e.log.Info().Str("ride_id", rideID).Str("driver_id", seed.profileID).
+					Msg("matching: offering batched-assignment seed driver first")
+				if winner := e.offerToBatch(ctx, rideID, []*candidate{seed}, window, declined); winner != nil {
+					e.onAccepted(ctx, rideID, winner)
+					return
+				}
+			}
+		}
+		// Don't immediately re-offer the seed in the first broadcast wave. If it
+		// declined, offerToBatch already recorded it in `declined`; marking it
+		// tried keeps a silent seed out of the wave until the second-chance pass.
+		tried[seed.profileID] = true
+	}
+
 	for {
 		if ctx.Err() != nil {
 			e.giveUp(context.WithoutCancel(ctx), rideID,
@@ -194,6 +281,11 @@ func (e *Engine) runLoop(ctx context.Context, rideID string, pickup geo.Point, t
 		if err != nil {
 			e.log.Warn().Err(err).Str("ride_id", rideID).Msg("matching: candidate search error")
 		}
+
+		// Re-rank by real-road ETA in place of straight-line distance, if both
+		// OSRM and the flag are on. No-op (candidates keep their straight-line
+		// order) when disabled or on any OSRM failure — see rankByRoutedETA.
+		e.rankByRoutedETA(ctx, rideID, pickup, candidates)
 
 		offeredAnyone := false
 		for _, tierRadius := range tiers {
@@ -384,6 +476,11 @@ func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candi
 					Type: "ride_taken", RideID: rideID,
 					Payload: map[string]interface{}{"reason": "Another driver accepted first."},
 				})
+				// See sendOffer's dual-transport note: a backgrounded/reconnecting
+				// driver has no live socket and would never learn they lost the race.
+				e.notify.SendToAllDevices(ctx, c.userID, "Ride no longer available",
+					"Another driver accepted first.", "ride",
+					map[string]string{"type": "ride_taken", "ride_id": rideID})
 				continue
 			}
 			// Record the winner where the rest of the system expects a single value.
@@ -396,6 +493,9 @@ func (e *Engine) offerToBatch(ctx context.Context, rideID string, batch []*candi
 					Type: "ride_taken", RideID: rideID,
 					Payload: map[string]interface{}{"reason": "Another driver accepted first."},
 				})
+				e.notify.SendToAllDevices(ctx, other.userID, "Ride no longer available",
+					"Another driver accepted first.", "ride",
+					map[string]string{"type": "ride_taken", "ride_id": rideID})
 			}
 			return c
 		case <-timer.C:
@@ -588,6 +688,8 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 			vehicleType:    profile.TransportType,
 			fcmToken:       profile.FCMToken,
 			distanceM:      distM,
+			lat:            r.Latitude,
+			lng:            r.Longitude,
 			dailyDeclines:  declines,
 			acceptanceRate: profile.AcceptanceRate,
 			score:          score,
@@ -596,6 +698,100 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 
 	sortCandidates(candidates)
 	return candidates, nil
+}
+
+// rankByRoutedETA re-scores `candidates` by real-road ETA (driver → pickup)
+// from ONE OSRM Table call, in place of the straight-line distance term of
+// the scoring formula, then re-sorts. It never adds, removes, or excludes a
+// candidate, and it never touches distanceM — the band gate in runLoop
+// (c.distanceM > tierRadius) stays straight-line exactly as before. It is
+// pure reordering of who gets offered first.
+//
+// Fail-closed, two independent gates: if e.router is nil/disabled or
+// cfg.Matching.UseRoutedETA is false, this is a no-op and candidates keep
+// today's straight-line order. If the Table call itself errors, times out, or
+// returns a shape that doesn't match the candidate list, this logs and
+// returns without touching a single score — same guarantee. A driver whose
+// OSRM cell is nil (no routable path found) keeps its straight-line score
+// rather than being excluded or forced to the back, so a routing-graph gap
+// never drops an otherwise-eligible driver from the offer order.
+func (e *Engine) rankByRoutedETA(ctx context.Context, rideID string, pickup geo.Point, candidates []*candidate) {
+	if e.router == nil || !e.router.Enabled() || !e.cfg.Matching.UseRoutedETA {
+		return
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	sources := make([]geo.Point, len(candidates))
+	for i, c := range candidates {
+		sources[i] = geo.Point{Lat: c.lat, Lng: c.lng}
+	}
+
+	result, err := e.router.Table(ctx, sources, []geo.Point{pickup})
+	if err != nil {
+		e.log.Warn().Err(err).Str("ride_id", rideID).
+			Msg("matching: OSRM table lookup failed — ranking candidates by straight-line distance")
+		return
+	}
+	if len(result.DurationsSec) != len(candidates) {
+		e.log.Warn().Str("ride_id", rideID).
+			Int("candidates", len(candidates)).Int("rows", len(result.DurationsSec)).
+			Msg("matching: OSRM table row count mismatch — ranking candidates by straight-line distance")
+		return
+	}
+
+	// Normalize against an ABSOLUTE ceiling — the widest configured tier-ETA
+	// promise — mirroring how straight-line scoring normalizes against the
+	// fixed search radius, not against the worst distance actually returned.
+	// This used to normalize against maxETA, the worst ETA in THIS candidate
+	// set: that made the worst candidate always score 1.0 on the 0.6 term
+	// regardless of its absolute ETA, so the term always consumed its full
+	// [0,1] range and crowded out the 0.25/0.15 decline+acceptance weights'
+	// intended influence — and maxETA shifted wave-to-wave as `tried` drivers
+	// left the set, so the same driver's absolute score was unstable across
+	// waves. etaRef fixes both: it's constant for the whole search.
+	etaRef := e.etaRefSeconds()
+
+	for i, c := range candidates {
+		row := result.DurationsSec[i]
+		if len(row) == 0 || row[0] == nil {
+			// No routable path for this candidate: keep its straight-line
+			// score. Both terms are now absolute references (radius vs
+			// etaRef) rather than one relative and one absolute, so mixing a
+			// straight-line score into an otherwise ETA-scored set is no
+			// longer the apples-to-oranges comparison it used to be.
+			continue
+		}
+		etaSec := *row[0]
+		normalizedETA := math.Min(etaSec, etaRef) / etaRef
+		normalizedDeclines := math.Min(float64(c.dailyDeclines), 10) / 10.0
+		acceptancePenalty := 1.0 - c.acceptanceRate/100.0
+		c.score = (normalizedETA * 0.6) + (normalizedDeclines * 0.25) + (acceptancePenalty * 0.15)
+	}
+
+	sortCandidates(candidates)
+}
+
+// etaRefSeconds is the absolute ETA ceiling rankByRoutedETA normalizes
+// against — the matching engine's own pickup-time budget, so a driver's
+// score is stable across waves instead of drifting with whichever ETAs the
+// current candidate set happens to contain. Uses the widest configured
+// tier-ETA promise (MATCH_TIER_ETA_MINUTES, default 10 min — the same
+// default TierRadiiForVehicle falls back to), converted to seconds. Falls
+// back to 10 minutes if TierETAMinutes is unset or every entry is <= 0, so a
+// misconfiguration can't zero/negative-divide the score.
+func (e *Engine) etaRefSeconds() float64 {
+	maxMinutes := 0
+	for _, m := range e.cfg.Matching.TierETAMinutes {
+		if m > maxMinutes {
+			maxMinutes = m
+		}
+	}
+	if maxMinutes <= 0 {
+		maxMinutes = 10
+	}
+	return float64(maxMinutes) * 60
 }
 
 // fallbackPostGIS is used on cold start when Redis GEO index is empty.
@@ -639,6 +835,8 @@ func (e *Engine) fallbackPostGIS(ctx context.Context, pickup geo.Point, vehicleT
 			vehicleType:    n.TransportType,
 			fcmToken:       n.FCMToken,
 			distanceM:      n.DistanceM,
+			lat:            n.Lat,
+			lng:            n.Lng,
 			dailyDeclines:  declines,
 			acceptanceRate: n.AcceptanceRate,
 			score:          score,
@@ -717,6 +915,9 @@ func (e *Engine) onAccepted(ctx context.Context, rideID string, c *candidate) {
 			Type: "ride_taken", RideID: rideID,
 			Payload: map[string]interface{}{"reason": "This ride is no longer available."},
 		})
+		e.notify.SendToAllDevices(ctx, c.userID, "Ride no longer available",
+			"This ride is no longer available.", "ride",
+			map[string]string{"type": "ride_taken", "ride_id": rideID})
 	}
 	// AssignDriver is guarded on status = SEARCHING, so a cancelled ride refuses
 	// the driver here rather than recording one.

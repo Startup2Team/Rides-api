@@ -57,6 +57,7 @@ import (
 	"github.com/workspace/ride-platform/internal/rating"
 	"github.com/workspace/ride-platform/internal/reports"
 	"github.com/workspace/ride-platform/internal/ride"
+	"github.com/workspace/ride-platform/internal/routing"
 	"github.com/workspace/ride-platform/internal/settings"
 	"github.com/workspace/ride-platform/internal/team"
 	"github.com/workspace/ride-platform/internal/telephony"
@@ -252,6 +253,9 @@ func main() {
 	// Logout guard: ForceOffline driver-fault cancels any active ride first, so
 	// signing out is no longer a penalty-free escape from an agreed ride.
 	driverSvc.SetActiveRideCanceller(rideSvc)
+	// Server-side auto-arrival: a location update within the pickup geofence
+	// auto-fires DRIVER_ARRIVED without the driver tapping the button.
+	driverSvc.SetArrivalMarker(rideSvc)
 	// engine needs rideSvc for negotiation timeout; rideSvc needs engine for matching
 	engine := matching.NewEngine(rideRepo, driverRepo, rdb, notifySvc, anaSvc, hub, cfg, log, rideSvc)
 	negSvc := negotiation.NewService(negRepo, rideRepo, rdb, hub, telSvc, anaSvc, cfg, log)
@@ -265,6 +269,15 @@ func main() {
 	adminSvc := admin.NewService(db, log)
 	adminSvc.SetRedis(rdb)
 	locSvc := location.NewService(db, rdb, cfg, log)
+	// Real-road routing (OSRM) is optional — Client.Enabled() is false and
+	// every route lookup keeps using the Haversine estimate whenever OSRM_URL
+	// is unset. See config.RoutingConfig. Shared between location (route/fare
+	// lookups) and matching (candidate ranking) — one client, two independent
+	// consumers; matching also requires MATCH_USE_ROUTED_ETA=true (off by
+	// default) on top of OSRM being enabled.
+	routingClient := routing.New(cfg, log)
+	locSvc.SetRoutingClient(routingClient)
+	engine.SetRoutingClient(routingClient)
 
 	// ── New module services ───────────────────────────────────────────────────
 	incidentSvc := incidents.NewService(incidentRepo)
@@ -491,6 +504,28 @@ func main() {
 					log.Error().Err(err).Msg("abandonment: failed to scan for abandoned rides")
 				} else if n > 0 {
 					log.Warn().Int("count", n).Msg("abandonment: cancelled rides with silent drivers")
+				}
+			}
+		}
+	}()
+
+	// ── Negotiation-deadline sweep ────────────────────────────────────────────
+	// Durable backstop for StartNegotiationTimeout's in-memory timer, which a
+	// deploy/restart wipes with no recovery — a ride could otherwise sit
+	// NEGOTIATING forever. Every 30s we cancel any ride still NEGOTIATING past
+	// its persisted deadline. No-op (and cheap) when nothing has expired.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := rideSvc.CancelExpiredNegotiations(bgCtx); err != nil {
+					log.Error().Err(err).Msg("negotiation-sweep: failed to scan for expired negotiations")
+				} else if n > 0 {
+					log.Warn().Int("count", n).Msg("negotiation-sweep: cancelled stale NEGOTIATING rides")
 				}
 			}
 		}
@@ -1110,6 +1145,7 @@ func main() {
 			r.Delete("/recent/{id}", locH.DeleteRecentLocation)
 			r.Get("/route", locH.GetRoute)
 			r.Post("/route", locH.UpsertRoute)
+			r.Get("/live-route", locH.LiveRoute)
 		})
 	})
 
@@ -1200,6 +1236,11 @@ func main() {
 			r.Post("/drivers/{id}/suspend", adminH.SuspendDriver)
 			r.Post("/drivers/{id}/notify", adminH.NotifyDriver)
 			r.Post("/drivers/{id}/reinstate", adminH.ReinstateDriver)
+			// Per-vehicle approval (migration 089): approve/reject ONE of this
+			// driver's vehicles, independent of every other vehicle they own and
+			// of the driver's own approval_status.
+			r.Post("/drivers/{id}/vehicles/{vehicleId}/approve", adminH.ApproveVehicle)
+			r.Post("/drivers/{id}/vehicles/{vehicleId}/reject", adminH.RejectVehicle)
 			r.Patch("/drivers/{id}/verify", adminH.VerifyDriver)
 			r.Patch("/drivers/{id}/status", adminH.UpdateDriverStatus)
 			r.Post("/drivers/{id}/documents", adminH.UploadDriverDocument)

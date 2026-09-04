@@ -45,6 +45,7 @@ type Config struct {
 	Firebase  FirebaseConfig
 	Telegram  TelegramConfig
 	GMaps     GoogleMapsConfig
+	Routing   RoutingConfig
 	MoMo      MoMoConfig
 	Storage   StorageConfig
 	Matching  MatchingConfig
@@ -211,6 +212,20 @@ type GoogleMapsConfig struct {
 	APIKey string
 }
 
+// RoutingConfig configures the optional real-road routing backend (OSRM).
+type RoutingConfig struct {
+	// OSRMURL is the base URL of a self-hosted OSRM instance (e.g.
+	// http://osrm:5000 — no trailing slash needed). OSRM_URL env var.
+	//
+	// Empty (the default) turns real-road routing OFF entirely: route
+	// lookups fall back to the existing Haversine + road-factor estimate,
+	// exactly as before this feature existed. Routing is an optional
+	// accelerant, never a hard dependency — an OSRM outage or missing config
+	// must never fail a ride or a fare (see TEAM_CONTEXT.md platform
+	// invariants).
+	OSRMURL string
+}
+
 type MoMoConfig struct {
 	APIKey          string
 	SubscriptionKey string
@@ -283,11 +298,73 @@ type MatchingConfig struct {
 	// TierWindowSeconds is how long a broadcast waits for any driver in the band
 	// to accept before moving outward.
 	TierWindowSeconds int
+	// UseRoutedETA switches candidate ranking from straight-line Redis-GEO
+	// distance to real-road ETA (OSRM /table, one call per search: the ≤30 GEO
+	// candidates as sources, the pickup as the single destination). Gated
+	// INDEPENDENTLY of OSRM_URL being set: OSRM can be on for fare/route
+	// lookups (location.Service) without this also being on, and this can
+	// never take effect without OSRM configured (Client.Enabled() is checked
+	// too). Default false — off means byte-for-byte today's straight-line
+	// ranking, and any Table error/timeout falls back to it live regardless of
+	// this flag. Only reorders WHO is offered first; the band gate
+	// (c.distanceM vs tier radius) stays straight-line.
+	UseRoutedETA bool
+
+	// ── Phase-B batched dispatch (all gated by BatchedDispatch) ──────────────
+
+	// BatchedDispatch turns on the batched-dispatch pre-pass: instead of each
+	// new SEARCHING ride immediately spawning its own greedy per-ride search,
+	// rides of the same vehicle type in the same coarse geo cell are collected
+	// for a short window and assigned to drivers by a global MIN-COST
+	// (Hungarian) solve over real-road ETAs — so two customers never both grab
+	// the one driver "in between" them. Default false = byte-for-byte today's
+	// per-ride greedy search. Read ONCE at startup (NewEngine). Fail-closed: any
+	// error, OSRM off, empty matrix, or a single-ride window falls straight back
+	// to the existing StartSearch path, and a batched ride whose assigned driver
+	// declines/times out falls through to the normal banded broadcast — no ride
+	// is ever dropped or stranded, and the executor's atomic double-booking
+	// guards are reused unchanged.
+	BatchedDispatch bool
+	// BatchWindowMs is how long a bucket collects rides before the flush solve.
+	// This is added latency BEFORE the first offer (paid on every ride even at
+	// zero concurrency), so keep it short. The search deadline starts at flush,
+	// not enqueue, so batching never shortens the actual search budget.
+	BatchWindowMs int
+	// BatchMaxDrivers caps the number of candidate drivers fed to one flush's
+	// OSRM /table call (coordinate count, hence cost, grows with it). The union
+	// of every ride's k-nearest drivers is trimmed to this many.
+	BatchMaxDrivers int
+	// BatchKPerRide is how many nearest available drivers each ride contributes
+	// to the candidate union before the global solve.
+	BatchKPerRide int
+	// BatchGeoCellM is the side length, in metres, of the coarse square grid
+	// used to bucket rides: two pickups in different cells never share a batch
+	// (they share no useful drivers and only inflate the OSRM matrix).
+	BatchGeoCellM int
+	// BatchETACapFactor and BatchETACapSlackS define the PER-RIDE FAIRNESS CAP.
+	// A driver may be assigned to a rider only if its ETA to that rider's pickup
+	// is <= BatchETACapFactor × (that rider's best available ETA) +
+	// BatchETACapSlackS seconds. Pairings above the cap are forbidden, so
+	// minimising TOTAL wait can never strand one rider on a far driver to shave
+	// seconds off others. A rider with no in-cap driver is left unassigned and
+	// starts the normal broadcast (never force-matched to a bad driver). The
+	// slack term keeps the cap sane when a rider's best ETA is tiny (a 30s best
+	// with factor 2 + 120s slack = a 180s cap, not a punishing 60s one).
+	BatchETACapFactor float64
+	BatchETACapSlackS float64
 }
 
 type RideConfig struct {
 	StartRadiusM    int
 	CompleteRadiusM int
+	// ArrivalRadiusM gates server-side auto-arrival: when a driver's GPS ping
+	// while DRIVER_EN_ROUTE lands within this radius of the ride's pickup
+	// point, the server transitions the ride to DRIVER_ARRIVED on its own —
+	// the manual "Arrived" button (StartRadiusM-gated) keeps working
+	// unchanged as a fallback. Tighter than StartRadiusM (150m) on purpose:
+	// this fires with no human confirming the driver is actually there, so it
+	// should only trip once they're genuinely at the curb.
+	ArrivalRadiusM int
 	// DevSkipGeofence bypasses arrival/start/complete radius checks.
 	// NEVER set true in production.
 	DevSkipGeofence bool
@@ -428,6 +505,7 @@ func Load() (*Config, error) {
 	cfg.Telegram.DigestTimezone = getEnv("DIGEST_TIMEZONE", cfg.Timezone)
 
 	cfg.GMaps.APIKey = getEnv("GOOGLE_MAPS_API_KEY", "")
+	cfg.Routing.OSRMURL = getEnv("OSRM_URL", "")
 
 	cfg.MoMo.APIKey = getEnv("MOMO_API_KEY", "")
 	cfg.MoMo.SubscriptionKey = getEnv("MOMO_SUBSCRIPTION_KEY", "")
@@ -473,9 +551,22 @@ func Load() (*Config, error) {
 	// the server moved on while the driver's screen still showed 5 seconds left,
 	// so a tap in that gap got NOT_YOUR_OFFER for no visible reason.
 	cfg.Matching.TierWindowSeconds = getEnvInt("MATCH_TIER_WINDOW_SECONDS", 15)
+	// Off by default: OSRM being ON (OSRM_URL) is a separate switch. Both must
+	// be true for candidate ranking to use real-road ETA — see UseRoutedETA doc.
+	cfg.Matching.UseRoutedETA = getEnvBool("MATCH_USE_ROUTED_ETA", false)
+	// Phase-B batched dispatch — OFF by default (byte-for-byte today's greedy
+	// per-ride matching). See MatchingConfig for the full contract.
+	cfg.Matching.BatchedDispatch = getEnvBool("MATCH_BATCHED_DISPATCH", false)
+	cfg.Matching.BatchWindowMs = getEnvInt("MATCH_BATCH_WINDOW_MS", 2000)
+	cfg.Matching.BatchMaxDrivers = getEnvInt("MATCH_BATCH_MAX_DRIVERS", 30)
+	cfg.Matching.BatchKPerRide = getEnvInt("MATCH_BATCH_K_PER_RIDE", 8)
+	cfg.Matching.BatchGeoCellM = getEnvInt("MATCH_BATCH_GEO_CELL_M", 5000)
+	cfg.Matching.BatchETACapFactor = getEnvFloat("MATCH_BATCH_ETA_CAP_FACTOR", 2.0)
+	cfg.Matching.BatchETACapSlackS = getEnvFloat("MATCH_BATCH_ETA_CAP_SLACK_S", 120)
 
 	cfg.Ride.StartRadiusM = getEnvInt("START_RIDE_RADIUS_M", 150)
 	cfg.Ride.CompleteRadiusM = getEnvInt("COMPLETE_RIDE_RADIUS_M", 200)
+	cfg.Ride.ArrivalRadiusM = getEnvInt("AUTO_ARRIVAL_RADIUS_M", 75)
 	cfg.Ride.DevSkipGeofence = getEnvBool("DEV_SKIP_GEOFENCE", false)
 	cfg.Ride.MaxInProgressMinutes = getEnvInt("RIDE_MAX_IN_PROGRESS_MINUTES", 120)
 	cfg.Ride.NoShowVerifyRadiusM = getEnvInt("NO_SHOW_VERIFY_RADIUS_M", 400)

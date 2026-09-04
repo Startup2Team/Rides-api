@@ -107,6 +107,15 @@ type WSNotifier interface {
 	NotifyCustomer(rideID, msgType string, payload map[string]interface{})
 }
 
+// ArrivalMarker lets UpdateLocation/UpdateLocationBatch auto-transition a ride
+// to DRIVER_ARRIVED when a driver's GPS ping lands inside the pickup geofence,
+// without the driver ever tapping the manual "Arrived" button. Implemented by
+// ride.Service.MarkDriverArrivedIfNear and injected in main (driver → ride
+// would be an import cycle, same reason as ActiveRideCanceller above).
+type ArrivalMarker interface {
+	MarkDriverArrivedIfNear(ctx context.Context, rideID, driverProfileID string, point geo.Point) error
+}
+
 // Service handles driver business logic.
 type Service struct {
 	repo           *Repository
@@ -118,6 +127,7 @@ type Service struct {
 	creditChecker  CreditChecker
 	expiryNotifier expiryNotifier
 	rideCanceller  ActiveRideCanceller
+	arrivalMarker  ArrivalMarker
 }
 
 func NewService(repo *Repository, rdb goredis.UniversalClient, ana *analytics.Service, cfg *config.Config, log zerolog.Logger) *Service {
@@ -138,6 +148,13 @@ func (s *Service) SetActiveRideCanceller(c ActiveRideCanceller) {
 // customer in real time — see relayLocationToCustomer.
 func (s *Service) SetWSNotifier(n WSNotifier) {
 	s.wsNotifier = n
+}
+
+// SetArrivalMarker wires the ride service so a location update can auto-fire
+// the DRIVER_ARRIVED transition when the driver reaches the pickup geofence —
+// see maybeAutoMarkArrived.
+func (s *Service) SetArrivalMarker(m ArrivalMarker) {
+	s.arrivalMarker = m
 }
 
 // DemandHeatmap returns bucketed pickup demand over the last windowMin minutes,
@@ -219,6 +236,16 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 				if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); aerr != nil {
 					return nil, fmt.Errorf("update role state: %w", aerr)
 				}
+				// Keep the dev shortcut a full shortcut: without this the driver's
+				// vehicle stays PENDING_REVIEW (per-vehicle approval, migration 089)
+				// even though DEV_AUTO_APPROVE_DRIVERS was explicitly meant to bypass
+				// review entirely, and they'd immediately hit VEHICLE_NOT_APPROVED on
+				// their first go-online. Best-effort/logged: it must not fail an
+				// otherwise-successful dev approval.
+				if verr := s.repo.SetActiveVehicleApprovalStatus(ctx, existing.ID, VehicleStatusApproved); verr != nil {
+					s.log.Warn().Err(verr).Str("driver_profile_id", existing.ID).
+						Msg("DEV_AUTO_APPROVE_DRIVERS: could not sync active vehicle approval status")
+				}
 				s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: resubmitted driver approved instantly")
 			} else {
 				if aerr := s.reopenForReview(ctx, existing); aerr != nil {
@@ -237,6 +264,15 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 				}
 				s.log.Warn().Err(vErr).Str("profile_id", existing.ID).Msg("create additional vehicle from apply failed")
 			}
+			if aerr := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); aerr != nil {
+				return nil, fmt.Errorf("update role state: %w", aerr)
+			}
+			if verr := s.repo.SetActiveVehicleApprovalStatus(ctx, existing.ID, VehicleStatusApproved); verr != nil {
+				s.log.Warn().Err(verr).Str("driver_profile_id", existing.ID).
+					Msg("DEV_AUTO_APPROVE_DRIVERS: could not sync active vehicle approval status")
+			}
+			existing.ApprovalStatus = "APPROVED"
+			s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: existing pending profile approved")
 			return existing, nil
 		}
 
@@ -269,6 +305,10 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*Profile, error) {
 		}
 		if err := s.repo.UpdateUserRoleState(ctx, in.UserID, "DRIVER_ACTIVE"); err != nil {
 			return nil, fmt.Errorf("update role state: %w", err)
+		}
+		if verr := s.repo.SetActiveVehicleApprovalStatus(ctx, profile.ID, VehicleStatusApproved); verr != nil {
+			s.log.Warn().Err(verr).Str("driver_profile_id", profile.ID).
+				Msg("DEV_AUTO_APPROVE_DRIVERS: could not sync active vehicle approval status")
 		}
 		profile.ApprovalStatus = "APPROVED"
 		s.log.Warn().Str("user_id", in.UserID).Msg("DEV_AUTO_APPROVE_DRIVERS: driver approved instantly — disable in production")
@@ -410,6 +450,20 @@ var resubmissionStatuses = map[string]bool{
 	StatusNeedsMoreInfo: true,
 }
 
+// vehicleResubmissionStatuses is resubmissionStatuses' per-vehicle
+// counterpart (migration 089): which driver_vehicles.approval_status values
+// a fresh document upload for a NON-ACTIVE vehicle must reopen into review
+// from. No NEEDS_MORE_INFO or SUSPENDED at the vehicle level (see the
+// VehicleStatus* constants in vehicles.go) — just APPROVED (papers replaced,
+// the approval no longer describes what's on file) and REJECTED (the driver
+// correcting what they were told was wrong). PENDING_REVIEW is deliberately
+// excluded: it is already where this vehicle needs to be, so re-writing it
+// would only be a needless UPDATE + updated_at bump on every upload.
+var vehicleResubmissionStatuses = map[string]bool{
+	VehicleStatusApproved: true,
+	VehicleStatusRejected: true,
+}
+
 // reopenForReview transitions a driver profile back to PENDING_REVIEW after a
 // resubmission (new document upload, or a re-/apply from REJECTED /
 // NEEDS_MORE_INFO) and mirrors role_state to DRIVER_PENDING so the driver
@@ -543,22 +597,66 @@ func (s *Service) UploadDocument(ctx context.Context, userID, documentType, file
 			documentType+" describes the driver, not a vehicle — omit vehicle_id")
 	}
 
+	// targetVehicle is fetched (not just an ownership boolean) because the
+	// scoping decision below needs its IsActive and ApprovalStatus, not just
+	// whether the driver owns it.
+	var targetVehicle *Vehicle
 	if needsVehicle {
-		owned, ownErr := s.repo.VehicleBelongsToDriver(ctx, profile.ID, *vehicleID)
-		if ownErr != nil {
-			return ownErr
+		v, vErr := s.repo.GetVehicle(ctx, profile.ID, *vehicleID)
+		if vErr != nil {
+			if errors.Is(vErr, apperrors.ErrNotFound) {
+				// 404 rather than 403: the caller should not learn whether a vehicle id
+				// they do not own exists.
+				return apperrors.New(http.StatusNotFound, "VEHICLE_NOT_FOUND", "vehicle not found")
+			}
+			return vErr
 		}
-		if !owned {
-			// 404 rather than 403: the caller should not learn whether a vehicle id
-			// they do not own exists.
-			return apperrors.New(http.StatusNotFound, "VEHICLE_NOT_FOUND", "vehicle not found")
-		}
+		targetVehicle = v
 	} else {
 		vehicleID = nil // normalise "" to NULL so the CHECK constraint holds
 	}
 
 	if err := s.repo.UpsertDocument(ctx, profile.ID, documentType, fileURL, sha256, vehicleID, false); err != nil {
 		return err
+	}
+
+	// A document for a specific, NON-ACTIVE vehicle reopens review for ONLY
+	// that vehicle: the driver may be actively earning on a DIFFERENT vehicle
+	// right now, and must not be pulled offline or have their whole
+	// driver_profiles.approval_status reopened just because they uploaded
+	// paperwork for vehicle #2 while working on vehicle #1 — that used to
+	// force-evict an APPROVED, currently-working driver over paperwork for a
+	// vehicle they are not even driving.
+	//
+	// Person-level documents, and documents for the vehicle the driver is
+	// CURRENTLY working on, fall through unchanged to the whole-driver
+	// behaviour below: uploading new papers for the vehicle actually in use,
+	// or for the driver themselves, still needs to pull them back into
+	// review — that vehicle's own approval_status is deliberately left alone
+	// here in either case; the whole-driver reopen (profile back to
+	// PENDING_REVIEW, forced offline) is what gates them, same as before this
+	// feature existed.
+	if needsVehicle && !targetVehicle.IsActive {
+		if vehicleResubmissionStatuses[targetVehicle.ApprovalStatus] {
+			if err := s.repo.SetVehicleApprovalStatus(ctx, targetVehicle.ID, VehicleStatusPendingReview, nil); err != nil {
+				// Same trade-off as the whole-driver path below: the document is
+				// already stored, so failing the request now would misreport a
+				// successful upload as failed. Log loudly — a vehicle stuck
+				// un-reopened on unreviewed papers needs to be visible.
+				s.log.Error().Err(err).
+					Str("driver_profile_id", profile.ID).
+					Str("vehicle_id", targetVehicle.ID).
+					Str("document_type", documentType).
+					Msg("documents: uploaded for a non-active vehicle but could not reopen that vehicle's review")
+				return nil
+			}
+			s.log.Info().
+				Str("driver_profile_id", profile.ID).
+				Str("vehicle_id", targetVehicle.ID).
+				Str("document_type", documentType).
+				Msg("documents: driver replaced a non-active vehicle's document — that vehicle's review reopened; driver profile and online status untouched")
+		}
+		return nil
 	}
 
 	if resubmissionStatuses[profile.ApprovalStatus] {
@@ -646,6 +744,24 @@ func (s *Service) SetAvailability(ctx context.Context, userID string, isOnline b
 	if isOnline {
 		if profile.ApprovalStatus != "APPROVED" {
 			return apperrors.ErrDriverNotActive
+		}
+
+		// 0. Active vehicle must itself be APPROVED (migration 089, per-vehicle
+		// approval). A driver stays APPROVED while a newly added second vehicle
+		// awaits review, but must not be able to switch to and drive THAT
+		// vehicle before it clears review — this is the go-online-time half of
+		// the same gate ActivateVehicle enforces at switch-time; SetAvailability
+		// needs its own copy because a driver can already be online with a
+		// vehicle active when it is (re)opened for review (UploadDocument ->
+		// reopenForReview's per-vehicle scoping) and then goes offline/online
+		// again without switching vehicles at all.
+		activeVehicleStatus, vErr := s.repo.GetActiveVehicleApprovalStatus(ctx, profile.ID)
+		if vErr != nil {
+			return vErr
+		}
+		if activeVehicleStatus != "" && activeVehicleStatus != VehicleStatusApproved {
+			return apperrors.New(http.StatusConflict, "VEHICLE_NOT_APPROVED",
+				"Your active vehicle is awaiting approval. Switch to an approved vehicle or wait for review.")
 		}
 
 		// 1. License Expiry Check
@@ -823,9 +939,41 @@ func (s *Service) UpdateLocation(ctx context.Context, userID string, update Loca
 		}
 
 		_ = s.repo.UpsertLocation(bgCtx, profile.ID, newPoint, update.SpeedKMH, update.Heading)
+		s.maybeAutoMarkArrived(bgCtx, profile.ID, newPoint)
 	}()
 
 	return nil
+}
+
+// maybeAutoMarkArrived is the server-geofence auto-arrival check: it fires
+// only when this driver has an active ride currently DRIVER_EN_ROUTE, gated
+// by a single cheap Redis read before ever calling into ride.Service (which
+// hits Postgres) — the overwhelming majority of pings (driver has no active
+// ride, or the ride isn't in this narrow window) never pay that cost. Called
+// from the background telemetry goroutine, never on the request's critical
+// path: arrival is a best-effort convenience on top of the manual "Arrived"
+// button, which keeps working unchanged as the fallback if this never fires
+// or errors.
+func (s *Service) maybeAutoMarkArrived(ctx context.Context, driverProfileID string, point geo.Point) {
+	if s.arrivalMarker == nil {
+		return
+	}
+	rideID, err := s.redis.Get(ctx, rkeys.K.DriverActiveRide(driverProfileID)).Result()
+	if err != nil || rideID == "" {
+		return
+	}
+	// "DRIVER_EN_ROUTE" mirrors ride.StatusDriverEnRoute's string value — this
+	// package can't import package ride (see ArrivalMarker's doc), so this is
+	// a cheap pre-filter hint only. MarkDriverArrivedIfNear re-checks status
+	// authoritatively against Postgres before transitioning anything.
+	state, err := s.redis.Get(ctx, rkeys.K.RideState(rideID)).Result()
+	if err != nil || state != "DRIVER_EN_ROUTE" {
+		return
+	}
+	if err := s.arrivalMarker.MarkDriverArrivedIfNear(ctx, rideID, driverProfileID, point); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Str("driver_id", driverProfileID).
+			Msg("driver: auto-arrival check failed")
+	}
 }
 
 // UpdateLocationBatch processes a batch of GPS coordinates from the driver asynchronously.
@@ -904,6 +1052,10 @@ func (s *Service) UpdateLocationBatch(ctx context.Context, userID string, batch 
 
 			_ = s.repo.UpsertLocation(bgCtx, profile.ID, pt, update.SpeedKMH, update.Heading)
 		}
+		// Auto-arrival check against the latest (most recent) point only — the
+		// same one already used for plausibility above, not every historical
+		// point in the batch.
+		s.maybeAutoMarkArrived(bgCtx, profile.ID, newPoint)
 	}()
 
 	return nil

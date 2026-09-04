@@ -3,6 +3,7 @@ package ride
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -37,6 +38,38 @@ type MatchingEngineInterface interface {
 
 type RouteFareRecorder interface {
 	RecordAgreedFare(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string, agreedFare float64)
+	// RoutingEnabled reports whether a real-road routing backend (OSRM) is
+	// configured. CreateRide only attempts a route lookup when true, so a
+	// disabled/absent OSRM adds zero extra Redis/DB calls to ride creation —
+	// byte-for-byte today's behavior when the feature flag is off.
+	RoutingEnabled() bool
+	// GetRouteDetails returns the best-available distance/duration for a
+	// pickup→destination pair — a real-road OSRM route when one was computed,
+	// else a Haversine estimate — purely to enrich the ride-creation response
+	// for map drawing / an accurate ETA. It does NOT feed the fare/negotiation
+	// math — that still trusts the client-supplied distance_km exactly as
+	// before this feature, so this call can never change money committed on a
+	// ride.
+	//
+	// durationSeconds is the authoritative "this came from a real OSRM route"
+	// signal: it is set on every OSRM-computed route (including the
+	// degenerate zero-distance case) and nil on every Haversine-fallback
+	// result. geometry is NOT a safe signal on its own — OSRM can return a
+	// real route with no polyline (e.g. origin == destination) — so callers
+	// must gate on durationSeconds, never on geometry alone.
+	GetRouteDetails(ctx context.Context, pickupLat, pickupLng, destLat, destLng float64, vehicleType string) (distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string, found bool, err error)
+}
+
+// RouteInfo is the real-road route computed at ride creation. Only ever
+// constructed by realRouteInfo when OSRM actually produced a real route for
+// this pair — nil whenever routing is disabled, the lookup failed, or it fell
+// back to the Haversine estimate. Informational only, never used for fare or
+// negotiation bounds.
+type RouteInfo struct {
+	DistanceKM      float64
+	DurationMinutes int
+	DurationSeconds *int
+	Geometry        *string
 }
 
 // PackagesService charges a ride credit when a fare is agreed and refunds it
@@ -92,19 +125,22 @@ func (s *Service) SetFareRepository(repo FareConfigRepository) {
 }
 
 // CreateRide creates a new ride in SEARCHING status and triggers matching.
-func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64, idempotencyKey string) (*Ride, error) {
+// The returned RouteInfo is informational only (real-road distance/duration/
+// polyline for the app to draw) — nil whenever routing (OSRM) is disabled or
+// the lookup failed; it never affects the fare that gets stored on the ride.
+func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pickupAddr, destAddr string, pickup, dest geo.Point, initialFare, distanceKM *float64, idempotencyKey string) (*Ride, *RouteInfo, error) {
 	// A cancellation ban blocks BOOKING, not the account. The user keeps their
 	// trips, profile and support access — they just can't request a ride until
 	// the window elapses. Barring them at login instead (which is what we used
 	// to do) told them nothing and left them with a dead app.
 	if err := s.assertCanBook(ctx, customerID); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if idempotencyKey != "" {
 		if existing, err := s.repo.FindRideByIdempotency(ctx, customerID, idempotencyKey); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if existing != nil {
-			return existing, nil
+			return existing, nil, nil
 		}
 	}
 	// ── Concurrent-creation guard ─────────────────────────────────────────────
@@ -114,23 +150,23 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 	createLockKey := rkeys.K.CustomerCreatingRide(customerID)
 	locked, err := s.redis.SetNX(ctx, createLockKey, "1", 10*time.Second).Result()
 	if err != nil {
-		return nil, fmt.Errorf("ride: acquire create lock: %w", err)
+		return nil, nil, fmt.Errorf("ride: acquire create lock: %w", err)
 	}
 	if !locked {
-		return nil, apperrors.ErrRideAlreadyActive
+		return nil, nil, apperrors.ErrRideAlreadyActive
 	}
 	defer s.redis.Del(ctx, createLockKey)
 
 	// Also reject immediately if the customer already has a live ride in Redis.
 	// This catches the case where the client somehow bypasses the UI guard.
 	if existing, _ := s.redis.Get(ctx, rkeys.K.CustomerActiveRide(customerID)).Result(); existing != "" {
-		return nil, apperrors.ErrRideAlreadyActive
+		return nil, nil, apperrors.ErrRideAlreadyActive
 	}
 
 	key := rkeys.K.CustomerDailyCancel(customerID)
 	count, _ := s.redis.Get(ctx, key).Int()
 	if count >= s.cfg.Customer.CancelSuspendThreshold {
-		return nil, apperrors.ErrCustomerSuspended
+		return nil, nil, apperrors.ErrCustomerSuspended
 	}
 
 	var estimatedFare *float64
@@ -138,7 +174,7 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 	if s.fareRepo != nil {
 		pricingCfg, err := s.fareRepo.GetActiveConfig(ctx, transportType)
 		if err != nil {
-			return nil, fmt.Errorf("pricing config unavailable: %w", err)
+			return nil, nil, fmt.Errorf("pricing config unavailable: %w", err)
 		}
 		pricingConfigID = &pricingCfg.ID
 		if distanceKM != nil {
@@ -149,7 +185,7 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 
 	r, err := s.repo.CreateRide(ctx, customerID, transportType, pickupAddr, destAddr, pickup, dest, initialFare, estimatedFare, pricingConfigID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// 15-minute TTL: matching takes at most MaxAttempts × TimeoutSeconds (≈45s).
@@ -177,7 +213,52 @@ func (s *Service) CreateRide(ctx context.Context, customerID, transportType, pic
 	if err := s.repo.SaveRideIdempotency(ctx, customerID, idempotencyKey, r.ID); err != nil {
 		s.log.Warn().Err(err).Str("ride_id", r.ID).Msg("ride: failed to save idempotency key")
 	}
-	return r, nil
+
+	// Real-road route for the response only (map drawing / a precise ETA) —
+	// never used for fare or negotiation bounds, which stick to the
+	// client-supplied distanceKM exactly as before this feature. Only
+	// attempted when a routing backend is actually configured, so a disabled
+	// OSRM adds zero Redis/DB calls here — byte-for-byte today's behavior.
+	// Best-effort: a lookup failure is logged and the ride is still returned;
+	// it must never block or fail ride creation.
+	//
+	// GetRouteDetails' found is always true (it falls back to a Haversine
+	// estimate rather than reporting "not found"), so routeInfo must NOT be
+	// built off found alone — that would silently mislabel a Haversine
+	// straight-line estimate as a real-road route. realRouteInfo gates on the
+	// actual real-route signal instead.
+	var routeInfo *RouteInfo
+	if s.routes != nil && s.routes.RoutingEnabled() {
+		dKM, dMin, dSec, geom, found, rerr := s.routes.GetRouteDetails(ctx, pickup.Lat, pickup.Lng, dest.Lat, dest.Lng, transportType)
+		if rerr != nil {
+			s.log.Warn().Err(rerr).Str("ride_id", r.ID).Msg("ride: route lookup failed at creation — response will omit route info")
+		} else if found {
+			routeInfo = realRouteInfo(dKM, dMin, dSec, geom)
+		}
+	}
+
+	return r, routeInfo, nil
+}
+
+// realRouteInfo builds a RouteInfo from a GetRouteDetails result, but ONLY
+// when OSRM actually computed a real-road route. durationSeconds is the
+// authoritative signal (see RouteFareRecorder.GetRouteDetails' doc comment):
+// it is set on every OSRM-computed route, including the degenerate
+// zero-distance case, and nil on every Haversine-fallback result — geometry
+// alone is not safe to key off, since a real route can legitimately carry no
+// polyline. Returns nil for OSRM-off, timeout, NoRoute, or any
+// Haversine-fallback result, so callers never mislabel a straight-line
+// estimate as a real-road route.
+func realRouteInfo(distanceKM float64, durationMinutes int, durationSeconds *int, geometry *string) *RouteInfo {
+	if durationSeconds == nil {
+		return nil
+	}
+	return &RouteInfo{
+		DistanceKM:      distanceKM,
+		DurationMinutes: durationMinutes,
+		DurationSeconds: durationSeconds,
+		Geometry:        geometry,
+	}
 }
 
 // GetRide retrieves a ride by ID for a customer.
@@ -699,6 +780,15 @@ func (s *Service) CancelRide(ctx context.Context, rideID, customerID, reason str
 					Type: "ride_taken", RideID: rideID,
 					Payload: map[string]interface{}{"reason": "The customer cancelled this request."},
 				})
+				// The WebSocket only reaches a driver with the app open and a live
+				// socket; one backgrounded, reconnecting, or on a second device has
+				// none, and their offer card would linger forever. Mirrors sendOffer's
+				// dual-transport pattern (engine.go).
+				if driverUserID, err := s.repo.FindDriverUserIDByProfileID(ctx, pid); err == nil {
+					s.notify.SendToAllDevices(ctx, driverUserID, "Ride no longer available",
+						"The customer cancelled this request.", "ride",
+						map[string]string{"type": "ride_taken", "ride_id": rideID})
+				}
 			}
 		}
 		s.redis.Set(ctx, rkeys.K.RideState(rideID), string(StatusCancelled), 2*time.Minute)
@@ -771,11 +861,17 @@ func (s *Service) StartNegotiationTimeout(rideID string) {
 				Type: "ride_cancelled", RideID: rideID,
 				Payload: map[string]interface{}{"reason": "Negotiation timed out."},
 			})
+			if driverUserID, err := s.repo.FindDriverUserIDByProfileID(ctx, *r.DriverID); err == nil {
+				s.notify.SendToAllDevices(ctx, driverUserID, "Ride cancelled",
+					"Negotiation timed out.", "ride",
+					map[string]string{"type": "ride_cancelled", "ride_id": rideID})
+			}
 		}
 	}
 
 	t := time.AfterFunc(negotiationTimeoutDuration, fire)
 	s.negTimers.Store(rideID, t)
+	s.persistNegotiationDeadline(rideID)
 }
 
 // ResetNegotiationTimeout resets the inactivity clock back to the full 5 minutes.
@@ -792,6 +888,23 @@ func (s *Service) ResetNegotiationTimeout(rideID string) {
 			}
 		}
 		t.Reset(negotiationTimeoutDuration)
+		s.persistNegotiationDeadline(rideID)
+	}
+}
+
+// persistNegotiationDeadline mirrors the in-memory timer's deadline into
+// Postgres for CancelExpiredNegotiations, the durable backstop that survives
+// a restart wiping negTimers. Best-effort: it's auxiliary bookkeeping for a
+// secondary backstop, not the ride's authoritative state, so a write failure
+// is logged and never blocks the negotiation flow that triggered it — and
+// StartNegotiationTimeout/ResetNegotiationTimeout have no request-scoped
+// context to plumb through (called from background timer callbacks and from
+// the TimeoutManager interface), so this deliberately uses a fresh
+// background context, same as the timer's own "fire" callback below.
+func (s *Service) persistNegotiationDeadline(rideID string) {
+	deadline := time.Now().Add(negotiationTimeoutDuration)
+	if err := s.repo.SetNegotiationDeadline(context.Background(), rideID, deadline); err != nil {
+		s.log.Warn().Err(err).Str("ride_id", rideID).Msg("ride: failed to persist negotiation deadline")
 	}
 }
 
@@ -955,6 +1068,51 @@ func (s *Service) SetDriverArrived(ctx context.Context, rideID, driverUserID str
 		"Your driver is at the pickup point.", "ride",
 		map[string]string{"type": "driver_arrived", "ride_id": rideID})
 	s.startPickupExpiryTimer(rideID)
+	return nil
+}
+
+// MarkDriverArrivedIfNear implements driver.ArrivalMarker — invoked from the
+// driver's location-update path (UpdateLocation/UpdateLocationBatch) so a
+// driver who physically reaches the pickup point is transitioned to
+// DRIVER_ARRIVED even if they never tap the manual "Arrived" button. Reuses
+// MarkDriverArrived for the actual transition, so the consequences (Postgres
+// write, Redis cache, WS, FCM, analytics, pickup-expiry arming) are byte-for-
+// byte identical to the existing server-geofence path; only the trigger
+// differs — the manual button keeps working unchanged.
+//
+// Idempotent and race-safe: MarkDriverArrived's Postgres write is the
+// conditional `UPDATE ... WHERE status = 'DRIVER_EN_ROUTE'` in repo.Transition,
+// so two concurrent GPS pings (or a ping racing the manual tap) can only ever
+// have one winner — the loser gets ErrInvalidTransition, swallowed here as a
+// no-op rather than surfaced as a location-update failure.
+//
+// The ride row is re-fetched from Postgres (not trusted from the caller's
+// Redis-cached status hint) so the driver-id and pickup-point checks below are
+// authoritative, not a TOCTOU race against a stale cache.
+func (s *Service) MarkDriverArrivedIfNear(ctx context.Context, rideID, driverProfileID string, point geo.Point) error {
+	r, err := s.repo.FindByID(ctx, rideID)
+	if err != nil {
+		return fmt.Errorf("auto-arrival: load ride: %w", err)
+	}
+	if r.Status != StatusDriverEnRoute || r.DriverID == nil || *r.DriverID != driverProfileID {
+		return nil
+	}
+	// Same DevSkipGeofence escape hatch as withinRadius (manual start/arrive) —
+	// "NEVER true in production" per its doc comment.
+	if !s.cfg.Ride.DevSkipGeofence {
+		distM := geo.DistanceKM(point, r.PickupPoint) * 1000
+		if distM > float64(s.cfg.Ride.ArrivalRadiusM) {
+			return nil
+		}
+	}
+	if err := s.MarkDriverArrived(ctx, rideID, driverProfileID); err != nil {
+		if errors.Is(err, apperrors.ErrInvalidTransition) {
+			// Lost the race — already transitioned by a concurrent ping or the
+			// manual tap in the same instant. Not an error.
+			return nil
+		}
+		return fmt.Errorf("auto-arrival: mark arrived: %w", err)
+	}
 	return nil
 }
 

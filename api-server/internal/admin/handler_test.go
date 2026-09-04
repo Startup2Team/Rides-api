@@ -34,6 +34,8 @@ type mockSvc struct {
 	requestDriverMoreInfoFn      func(ctx context.Context, profileID, adminUserID, reason string, docs []admin.DriverMoreInfoDocument) error
 	suspendDriverFn              func(ctx context.Context, profileID, adminUserID, reason string, durationHours int) error
 	reinstateDriverFn            func(ctx context.Context, profileID string) error
+	approveVehicleFn             func(ctx context.Context, profileID, vehicleID, adminUserID string) error
+	rejectVehicleFn              func(ctx context.Context, profileID, vehicleID, adminUserID, reason string) error
 	getDriverFn                  func(ctx context.Context, profileID, requesterRole string) (map[string]interface{}, error)
 	updateDriverFn               func(ctx context.Context, profileID string, fields map[string]interface{}) error
 	deleteDriverFn               func(ctx context.Context, profileID string) error
@@ -122,6 +124,18 @@ func (m *mockSvc) SuspendDriver(ctx context.Context, profileID, adminUserID, rea
 }
 func (m *mockSvc) ReinstateDriver(ctx context.Context, profileID string) error {
 	return m.reinstateDriverFn(ctx, profileID)
+}
+func (m *mockSvc) ApproveVehicle(ctx context.Context, profileID, vehicleID, adminUserID string) error {
+	if m.approveVehicleFn != nil {
+		return m.approveVehicleFn(ctx, profileID, vehicleID, adminUserID)
+	}
+	return nil
+}
+func (m *mockSvc) RejectVehicle(ctx context.Context, profileID, vehicleID, adminUserID, reason string) error {
+	if m.rejectVehicleFn != nil {
+		return m.rejectVehicleFn(ctx, profileID, vehicleID, adminUserID, reason)
+	}
+	return nil
 }
 func (m *mockSvc) GetDriver(ctx context.Context, profileID, requesterRole string) (map[string]interface{}, error) {
 	return m.getDriverFn(ctx, profileID, requesterRole)
