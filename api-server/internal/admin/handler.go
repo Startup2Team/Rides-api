@@ -23,10 +23,10 @@ type DriverNotifier interface {
 }
 
 type Handler struct {
-	svc      AdminService
-	auth     AuthService
-	audit    *audit.Logger
-	env      string
+	svc   AdminService
+	auth  AuthService
+	audit *audit.Logger
+	env   string
 	// store persists admin-uploaded driver documents in object storage. Nil when
 	// storage is unconfigured, in which case UploadDriverFile falls back to
 	// (non-durable) local disk.
