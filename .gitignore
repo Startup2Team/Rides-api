@@ -22,8 +22,10 @@ package-lock.json
 coverage.out
 coverage.html
 
-# Env files — never commit secrets
+# Env files & credentials — never commit secrets
 api-server/.env
+*firebase*.json
+api-server/*firebase*.json
 
 # Agent memory (internal notes, not needed in repo)
 .agents/

@@ -852,10 +852,21 @@ func (s *Service) SetAvailabilityWithLocation(ctx context.Context, userID string
 		return err
 	}
 	if isOnline && lat != nil && lng != nil && (*lat != 0 || *lng != 0) {
-		_ = s.UpdateLocation(ctx, userID, LocationUpdate{
-			Lat: *lat,
-			Lng: *lng,
-		})
+		profile, pErr := s.repo.FindProfileByUserID(ctx, userID)
+		if pErr == nil && profile != nil {
+			locJSON, _ := json.Marshal(map[string]interface{}{
+				"lat":        *lat,
+				"lng":        *lng,
+				"updated_at": time.Now().UTC().Format(time.RFC3339),
+			})
+			s.redis.Set(ctx, rkeys.K.DriverLocation(profile.ID), locJSON, 120*time.Second)
+			s.redis.GeoAdd(ctx, rkeys.K.DriverGeoIndex(profile.TransportType), &goredis.GeoLocation{
+				Name:      profile.ID,
+				Longitude: *lng,
+				Latitude:  *lat,
+			})
+			_ = s.repo.UpsertLocation(ctx, profile.ID, geo.Point{Lat: *lat, Lng: *lng}, nil, nil)
+		}
 	}
 	return nil
 }

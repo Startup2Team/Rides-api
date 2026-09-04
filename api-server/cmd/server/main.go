@@ -858,6 +858,9 @@ func main() {
 		momoWebhookAuth(cfg.Payments.WebhookSecret, webhookSecretRequired),
 	).Post(apiV1Prefix+"/webhooks/momo/callback", pkgH.WebhookMoMo)
 
+	// ── Customer Public Location Endpoint ──────────────────────────────────
+	r.Post(apiV1Prefix+"/customer/location", driver.NearbyDriversHandler(driverSvc))
+
 	// ── Customer ──────────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/customer", func(r chi.Router) {
 		r.Use(mw.Authenticate(cfg, rdb))
