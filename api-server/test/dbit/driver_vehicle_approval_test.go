@@ -60,7 +60,7 @@ func setUpApprovedDriverWithOneVehicle(t *testing.T, ctx context.Context, driver
 	t.Helper()
 	authRepo := auth.NewRepository(pool)
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-"+tag, "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-"+tag, "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	p, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
@@ -315,7 +315,7 @@ func TestSetAvailability_LegacyNoVehicleRow_StillAllowsGoOnline(t *testing.T) {
 	authRepo := auth.NewRepository(pool)
 	driverRepo := driver.NewRepository(pool)
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-legacy-1", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-legacy-1", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))

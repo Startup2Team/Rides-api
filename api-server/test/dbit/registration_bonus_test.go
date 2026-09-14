@@ -32,7 +32,7 @@ func TestApproveDriver_RegistrationBonusIsSpendableInV4Ledger(t *testing.T) {
 	// of the real schema this test runs migrations against, not fixtures here.
 
 	phone := uniquePhone()
-	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-regbonus", "android", nil, nil)
+	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-regbonus", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	adminUserID := insertAdminAccount(t, ctx, "reg-bonus-admin-"+uniqueKey("a")+"@rides.test")
@@ -110,7 +110,7 @@ func TestGrantRegistrationBonus_IsIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	phone := uniquePhone()
-	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-regbonus-idem", "android", nil, nil)
+	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-regbonus-idem", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
@@ -170,7 +170,7 @@ func TestApproveDriver_ReapprovalSelfHealsMissingLedgerMirror(t *testing.T) {
 	ctx := context.Background()
 
 	phone := uniquePhone()
-	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-regbonus-selfheal", "android", nil, nil)
+	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-regbonus-selfheal", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	adminUserID := insertAdminAccount(t, ctx, "reg-bonus-selfheal-"+uniqueKey("a")+"@rides.test")

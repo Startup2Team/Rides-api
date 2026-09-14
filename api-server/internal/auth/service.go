@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -49,14 +50,29 @@ func NewService(repo *Repository, rdb goredis.UniversalClient, tel *telephony.Se
 }
 
 // InitiateOTP generates a 6-digit OTP, stores a bcrypt hash, and sends via SMS.
-// fullName and email are stashed in Redis so VerifyOTP can use them on first registration.
-// In non-production the plaintext OTP is returned so the handler can echo it back to the
-// client — eliminates the need to read Docker logs during development.
-func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email *string) (devOTP string, err error) {
+// fullName, email and gender are stashed in Redis so VerifyOTP can use them on
+// first registration. In non-production the plaintext OTP is returned so the
+// handler can echo it back to the client — eliminates the need to read Docker
+// logs during development.
+func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email, gender *string) (devOTP string, err error) {
+	// A phone that already has an account must sign in via /login, not consume
+	// a fresh registration OTP — sending one here costs real Pindo money for a
+	// code that can never legitimately create a NEW account on this number, and
+	// (before this guard) VerifyOTP's existing-user branch silently swallowed
+	// the whole registration payload. This sits ABOVE the pindo_verify branch
+	// below so both OTP modes are covered.
+	if purpose == PurposeRegistration {
+		if _, err := s.repo.FindUserByPhone(ctx, phone); err == nil {
+			return "", apperrors.New(409, "PHONE_ALREADY_REGISTERED", "This number already has an account. Sign in instead.")
+		} else if !errors.Is(err, apperrors.ErrNotFound) {
+			return "", fmt.Errorf("check existing user: %w", err)
+		}
+	}
+
 	// Pindo Verify mode: Pindo generates + sends the PIN and owns its lifecycle.
 	// Cheaper (~$0.002 per successful verification) and no OTP for us to store.
 	if s.cfg.OTPMode == "pindo_verify" {
-		return "", s.initiateWithPindoVerify(ctx, phone, purpose, fullName, email)
+		return "", s.initiateWithPindoVerify(ctx, phone, purpose, fullName, email, gender)
 	}
 
 	otp, err := generateOTP()
@@ -74,12 +90,24 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 		return "", fmt.Errorf("store otp: %w", err)
 	}
 
-	// Stash registration metadata in Redis (TTL matches OTP expiry).
-	if purpose == PurposeRegistration && fullName != "" {
+	// Stash registration metadata in Redis (TTL matches OTP expiry). The stash
+	// is made authoritative PER ATTEMPT: Del first, then HSet only what THIS
+	// request actually supplied. Registration metadata is always fully
+	// re-sent by the client, so without the Del a value from an earlier
+	// attempt on the same number (e.g. gender picked, then deselected before
+	// retrying) would silently survive into an attempt that intentionally
+	// omitted it.
+	if purpose == PurposeRegistration {
 		metaKey := "otp:meta:" + phone
-		s.redis.HSet(ctx, metaKey, "full_name", fullName)
+		s.redis.Del(ctx, metaKey)
+		if fullName != "" {
+			s.redis.HSet(ctx, metaKey, "full_name", fullName)
+		}
 		if email != nil {
 			s.redis.HSet(ctx, metaKey, "email", *email)
+		}
+		if gender != nil {
+			s.redis.HSet(ctx, metaKey, "gender", *gender)
 		}
 		s.redis.Expire(ctx, metaKey, otpExpiryMinutes*time.Minute)
 	}
@@ -107,7 +135,7 @@ func (s *Service) InitiateOTP(ctx context.Context, phone, purpose, deviceID, pla
 
 // initiateWithPindoVerify starts a Pindo Verify session (Pindo generates + sends
 // the PIN) and stashes the request_id so VerifyOTP can validate the entered code.
-func (s *Service) initiateWithPindoVerify(ctx context.Context, phone, purpose, fullName string, email *string) error {
+func (s *Service) initiateWithPindoVerify(ctx context.Context, phone, purpose, fullName string, email, gender *string) error {
 	reqID, err := s.telephony.StartVerify(ctx, phone)
 	if err != nil {
 		s.log.Error().Err(err).Str("phone", logger.MaskMSISDN(phone)).Msg("otp: pindo verify start failed")
@@ -115,12 +143,19 @@ func (s *Service) initiateWithPindoVerify(ctx context.Context, phone, purpose, f
 	}
 	s.redis.Set(ctx, "otp:verify:"+phone, reqID, otpExpiryMinutes*time.Minute)
 
-	// Stash registration metadata (same as the self-SMS path) for first sign-up.
-	if purpose == PurposeRegistration && fullName != "" {
+	// Stash registration metadata (same as the self-SMS path) for first
+	// sign-up — Del-then-HSet, per attempt, for the same reason as above.
+	if purpose == PurposeRegistration {
 		metaKey := "otp:meta:" + phone
-		s.redis.HSet(ctx, metaKey, "full_name", fullName)
+		s.redis.Del(ctx, metaKey)
+		if fullName != "" {
+			s.redis.HSet(ctx, metaKey, "full_name", fullName)
+		}
 		if email != nil {
 			s.redis.HSet(ctx, metaKey, "email", *email)
+		}
+		if gender != nil {
+			s.redis.HSet(ctx, metaKey, "gender", *gender)
 		}
 		s.redis.Expire(ctx, metaKey, otpExpiryMinutes*time.Minute)
 	}
@@ -197,6 +232,7 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 			// Pull registration metadata stashed during InitiateOTP.
 			var fullName *string
 			var email *string
+			var gender *string
 			metaKey := "otp:meta:" + phone
 			if v, e := s.redis.HGet(ctx, metaKey, "full_name").Result(); e == nil && v != "" {
 				fullName = &v
@@ -204,9 +240,12 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 			if v, e := s.redis.HGet(ctx, metaKey, "email").Result(); e == nil && v != "" {
 				email = &v
 			}
+			if v, e := s.redis.HGet(ctx, metaKey, "gender").Result(); e == nil && v != "" {
+				gender = &v
+			}
 			s.redis.Del(ctx, metaKey)
 
-			user, err = s.repo.CreateUser(ctx, phone, deviceID, platform, fullName, email)
+			user, err = s.repo.CreateUser(ctx, phone, deviceID, platform, fullName, email, gender)
 			if err != nil {
 				return nil, nil, fmt.Errorf("create user: %w", err)
 			}
@@ -231,6 +270,12 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code, purpose, deviceID,
 	} else {
 		// Existing user — update device_id
 		_ = s.repo.UpdateUserDeviceID(ctx, user.ID, deviceID)
+		// The duplicate-phone guard in InitiateOTP normally stops an existing
+		// user from ever generating a fresh registration stash, but this still
+		// clears it defensively (e.g. a code issued just before the account was
+		// created some other way) so full_name/email/gender never leaks into a
+		// later registration attempt on this number until TTL.
+		s.redis.Del(ctx, "otp:meta:"+phone)
 	}
 
 	// Self-heal: reconcile role_state to the driver CAPABILITY so a driver whose
@@ -345,8 +390,8 @@ func (s *Service) RequestPhoneChange(ctx context.Context, userID, newPhone strin
 	if existing, ferr := s.repo.FindUserByPhone(ctx, newPhone); ferr == nil && existing.ID != userID {
 		return "", apperrors.New(409, "PHONE_TAKEN", "That phone number is already in use.")
 	}
-	// deviceID/platform/name are only used by the registration path — pass empty.
-	return s.InitiateOTP(ctx, newPhone, PurposePhoneChange, "", "", "", nil)
+	// deviceID/platform/name/gender are only used by the registration path — pass empty/nil.
+	return s.InitiateOTP(ctx, newPhone, PurposePhoneChange, "", "", "", nil, nil)
 }
 
 // VerifyPhoneChange validates the OTP sent to newPhone and, on success, swaps

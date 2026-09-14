@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
@@ -37,9 +38,18 @@ type OTPRecord struct {
 	CreatedAt   time.Time
 }
 
+// DBTX is the minimal database interface Repository requires. *pgxpool.Pool
+// satisfies it automatically — the indirection only exists so tests can
+// substitute a mock (mirrors internal/admin/service.go's identical DBTX).
+type DBTX interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 // Repository handles all auth-related database operations.
 type Repository struct {
-	db *pgxpool.Pool
+	db DBTX
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
@@ -130,14 +140,27 @@ func (r *Repository) FindUserByID(ctx context.Context, id string) (*User, error)
 	return u, nil
 }
 
-func (r *Repository) CreateUser(ctx context.Context, phone, deviceID, platform string, fullName *string, email *string) (*User, error) {
+// CreateUser inserts a new user at registration. gender is normalized here —
+// empty string or anything outside the users_gender_chk CHECK constraint
+// ('male'|'female'|'other') is written as NULL, never "" (the CHECK rejects
+// "" outright). Mirrors the normalization in internal/admin/drivers.go for
+// driver_profiles.gender.
+func (r *Repository) CreateUser(ctx context.Context, phone, deviceID, platform string, fullName, email, gender *string) (*User, error) {
+	var g *string
+	if gender != nil {
+		switch *gender {
+		case "male", "female", "other":
+			g = gender
+		}
+	}
+
 	u := &User{}
 	err := r.db.QueryRow(ctx, `
-		INSERT INTO users (phone_number, device_id, full_name, email, role_state)
-		VALUES ($1, $2, $3, $4, 'CUSTOMER_ONLY')
+		INSERT INTO users (phone_number, device_id, full_name, email, gender, role_state)
+		VALUES ($1, $2, $3, $4, $5, 'CUSTOMER_ONLY')
 		RETURNING id, phone_number, full_name, email, role_state, device_id, fcm_token,
 		          is_suspended, suspension_until, created_at, updated_at
-	`, phone, deviceID, fullName, email).Scan(
+	`, phone, deviceID, fullName, email, g).Scan(
 		&u.ID, &u.PhoneNumber, &u.FullName, &u.Email, &u.RoleState, &u.DeviceID,
 		&u.FCMToken, &u.IsSuspended, &u.SuspensionUntil, &u.CreatedAt, &u.UpdatedAt,
 	)
@@ -304,6 +327,12 @@ func (r *Repository) AnonymizeUser(ctx context.Context, userID string) error {
 
 	// 7. Update user profile to scrub personal details and release phone number.
 	//
+	// gender is cleared too (DB-1 gap fix, register-duplicate-phone-and-gender
+	// review): it went from "rarely set" to a standard registration attribute
+	// once Register started accepting it, so a deleted account would otherwise
+	// permanently retain a declared personal attribute — still joined to
+	// retained ride history via the surviving users.id row.
+	//
 	// national_id_number/country are set to NULL (not merely masked) here —
 	// DB-1 deletion purge. This means a deleted-and-recreated account is NOT
 	// caught by the ban-evasion uniqueness guard (uq_users_national_id): the
@@ -325,6 +354,7 @@ func (r *Repository) AnonymizeUser(ctx context.Context, userID string) error {
 			fcm_token = NULL,
 			national_id_number = NULL,
 			national_id_country = NULL,
+			gender = NULL,
 			updated_at = NOW()
 		WHERE id = $1
 	`, userID)

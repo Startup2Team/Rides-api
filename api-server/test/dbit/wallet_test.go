@@ -18,7 +18,7 @@ func newUserWithWallet(t *testing.T) (userID, phone string) {
 	t.Helper()
 	ctx := context.Background()
 	phone = uniquePhone()
-	u, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-"+phone, "android", nil, nil)
+	u, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-"+phone, "android", nil, nil, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, u.ID)
 	return u.ID, phone

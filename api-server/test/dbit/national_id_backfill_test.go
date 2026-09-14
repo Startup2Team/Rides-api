@@ -32,7 +32,7 @@ func TestNationalIDBackfill_NonDriverUser_LeftUntouched(t *testing.T) {
 	ctx := context.Background()
 	authRepo := auth.NewRepository(pool)
 
-	nonDriver, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nidbf-1", "android", nil, nil)
+	nonDriver, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nidbf-1", "android", nil, nil, nil)
 	require.NoError(t, err)
 	require.Nil(t, queryNationalIDNumber(t, ctx, nonDriver.ID), "sanity: freshly created user has no national ID on file")
 
@@ -67,7 +67,7 @@ func TestNationalIDBackfill_SecondApplyRun_BackfillsZero(t *testing.T) {
 	authRepo := auth.NewRepository(pool)
 	driverRepo := driver.NewRepository(pool)
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nidbf-2", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nidbf-2", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	// A driver with driver_profiles but NO national ID captured — exactly the

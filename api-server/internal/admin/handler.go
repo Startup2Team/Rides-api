@@ -899,7 +899,7 @@ func (h *Handler) UploadDriverDocument(w http.ResponseWriter, r *http.Request) {
 
 // AuthService is the subset of auth.Service used by the admin handler.
 type AuthService interface {
-	InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email *string) (string, error)
+	InitiateOTP(ctx context.Context, phone, purpose, deviceID, platform, fullName string, email, gender *string) (string, error)
 	VerifyOTPCode(ctx context.Context, phone, code string) error
 }
 
@@ -913,7 +913,7 @@ func (h *Handler) SendDriverOTP(w http.ResponseWriter, r *http.Request) {
 		respond.ErrorMsg(w, http.StatusBadRequest, "BAD_REQUEST", "phone is required")
 		return
 	}
-	devOTP, err := h.auth.InitiateOTP(r.Context(), body.Phone, "ADMIN_DRIVER_VERIFY", "admin", "web", "", nil)
+	devOTP, err := h.auth.InitiateOTP(r.Context(), body.Phone, "ADMIN_DRIVER_VERIFY", "admin", "web", "", nil, nil)
 	if err != nil {
 		respond.ErrorMsg(w, http.StatusInternalServerError, "OTP_SEND_FAILED", "failed to send OTP")
 		return

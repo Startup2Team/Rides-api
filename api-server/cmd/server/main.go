@@ -845,7 +845,18 @@ func main() {
 
 	// ── Public auth ───────────────────────────────────────────────────────────
 	r.Route(apiV1Prefix+"/auth", func(r chi.Router) {
-		r.With(mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour)).Post("/register", authH.Register)
+		// Two independent rate limits, same pattern as /waitlist above: per-phone
+		// (fail-closed) caps repeat OTPs to one number, but buckets on
+		// phone_number alone — every distinct number is a fresh bucket, so
+		// without an IP cap too, one caller has unlimited register attempts
+		// (each one billing an SMS, and each 409/OTP-sent response leaking
+		// whether that number already has an account — a phone-enumeration
+		// oracle at IP-unlimited throughput). Stack per-IP on top, exactly
+		// like the waitlist route.
+		r.With(
+			mw.IPRateLimit(cfg, rdb, "otp_send_ip", 20, time.Hour),
+			mw.OTPRateLimit(rdb, "otp_send", 5, time.Hour),
+		).Post("/register", authH.Register)
 		// verify-otp is brute-forceable (6-digit code) — cap attempts per phone too.
 		r.With(mw.OTPRateLimit(rdb, "otp_verify", 10, 15*time.Minute)).Post("/verify-otp", authH.VerifyOTP)
 		// Phone-only login (no OTP). Passwordless, so rate-limit by IP to blunt

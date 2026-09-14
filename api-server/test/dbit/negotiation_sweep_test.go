@@ -51,9 +51,9 @@ func setupNegotiatingRide(t *testing.T, ctx context.Context, repo *ride.Reposito
 	t.Helper()
 	authRepo := auth.NewRepository(pool)
 
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil, nil)
 	require.NoError(t, err)
-	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil)
+	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil, nil)
 	require.NoError(t, err)
 	profileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
 

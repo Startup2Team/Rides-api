@@ -21,7 +21,7 @@ func TestNotificationCampaign_FeedDelivery(t *testing.T) {
 	ctx := context.Background()
 
 	phone := uniquePhone()
-	u, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-camp", "android", nil, nil)
+	u, err := auth.NewRepository(pool).CreateUser(ctx, phone, "dev-camp", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	svc := admin.NewService(pool, zerolog.Nop()) // no notifier → feed-only path
@@ -49,7 +49,7 @@ func TestNotificationCampaign_FeedDelivery(t *testing.T) {
 func TestNotificationCampaign_DraftIsNotDelivered(t *testing.T) {
 	ctx := context.Background()
 
-	u, err := auth.NewRepository(pool).CreateUser(ctx, uniquePhone(), "dev-draft", "android", nil, nil)
+	u, err := auth.NewRepository(pool).CreateUser(ctx, uniquePhone(), "dev-draft", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	svc := admin.NewService(pool, zerolog.Nop())
@@ -94,9 +94,9 @@ func TestNotifyDriver_TargetsOnlyThatDriver(t *testing.T) {
 	ctx := context.Background()
 	repo := auth.NewRepository(pool)
 
-	driverUser, err := repo.CreateUser(ctx, uniquePhone(), "dev-notify-d", "android", nil, nil)
+	driverUser, err := repo.CreateUser(ctx, uniquePhone(), "dev-notify-d", "android", nil, nil, nil)
 	require.NoError(t, err)
-	other, err := repo.CreateUser(ctx, uniquePhone(), "dev-notify-o", "android", nil, nil)
+	other, err := repo.CreateUser(ctx, uniquePhone(), "dev-notify-o", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
@@ -130,9 +130,9 @@ func TestNotificationCampaign_VehicleAudienceFiltersByTransportType(t *testing.T
 	ctx := context.Background()
 	repo := auth.NewRepository(pool)
 
-	moto, err := repo.CreateUser(ctx, uniquePhone(), "dev-moto", "android", nil, nil)
+	moto, err := repo.CreateUser(ctx, uniquePhone(), "dev-moto", "android", nil, nil, nil)
 	require.NoError(t, err)
-	cab, err := repo.CreateUser(ctx, uniquePhone(), "dev-cab", "android", nil, nil)
+	cab, err := repo.CreateUser(ctx, uniquePhone(), "dev-cab", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	insertDriverProfile(t, ctx, moto.ID, "MOTO_BIKE")
