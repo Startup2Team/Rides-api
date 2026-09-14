@@ -98,11 +98,11 @@ func TestUpdateCustomerLocation_NonOwnerRejected(t *testing.T) {
 	svc, repo, _, _ := newTestRideService(t)
 	authRepo := auth.NewRepository(pool)
 
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil, nil)
 	require.NoError(t, err)
-	stranger, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-stranger", "android", nil, nil)
+	stranger, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-stranger", "android", nil, nil, nil)
 	require.NoError(t, err)
-	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil)
+	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil, nil)
 	require.NoError(t, err)
 	driverProfileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
 
@@ -118,9 +118,9 @@ func TestUpdateCustomerLocation_CompletedRideRejected(t *testing.T) {
 	svc, repo, _, _ := newTestRideService(t)
 	authRepo := auth.NewRepository(pool)
 
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil, nil)
 	require.NoError(t, err)
-	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil)
+	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil, nil)
 	require.NoError(t, err)
 	driverProfileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
 
@@ -136,9 +136,9 @@ func TestUpdateCustomerLocation_ActiveRide_CachesAndFansOutToDriver(t *testing.T
 	svc, repo, rdb, hub := newTestRideService(t)
 	authRepo := auth.NewRepository(pool)
 
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil, nil)
 	require.NoError(t, err)
-	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil)
+	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil, nil)
 	require.NoError(t, err)
 	driverProfileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
 

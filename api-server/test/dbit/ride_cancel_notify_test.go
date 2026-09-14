@@ -64,14 +64,14 @@ func TestCancelRide_PreMatch_NotifiesPendingDriversViaFCM(t *testing.T) {
 	svc, repo, rdb := newTestRideServiceWithNotify(t)
 	authRepo := auth.NewRepository(pool)
 
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil, nil)
 	require.NoError(t, err)
 
-	driver1, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-drv1", "android", nil, nil)
+	driver1, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-drv1", "android", nil, nil, nil)
 	require.NoError(t, err)
 	driver1Profile := insertDriverProfile(t, ctx, driver1.ID, "MOTO_BIKE")
 
-	driver2, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-drv2", "android", nil, nil)
+	driver2, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-drv2", "android", nil, nil, nil)
 	require.NoError(t, err)
 	driver2Profile := insertDriverProfile(t, ctx, driver2.ID, "MOTO_BIKE")
 
@@ -98,7 +98,7 @@ func TestCancelRide_PreMatch_NoPendingDrivers_Succeeds(t *testing.T) {
 	svc, repo, _ := newTestRideServiceWithNotify(t)
 	authRepo := auth.NewRepository(pool)
 
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust2", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust2", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	rideID := createTestRide(t, ctx, repo, customer.ID, "", ride.StatusSearching)

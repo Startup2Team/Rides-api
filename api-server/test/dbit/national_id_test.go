@@ -96,9 +96,9 @@ func TestNationalID_DuplicateAcrossDrivers_Rejected(t *testing.T) {
 	authRepo := auth.NewRepository(pool)
 	driverRepo := driver.NewRepository(pool)
 
-	u1, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-1", "android", nil, nil)
+	u1, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-1", "android", nil, nil, nil)
 	require.NoError(t, err)
-	u2, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-2", "android", nil, nil)
+	u2, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-2", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	sameID := fmt.Sprintf("11%014d", time.Now().UnixNano()%100000000000000) // 16 digits, RW-shaped, unique per run
@@ -141,7 +141,7 @@ func TestNationalID_SameUserResubmit_IsNoop(t *testing.T) {
 	authRepo := auth.NewRepository(pool)
 	driverRepo := driver.NewRepository(pool)
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-3", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-3", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	id := fmt.Sprintf("22%014d", time.Now().UnixNano()%100000000000000)
@@ -172,7 +172,7 @@ func TestNationalID_RejectedResubmit_CorrectsID(t *testing.T) {
 	authRepo := auth.NewRepository(pool)
 	driverRepo := driver.NewRepository(pool)
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-10", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-10", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	typoID := fmt.Sprintf("12%014d", time.Now().UnixNano()%100000000000000)
@@ -208,9 +208,9 @@ func TestNationalID_AdminSetDriverNationalID_ConflictAcrossAccounts(t *testing.T
 	driverRepo := driver.NewRepository(pool)
 	adminSvc := admin.NewService(pool, zerolog.Nop())
 
-	u1, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-4", "android", nil, nil)
+	u1, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-4", "android", nil, nil, nil)
 	require.NoError(t, err)
-	u2, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-5", "android", nil, nil)
+	u2, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-5", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	takenID := fmt.Sprintf("33%014d", time.Now().UnixNano()%100000000000000)
@@ -244,7 +244,7 @@ func TestNationalID_OwnerCanEditWhilePending(t *testing.T) {
 	driverRepo := driver.NewRepository(pool)
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-6", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-6", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	originalID := fmt.Sprintf("44%014d", time.Now().UnixNano()%100000000000000)
@@ -275,7 +275,7 @@ func TestNationalID_LocksAfterApproval(t *testing.T) {
 	adminSvc := admin.NewService(pool, zerolog.Nop())
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-7", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-7", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	originalID := fmt.Sprintf("66%014d", time.Now().UnixNano()%100000000000000)
@@ -321,7 +321,7 @@ func TestNationalID_RepoSetOwnNationalID_AtomicGuardRejectsAfterApproval(t *test
 	driverRepo := driver.NewRepository(pool)
 	adminSvc := admin.NewService(pool, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-11", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-nid-11", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	originalID := fmt.Sprintf("11%014d", time.Now().UnixNano()%100000000000000)

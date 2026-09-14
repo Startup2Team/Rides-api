@@ -248,7 +248,7 @@ func TestUpdateVehicle_ActiveVehicleOnActiveRide_StillLocked(t *testing.T) {
 	userID, profile, vehicle1 := setUpApprovedDriverWithOneVehicle(t, ctx, driverRepo, adminSvc, "update-locked")
 
 	authRepo := auth.NewRepository(pool)
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-locked-cust", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-locked-cust", "android", nil, nil, nil)
 	require.NoError(t, err)
 	createTestRide(t, ctx, rideRepo, customer.ID, profile.ID, ride.StatusMatched)
 

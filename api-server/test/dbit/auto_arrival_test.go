@@ -58,9 +58,9 @@ func setupEnRouteRide(t *testing.T, ctx context.Context, repo *ride.Repository) 
 	t.Helper()
 	authRepo := auth.NewRepository(pool)
 
-	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil)
+	customer, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-cust", "android", nil, nil, nil)
 	require.NoError(t, err)
-	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil)
+	driverUser, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-driver", "android", nil, nil, nil)
 	require.NoError(t, err)
 	profileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
 
@@ -114,7 +114,7 @@ func TestMarkDriverArrivedIfNear_WrongDriver_NoOp(t *testing.T) {
 	// A second, unrelated driver's ping against someone else's ride ID must
 	// never transition it — MarkDriverArrivedIfNear re-checks driver identity
 	// against Postgres, not the caller's claim.
-	strangerUser, err := auth.NewRepository(pool).CreateUser(ctx, uniquePhone(), "dev-stranger", "android", nil, nil)
+	strangerUser, err := auth.NewRepository(pool).CreateUser(ctx, uniquePhone(), "dev-stranger", "android", nil, nil, nil)
 	require.NoError(t, err)
 	strangerProfileID := insertDriverProfile(t, ctx, strangerUser.ID, "MOTO_BIKE")
 

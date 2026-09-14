@@ -55,7 +55,7 @@ func TestUploadDocument_ResubmitFromRejected_ReopensReviewAndBumpsUpdatedAt(t *t
 	driverRepo := driver.NewRepository(pool)
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-1", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-1", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
@@ -93,7 +93,7 @@ func TestUploadDocument_ResubmitFromNeedsMoreInfo_ReopensReview(t *testing.T) {
 	driverRepo := driver.NewRepository(pool)
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-2", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-2", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
@@ -117,7 +117,7 @@ func TestUploadDocument_ResubmitFromApproved_ReopensReviewAsPendingReview(t *tes
 	driverRepo := driver.NewRepository(pool)
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-3", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-3", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
@@ -160,7 +160,7 @@ func TestUploadDocument_ResubmitFromApproved_ForcesOnlineDriverOffline(t *testin
 	driverRepo := driver.NewRepository(pool)
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-online", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-online", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
@@ -193,7 +193,7 @@ func TestApply_ResubmitFromRejected_ReturnsPendingReview_NoError(t *testing.T) {
 	driverRepo := driver.NewRepository(pool)
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-4", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-4", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
@@ -216,7 +216,7 @@ func TestApply_ResubmitFromNeedsMoreInfo_ReturnsPendingReview_NoError(t *testing
 	driverRepo := driver.NewRepository(pool)
 	driverSvc := driver.NewService(driverRepo, nil, nil, &config.Config{}, zerolog.Nop())
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-5", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-5", "android", nil, nil, nil)
 	require.NoError(t, err)
 
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
@@ -247,7 +247,7 @@ func TestRequestDriverMoreInfo_NotifiesAndDriverCanResubmit(t *testing.T) {
 	adminSvc := admin.NewService(pool, zerolog.Nop())
 	approverID := createTestAdminAccount(t, ctx)
 
-	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-6", "android", nil, nil)
+	u, err := authRepo.CreateUser(ctx, uniquePhone(), "dev-kyc-6", "android", nil, nil, nil)
 	require.NoError(t, err)
 	profile, err := driverRepo.CreateProfile(ctx, newKYCApplyInput(t, u.ID))
 	require.NoError(t, err)

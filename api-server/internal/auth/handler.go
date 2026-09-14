@@ -49,6 +49,10 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		Email       *string `json:"email"`
 		DeviceID    string  `json:"device_id"    validate:"required"`
 		Platform    string  `json:"platform"     validate:"required,oneof=ios android"`
+		// Gender (FEAT-onboarding-fields) — OPTIONAL, never required. Omitted
+		// (nil) keeps an old mobile client that never sends this field working
+		// exactly as before.
+		Gender *string `json:"gender" validate:"omitempty,oneof=male female other"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -62,7 +66,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	r.Header.Set("X-Phone-Number", body.PhoneNumber)
 
-	devOTP, err := h.svc.InitiateOTP(r.Context(), body.PhoneNumber, PurposeRegistration, body.DeviceID, body.Platform, body.FullName, body.Email)
+	devOTP, err := h.svc.InitiateOTP(r.Context(), body.PhoneNumber, PurposeRegistration, body.DeviceID, body.Platform, body.FullName, body.Email, body.Gender)
 	if err != nil {
 		respond.Error(w, err)
 		return

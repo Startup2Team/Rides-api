@@ -25,7 +25,7 @@ import (
 func TestGrantPurchase_CreditsArePermanent(t *testing.T) {
 	ctx := context.Background()
 
-	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, uniquePhone(), "dev-perm", "android", nil, nil)
+	driverUser, err := auth.NewRepository(pool).CreateUser(ctx, uniquePhone(), "dev-perm", "android", nil, nil, nil)
 	require.NoError(t, err)
 	profileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
 

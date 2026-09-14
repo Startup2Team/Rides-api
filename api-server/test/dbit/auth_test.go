@@ -18,7 +18,7 @@ func TestAuth_CreateAndFindUser(t *testing.T) {
 	phone := uniquePhone()
 	name := "Integration Tester"
 
-	u, err := repo.CreateUser(ctx, phone, "dev-abc", "ios", &name, nil)
+	u, err := repo.CreateUser(ctx, phone, "dev-abc", "ios", &name, nil, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, u.ID)
 	require.Equal(t, phone, u.PhoneNumber)
