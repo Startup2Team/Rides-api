@@ -13,6 +13,7 @@ package intercity
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,11 @@ const BookingCutoff = 5 * time.Minute
 // inventory and balance. Classify separately for the user-facing message only.
 var ErrSeatsUnavailable = errors.New("intercity: seats unavailable")
 
+// ErrBookingNotFound is returned when a booking does not exist OR is not owned
+// by the caller. The two are deliberately indistinguishable so the endpoint
+// cannot be used to probe for other customers' booking ids.
+var ErrBookingNotFound = errors.New("intercity: booking not found")
+
 // Booking is a passenger's claim on seats in a trip.
 type Booking struct {
 	ID            string
@@ -67,4 +73,14 @@ type Booking struct {
 	// Remaining is the seats left on the trip immediately after this operation.
 	// Informational only — never authoritative for a subsequent decision.
 	Remaining int
+}
+
+// DriftError reports trips whose seat counters no longer agree with their
+// bookings, so a hold could not be released. It is a report, never a repair:
+// seat counters are inventory, and a background worker silently "fixing" them
+// would destroy the evidence of whatever caused the drift.
+type DriftError struct{ TripIDs []string }
+
+func (e *DriftError) Error() string {
+	return "intercity: seat counter drift on trips " + strings.Join(e.TripIDs, ", ")
 }
