@@ -46,7 +46,7 @@ func TestApproveDriver_RegistrationBonusIsSpendableInV4Ledger(t *testing.T) {
 		    (user_id, transport_type, vehicle_plate, license_number, date_of_birth, city, momo_pay_code, approval_status)
 		VALUES ($1, 'MOTO_BIKE', $2, $3, '1995-01-01', 'Kigali', '+250788000000', 'PENDING_REVIEW')
 		RETURNING id`,
-		driverUser.ID, "RA "+key[len(key)-6:], "DL-"+key).Scan(&profileID))
+		driverUser.ID, uniquePlate(), "DL-"+key).Scan(&profileID))
 
 	var vehicleTypeID string
 	require.NoError(t, pool.QueryRow(ctx,
@@ -182,7 +182,7 @@ func TestApproveDriver_ReapprovalSelfHealsMissingLedgerMirror(t *testing.T) {
 		    (user_id, transport_type, vehicle_plate, license_number, date_of_birth, city, momo_pay_code, approval_status)
 		VALUES ($1, 'MOTO_BIKE', $2, $3, '1995-01-01', 'Kigali', '+250788000000', 'PENDING_REVIEW')
 		RETURNING id`,
-		driverUser.ID, "RA "+key[len(key)-6:], "DL-"+key).Scan(&profileID))
+		driverUser.ID, uniquePlate(), "DL-"+key).Scan(&profileID))
 
 	bonusRepo := bonus.NewRepository(pool)
 	bonusSvc := bonus.NewService(bonusRepo, zerolog.Nop())
