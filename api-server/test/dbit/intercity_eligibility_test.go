@@ -13,7 +13,6 @@ import (
 	"github.com/workspace/ride-platform/internal/auth"
 	"github.com/workspace/ride-platform/internal/intercity"
 	"github.com/workspace/ride-platform/internal/packages"
-	"github.com/workspace/ride-platform/pkg/geo"
 )
 
 // A moto can seat one passenger, so `total_seats <= capacity` was satisfied by
@@ -136,10 +135,6 @@ func publishInput(t *testing.T, ctx context.Context, vehicleID string, totalSeat
 	return intercity.PublishTripInput{
 		Corridor:        intercityCorridor(t, ctx),
 		VehicleID:       vehicleID,
-		OriginName:      "Kigali",
-		DestinationName: "Musanze",
-		Origin:          geo.Point{Lat: -1.9441, Lng: 30.0619},
-		Destination:     geo.Point{Lat: -1.4995, Lng: 29.6344},
 		StagingAddress:  "Nyabugogo Taxi Park",
 		DepartAt:        time.Now().Add(2*time.Hour + time.Duration(departCounter)*time.Minute),
 		TotalSeats:      totalSeats,

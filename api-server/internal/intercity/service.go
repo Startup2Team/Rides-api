@@ -712,12 +712,11 @@ func bookingView(b *Booking) *BookingView {
 // PublishTripInput is the driver's publish payload. driver_id is NEVER taken
 // from the body — it is resolved from the JWT.
 type PublishTripInput struct {
-	Corridor        string
-	VehicleID       string
-	OriginName      string
-	DestinationName string
-	Origin          geo.Point
-	Destination     geo.Point
+	Corridor  string
+	VehicleID string
+	// OriginName/DestinationName/Origin/Destination are NOT taken from the
+	// caller — publish derives all four from the corridor. Kept off the input
+	// struct entirely so the contract cannot quietly drift back.
 	StagingAddress  string
 	StagingLat      *float64
 	StagingLng      *float64
@@ -746,23 +745,15 @@ const insertTripSQL = `
 // seat at departure, so publishing with nothing to charge against would sell
 // seats the platform can never bill for.
 func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in PublishTripInput) (*TripView, error) {
-	originName, err := validateFreeText("origin_name", in.OriginName, maxPlaceNameLen)
-	if err != nil {
-		return nil, err
-	}
-	destName, err := validateFreeText("destination_name", in.DestinationName, maxPlaceNameLen)
-	if err != nil {
-		return nil, err
-	}
+	// origin_name, destination_name and both endpoint coordinates are DERIVED
+	// from the corridor (migration 101), never accepted from the caller. A
+	// corridor IS a fixed pair of places: letting each driver send their own
+	// would put two drivers' "Musanze" in two different spots, which is the
+	// fragmentation the corridor lookup table exists to prevent — and the client
+	// has no coordinates to send anyway, so publish could not succeed at all.
 	stagingAddr, err := validateFreeText("staging_address", in.StagingAddress, maxStagingAddrLen)
 	if err != nil {
 		return nil, err
-	}
-	if err := in.Origin.Validate(); err != nil {
-		return nil, validationErr("origin coordinates are invalid")
-	}
-	if err := in.Destination.Validate(); err != nil {
-		return nil, validationErr("destination coordinates are invalid")
 	}
 	if (in.StagingLat == nil) != (in.StagingLng == nil) {
 		return nil, validationErr("staging_lat and staging_lng must be supplied together")
@@ -785,14 +776,19 @@ func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in Publi
 
 	// The corridor must exist and be active: `corridor` is an FK, so a bad code
 	// would otherwise surface as a 23503 500 on a path no driver can self-serve.
-	var corridorOK bool
-	if err := s.repo.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM intercity_corridors WHERE code = $1 AND is_active)`,
-		in.Corridor).Scan(&corridorOK); err != nil {
+	var originName, destName string
+	var originLng, originLat, destLng, destLat float64
+	if err := s.repo.db.QueryRow(ctx, `
+		SELECT origin_name, destination_name,
+		       ST_X(origin_point::geometry), ST_Y(origin_point::geometry),
+		       ST_X(destination_point::geometry), ST_Y(destination_point::geometry)
+		  FROM intercity_corridors WHERE code = $1 AND is_active`,
+		in.Corridor).Scan(&originName, &destName,
+		&originLng, &originLat, &destLng, &destLat); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, validationErr("unknown corridor")
+		}
 		return nil, err
-	}
-	if !corridorOK {
-		return nil, validationErr("unknown corridor")
 	}
 
 	// Vehicle ownership and capacity in ONE predicate: the vehicle must be this
@@ -859,7 +855,7 @@ func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in Publi
 	var tripID string
 	err = s.repo.db.QueryRow(ctx, insertTripSQL,
 		profileID, operatorID, in.VehicleID, in.Corridor, originName, destName,
-		in.Origin.Lng, in.Origin.Lat, in.Destination.Lng, in.Destination.Lat,
+		originLng, originLat, destLng, destLat,
 		stagingAddr, in.StagingLng, in.StagingLat,
 		in.DepartAt, in.TotalSeats, in.PricePerSeatRWF).Scan(&tripID)
 	if err != nil {

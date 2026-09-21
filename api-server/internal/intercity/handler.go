@@ -11,7 +11,6 @@ import (
 
 	"github.com/workspace/ride-platform/internal/middleware"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
-	"github.com/workspace/ride-platform/pkg/geo"
 	"github.com/workspace/ride-platform/pkg/respond"
 )
 
@@ -187,14 +186,12 @@ func (h *Handler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 // which would reject the equator and the prime meridian; geo.Point.Validate()
 // in the service is the real range check.
 type publishTripRequest struct {
-	Corridor        string   `json:"corridor"            validate:"required,max=40"`
-	VehicleID       string   `json:"vehicle_id"          validate:"required,uuid"`
-	OriginName      string   `json:"origin_name"         validate:"required"`
-	DestinationName string   `json:"destination_name"    validate:"required"`
-	OriginLat       float64  `json:"origin_lat"          validate:"min=-90,max=90"`
-	OriginLng       float64  `json:"origin_lng"          validate:"min=-180,max=180"`
-	DestLat         float64  `json:"dest_lat"            validate:"min=-90,max=90"`
-	DestLng         float64  `json:"dest_lng"            validate:"min=-180,max=180"`
+	Corridor  string `json:"corridor"            validate:"required,max=40"`
+	VehicleID string `json:"vehicle_id"          validate:"required,uuid"`
+	// No origin/destination name or coordinates: they are DERIVED from the
+	// corridor. These were `validate:"required"`, which made publish return 400
+	// for every well-formed client request — the app has no coordinates for
+	// "Musanze" and never should.
 	StagingAddress  string   `json:"staging_address"     validate:"required"`
 	StagingLat      *float64 `json:"staging_lat"         validate:"omitempty,gte=-90,lte=90"`
 	StagingLng      *float64 `json:"staging_lng"         validate:"omitempty,gte=-180,lte=180"`
@@ -218,12 +215,10 @@ func (h *Handler) PublishTrip(w http.ResponseWriter, r *http.Request) {
 	}
 
 	trip, err := h.svc.PublishTrip(r.Context(), claims.UserID, PublishTripInput{
-		Corridor:        body.Corridor,
-		VehicleID:       body.VehicleID,
-		OriginName:      body.OriginName,
-		DestinationName: body.DestinationName,
-		Origin:          geo.Point{Lat: body.OriginLat, Lng: body.OriginLng},
-		Destination:     geo.Point{Lat: body.DestLat, Lng: body.DestLng},
+		Corridor:  body.Corridor,
+		VehicleID: body.VehicleID,
+		// origin/destination names and coordinates are derived from the corridor,
+		// never accepted from the client.
 		StagingAddress:  body.StagingAddress,
 		StagingLat:      body.StagingLat,
 		StagingLng:      body.StagingLng,
