@@ -1121,7 +1121,19 @@ func (s *Service) PatchTrip(ctx context.Context, tripID, driverUserID string, in
 		   AND dp.id = t.driver_id
 		   AND o.id = t.operator_id
 		   AND (dp.user_id = $2 OR (o.owner_user_id = $2 AND o.deleted_at IS NULL))
-		   AND ($6::int IS NULL OR $6::int >= t.booked_seats + t.held_seats)`
+		   AND ($6::int IS NULL OR $6::int >= t.booked_seats + t.held_seats)
+		   -- total_seats may never exceed the vehicle that is actually going.
+		   -- PublishTrip checks this; PATCH did not, so a 4-seat cab could be
+		   -- patched to 30 and sold 30 times.
+		   AND ($6::int IS NULL OR $6::int <= (
+		         SELECT dv.passenger_seats FROM driver_vehicles dv WHERE dv.id = t.vehicle_id))
+		   -- And it may not be RAISED once anything is sold. Raising it after the
+		   -- sale inflated the no-show discount budget, which was a complete bill
+		   -- escape before the budget was re-denominated; keeping capacity frozen
+		   -- removes the lever entirely rather than relying on one fix.
+		   AND ($6::int IS NULL
+		        OR t.booked_seats + t.held_seats = 0
+		        OR $6::int <= t.total_seats)`
 
 	tag, err := s.repo.db.Exec(ctx, patchSQL+freezeGuard,
 		tripID, driverUserID, stagingAddr, in.StagingLng, in.StagingLat,
@@ -1294,6 +1306,15 @@ func (s *Service) CancelTrip(ctx context.Context, tripID, driverUserID, reason s
 		 WHERE t.id = $1
 		   AND t.deleted_at IS NULL
 		   AND t.status IN ('OPEN', 'BOARDING')
+		   -- Cancellation is not an escape hatch. BOARDING is not time-bounded, so
+		   -- without this a driver could fill the bus, let everyone board, drive
+		   -- the route, collect the cash and THEN tap Cancel: every booking is
+		   -- cancelled, the trip goes terminal, and the departure worker never
+		   -- looks at it again. Whether they paid would be a race against a ticker.
+		   AND t.depart_at > NOW()
+		   -- And once an obligation exists it is immutable; cancelling must not
+		   -- be able to orphan it.
+		   AND NOT EXISTS (SELECT 1 FROM intercity_credit_charges c WHERE c.trip_id = t.id)
 		   AND dp.id = t.driver_id
 		   AND o.id = t.operator_id
 		   AND (dp.user_id = $2 OR (o.owner_user_id = $2 AND o.deleted_at IS NULL))

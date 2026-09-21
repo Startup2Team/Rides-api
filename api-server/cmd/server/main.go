@@ -527,6 +527,66 @@ func main() {
 		}
 	}()
 
+	// ── Intercity workers ─────────────────────────────────────────────────────
+	// Without these the entire intercity product is free and its inventory never
+	// unlocks: no driver is ever charged a credit, and a held seat is never
+	// returned to the pool. Both were found by independent review as dead code —
+	// every method existed and nothing called it.
+	intercityRepo := intercity.NewRepository(db)
+	go func() {
+		holds := time.NewTicker(30 * time.Second)
+		departures := time.NewTicker(60 * time.Second)
+		settle := time.NewTicker(30 * time.Second)
+		stale := time.NewTicker(15 * time.Minute)
+		defer holds.Stop()
+		defer departures.Stop()
+		defer settle.Stop()
+		defer stale.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+
+			case <-holds.C:
+				// Releases seats whose 5-minute hold lapsed. A DriftError means a
+				// trip's counters no longer agree with its bookings: reported, never
+				// auto-repaired, because seat counters are money-adjacent inventory
+				// and a worker quietly patching them destroys the evidence.
+				if n, err := intercityRepo.SweepExpiredHolds(bgCtx, 200); err != nil {
+					log.Warn().Err(err).Int("released", n).Msg("intercity: seat counter drift while releasing holds")
+				} else if n > 0 {
+					log.Info().Int("count", n).Msg("intercity: released expired seat holds")
+				}
+
+			case <-departures.C:
+				// Records what each departed trip owes, on the SERVER's clock.
+				// Driver-triggered creation would make "never press Start" a
+				// completely free trip.
+				if n, err := intercityRepo.RunDepartures(bgCtx, 100); err != nil {
+					log.Error().Err(err).Int("charged_seats", n).Msg("intercity: could not record departure obligations")
+				} else if n > 0 {
+					log.Info().Int("seats", n).Msg("intercity: recorded departure obligations")
+				}
+
+			case <-settle.C:
+				if n, err := intercityRepo.SettleCharges(bgCtx, ledgerSvc, 100); err != nil {
+					log.Error().Err(err).Int("settled", n).Msg("intercity: settlement pass failed")
+				} else if n > 0 {
+					log.Info().Int("count", n).Msg("intercity: settled credit charges")
+				}
+
+			case <-stale.C:
+				// Liveness only: the availability gate is a timestamp that expires on
+				// its own, so a missed transition cannot strand a driver.
+				if n, err := intercityRepo.SweepStaleTrips(bgCtx, 100); err != nil {
+					log.Error().Err(err).Msg("intercity: stale-trip sweep failed")
+				} else if n > 0 {
+					log.Warn().Int("count", n).Msg("intercity: force-completed abandoned trips")
+				}
+			}
+		}
+	}()
+
 	// ── Negotiation-deadline sweep ────────────────────────────────────────────
 	// Durable backstop for StartNegotiationTimeout's in-memory timer, which a
 	// deploy/restart wipes with no recovery — a ride could otherwise sit
