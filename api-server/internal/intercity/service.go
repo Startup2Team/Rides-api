@@ -1599,3 +1599,43 @@ func (s *Service) broadcastSeats(ctx context.Context, tripID string) {
 		s.ws.NotifyTrip(tripID, "trip_full", map[string]interface{}{"trip_id": tripID})
 	}
 }
+
+// Corridor is a bookable route. Corridors are a lookup table rather than free
+// text so that "Kigali", "kigali" and "Kigali " cannot become three different
+// routes — a passenger searching a corridor that HAS trips would otherwise
+// silently see an empty list.
+type Corridor struct {
+	Code            string `json:"code"`
+	OriginName      string `json:"origin_name"`
+	DestinationName string `json:"destination_name"`
+}
+
+// ListCorridors returns the routes a passenger may search, and the routes a
+// driver may publish on.
+//
+// Without this endpoint the corridor picker — the first screen of the flow —
+// has nothing to show, and every screen behind it is unreachable: `corridor` is
+// NOT NULL and REFERENCES intercity_corridors(code), so the client cannot
+// invent one. It is unauthenticated-shaped data (no user content, no PII) but
+// sits inside the authenticated group like the rest of the surface.
+func (s *Service) ListCorridors(ctx context.Context) ([]Corridor, error) {
+	rows, err := s.repo.db.Query(ctx, `
+		SELECT code, origin_name, destination_name
+		  FROM intercity_corridors
+		 WHERE is_active = TRUE
+		 ORDER BY origin_name, destination_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]Corridor, 0, 8)
+	for rows.Next() {
+		var c Corridor
+		if err := rows.Scan(&c.Code, &c.OriginName, &c.DestinationName); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}

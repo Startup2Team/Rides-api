@@ -1003,6 +1003,9 @@ func main() {
 		// ownership predicate is in its SQL, and no response carries the
 		// credit-clamped sellable seat count or a driver phone.
 		// Corridor browse is rate-limited: it is the scrapeable surface.
+		// The corridor list is the entry point of the whole flow: `corridor` is
+		// NOT NULL and FKs to intercity_corridors, so a client cannot invent one.
+		r.Get("/intercity/corridors", intercityH.ListCorridors)
 		r.With(mw.UserRateLimit429(rdb, "intercity_browse", 120, time.Minute)).
 			Get("/intercity/trips", intercityH.ListTrips)
 		r.Get("/intercity/trips/{id}", intercityH.GetTrip)

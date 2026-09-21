@@ -144,6 +144,16 @@ func (h *Handler) ListBookings(w http.ResponseWriter, r *http.Request) {
 	respond.OK(w, map[string]interface{}{"bookings": bookings, "limit": limit, "offset": offset})
 }
 
+// GET /api/v1/customer/intercity/corridors
+func (h *Handler) ListCorridors(w http.ResponseWriter, r *http.Request) {
+	corridors, err := h.svc.ListCorridors(r.Context())
+	if err != nil {
+		respond.Error(w, err)
+		return
+	}
+	respond.OK(w, map[string]interface{}{"corridors": corridors})
+}
+
 // GET /api/v1/customer/intercity/bookings/{id}
 func (h *Handler) GetBooking(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
