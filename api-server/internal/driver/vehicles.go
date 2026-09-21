@@ -65,7 +65,10 @@ type Vehicle struct {
 }
 
 type CreateVehicleInput struct {
-	VehicleTypeCode string   `json:"vehicle_type_code" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+	// HIACE and COASTER were added by migration 100 for intercity. Omitting them
+	// here meant no bus operator could register the vehicle the entire intercity
+	// product exists for — a hardcoded list silently became a feature gate.
+	VehicleTypeCode string   `json:"vehicle_type_code" validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK HIACE COASTER"`
 	PlateNumber     string   `json:"plate_number" validate:"required"`
 	Make            *string  `json:"make"`
 	Model           *string  `json:"model"`
