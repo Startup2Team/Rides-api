@@ -87,7 +87,10 @@ func (h *Handler) ListTrips(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/customer/intercity/trips/{id}
 func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request) {
-	trip, err := h.svc.GetTrip(r.Context(), chi.URLParam(r, "id"))
+	// Customer-scoped: a caller holding a live booking sees the driver's phone
+	// from the lockout window onward. Everyone else gets the same trip without it.
+	claims := middleware.GetClaims(r)
+	trip, err := h.svc.GetTripForCustomer(r.Context(), chi.URLParam(r, "id"), claims.UserID)
 	if err != nil {
 		respond.Error(w, err)
 		return

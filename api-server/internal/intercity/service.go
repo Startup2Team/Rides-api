@@ -306,25 +306,29 @@ func firstName(full string) string {
 // never carries a driver phone: driver contact belongs only to a confirmed
 // passenger, at the gate.
 type TripView struct {
-	ID                 string     `json:"id"`
-	Corridor           string     `json:"corridor"`
-	OriginName         string     `json:"origin_name"`
-	DestinationName    string     `json:"destination_name"`
-	StagingAddress     string     `json:"staging_address"`
-	StagingLat         *float64   `json:"staging_lat,omitempty"`
-	StagingLng         *float64   `json:"staging_lng,omitempty"`
-	DepartAt           time.Time  `json:"depart_at"`
-	PricePerSeatRWF    int        `json:"price_per_seat_rwf"`
-	TotalSeats         int        `json:"total_seats"`
-	SeatsAvailable     int        `json:"seats_available"`
-	MaxSeatsPerBooking int        `json:"max_seats_per_booking"`
-	Status             string     `json:"status"`
-	DriverFirstName    string     `json:"driver_first_name"`
-	OperatorName       string     `json:"operator_name"`
-	VehicleType        string     `json:"vehicle_type"`
-	VehiclePlate       string     `json:"vehicle_plate"`
-	CancelReason       *string    `json:"cancel_reason,omitempty"`
-	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	ID                 string    `json:"id"`
+	Corridor           string    `json:"corridor"`
+	OriginName         string    `json:"origin_name"`
+	DestinationName    string    `json:"destination_name"`
+	StagingAddress     string    `json:"staging_address"`
+	StagingLat         *float64  `json:"staging_lat,omitempty"`
+	StagingLng         *float64  `json:"staging_lng,omitempty"`
+	DepartAt           time.Time `json:"depart_at"`
+	PricePerSeatRWF    int       `json:"price_per_seat_rwf"`
+	TotalSeats         int       `json:"total_seats"`
+	SeatsAvailable     int       `json:"seats_available"`
+	MaxSeatsPerBooking int       `json:"max_seats_per_booking"`
+	Status             string    `json:"status"`
+	DriverFirstName    string    `json:"driver_first_name"`
+	// DriverPhone is populated ONLY for a caller who holds a live booking on
+	// this trip, and only from the lockout window onward — see GetTripForCustomer.
+	// It is never present in the browse list.
+	DriverPhone  *string    `json:"driver_phone,omitempty"`
+	OperatorName string     `json:"operator_name"`
+	VehicleType  string     `json:"vehicle_type"`
+	VehiclePlate string     `json:"vehicle_plate"`
+	CancelReason *string    `json:"cancel_reason,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
 // BookingView is a passenger's own booking.
@@ -440,6 +444,47 @@ const tripByIDSQL = `
 
 // GetTrip returns one trip's public detail. Not restricted to OPEN: a passenger
 // holding a booking must still be able to load the trip once it starts boarding.
+// GetTripForCustomer is GetTrip plus the driver's phone number, and ONLY for a
+// caller who holds a live booking on this trip, from 30 minutes before departure.
+//
+// A passenger meeting a vehicle at Nyabugogo genuinely needs to reach the
+// driver, so the ticket screen's "call your driver" row is real — but the number
+// must not be obtainable by browsing. The rule mirrors the manifest tiering in
+// design §9, which releases a passenger's number to the driver on the same
+// terms: a live booking, and only near departure.
+//
+// Deliberately NOT exposed on the corridor browse or search results: that is the
+// scrapeable surface, and publishing every driver's number there would hand a
+// competitor the whole supply side's contact list.
+func (s *Service) GetTripForCustomer(ctx context.Context, tripID, customerUserID string) (*TripView, error) {
+	t, err := s.GetTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
+
+	var phone *string
+	err = s.repo.db.QueryRow(ctx, `
+		SELECT u.phone_number
+		  FROM intercity_trips t
+		  JOIN driver_profiles dp ON dp.id = t.driver_id
+		  JOIN users u            ON u.id = dp.user_id
+		 WHERE t.id = $1
+		   AND t.deleted_at IS NULL
+		   AND t.depart_at <= NOW() + INTERVAL '30 minutes'
+		   AND EXISTS (
+		         SELECT 1 FROM intercity_bookings b
+		          WHERE b.trip_id = t.id
+		            AND b.customer_id = $2
+		            AND b.deleted_at IS NULL
+		            AND b.status IN ('CONFIRMED','BOARDED'))`,
+		tripID, customerUserID).Scan(&phone)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	t.DriverPhone = phone
+	return t, nil
+}
+
 func (s *Service) GetTrip(ctx context.Context, tripID string) (*TripView, error) {
 	t, err := scanTripView(s.repo.db.QueryRow(ctx, tripByIDSQL, tripID))
 	if errors.Is(err, pgx.ErrNoRows) {
