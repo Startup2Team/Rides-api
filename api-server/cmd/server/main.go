@@ -44,6 +44,7 @@ import (
 	"github.com/workspace/ride-platform/internal/finance"
 	"github.com/workspace/ride-platform/internal/inbox"
 	"github.com/workspace/ride-platform/internal/incidents"
+	"github.com/workspace/ride-platform/internal/intercity"
 	"github.com/workspace/ride-platform/internal/ledger"
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
@@ -394,6 +395,19 @@ func main() {
 			log,
 		)
 	}
+
+	// Intercity: scheduled multi-seat trips. The credit gate is wired to the
+	// CONCRETE *packages.LedgerService (the v4 entitlement ledger) — NOT to
+	// pkgSvc, whose HasCredits has the same signature but reads the orphaned
+	// driver_ride_credits table and would wave a zero-balance driver through.
+	intercitySvc := intercity.NewService(intercity.NewRepository(db), ledgerSvc, log)
+	intercitySvc.SetBroadcaster(hub) // trip_seats_changed / trip_cancelled fan-out
+	intercitySvc.SetNotifier(notifySvc)
+	// Server-side authorisation for trip WebSocket subscriptions: a live
+	// booking, the assigned driver, or the operator owner. The hub is
+	// fail-closed until this is set.
+	hub.SetTripAccessChecker(intercitySvc)
+	intercityH := intercity.NewHandler(intercitySvc)
 
 	ratingRepo := rating.NewRepository(db)
 	ratingH := rating.NewHandler(ratingRepo, log)
@@ -923,6 +937,23 @@ func main() {
 		r.Get("/rides/{ride_id}/rating", ratingH.GetRideRating)
 
 		r.Post("/support/tickets", ticketH.SubmitTicket)
+
+		// Intercity (passenger side). This group admits DRIVER_ACTIVE, so a
+		// rival driver browses here without a second account — every handler's
+		// ownership predicate is in its SQL, and no response carries the
+		// credit-clamped sellable seat count or a driver phone.
+		// Corridor browse is rate-limited: it is the scrapeable surface.
+		r.With(mw.UserRateLimit429(rdb, "intercity_browse", 120, time.Minute)).
+			Get("/intercity/trips", intercityH.ListTrips)
+		r.Get("/intercity/trips/{id}", intercityH.GetTrip)
+		// Holds are free (no payment step), so they are the abuse surface:
+		// cap them per user on top of the service's 2-active-booking rule.
+		r.With(mw.UserRateLimit429(rdb, "intercity_hold", 20, time.Minute)).
+			Post("/intercity/trips/{id}/hold", intercityH.HoldSeats)
+		r.Post("/intercity/bookings/{id}/confirm", intercityH.ConfirmBooking)
+		r.Get("/intercity/bookings", intercityH.ListBookings)
+		r.Get("/intercity/bookings/{id}", intercityH.GetBooking)
+		r.Delete("/intercity/bookings/{id}", intercityH.CancelBooking)
 	})
 
 	// ── Rides (top-level, shared contract with mobile) ──────────────────────────
@@ -1058,6 +1089,22 @@ func main() {
 			r.Get("/earnings/daily", driverH.DailyEarnings)
 			r.Get("/earnings/weekly", driverH.WeeklyEarnings)
 			r.Get("/stats", driverH.Stats)
+
+			// Intercity (driver side). RoleDriverActive ONLY — this group's
+			// gate is exactly that, and it must stay that way: the wider
+			// driver group admits DRIVER_PENDING, and publishing is a
+			// phone-harvesting instrument in the hands of an unreviewed
+			// account (§9). driver_id always comes from the JWT, never a body.
+			r.With(mw.UserRateLimit429(rdb, "intercity_publish", 10, time.Hour)).
+				Post("/intercity/trips", intercityH.PublishTrip)
+			r.Get("/intercity/trips", intercityH.ListDriverTrips)
+			r.Get("/intercity/trips/{id}/manifest", intercityH.GetManifest)
+			r.Patch("/intercity/trips/{id}", intercityH.PatchTrip)
+			r.Post("/intercity/trips/{id}/board", intercityH.BoardPassenger)
+			r.Post("/intercity/trips/{id}/no-show", intercityH.MarkNoShow)
+			r.Post("/intercity/trips/{id}/start", intercityH.StartTrip)
+			r.Post("/intercity/trips/{id}/complete", intercityH.CompleteTrip)
+			r.Delete("/intercity/trips/{id}", intercityH.CancelTrip)
 		})
 	})
 
