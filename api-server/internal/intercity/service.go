@@ -796,18 +796,27 @@ func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in Publi
 	var profileID, vehicleTypeCode string
 	var vehicleSeats *int
 	var typeMaxPassengers int
+	// is_active is selected rather than filtered on, so an inactive vehicle that
+	// genuinely belongs to this driver gets an answer they can act on instead of
+	// the same "not found or not yours" a stranger's vehicle id returns. A driver
+	// with two eligible vehicles otherwise hits a dead end with nothing to fix.
+	var vehicleActive bool
 	err = s.repo.db.QueryRow(ctx, `
-		SELECT dp.id, vt.code, dv.passenger_seats, vt.max_passengers
+		SELECT dp.id, vt.code, dv.passenger_seats, vt.max_passengers, dv.is_active
 		  FROM driver_vehicles dv
 		  JOIN driver_profiles dp ON dp.id = dv.driver_id
 		  JOIN vehicle_types vt   ON vt.id = dv.vehicle_type_id
-		 WHERE dv.id = $1 AND dv.is_active = TRUE AND dp.user_id = $2`,
-		in.VehicleID, driverUserID).Scan(&profileID, &vehicleTypeCode, &vehicleSeats, &typeMaxPassengers)
+		 WHERE dv.id = $1 AND dp.user_id = $2`,
+		in.VehicleID, driverUserID).Scan(&profileID, &vehicleTypeCode, &vehicleSeats, &typeMaxPassengers, &vehicleActive)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, validationErr("vehicle not found or not yours")
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !vehicleActive {
+		return nil, apperrors.New(http.StatusUnprocessableEntity, "VEHICLE_NOT_ACTIVE",
+			"that vehicle is not active — activate it in My vehicles, or pick another one")
 	}
 	// The floor comes BEFORE the capacity check: a moto asking for one seat
 	// satisfies `total_seats <= capacity` perfectly, and that is precisely the
