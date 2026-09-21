@@ -115,21 +115,38 @@ func (r *Repository) grant(ctx context.Context, profileID string, vehicleID *str
 
 // deductOne removes a single ride (bonus first) and is idempotent on rideID:
 // a repeated call for the same ride is a no-op. Returns true if it deducted now.
+// deductOne spends one credit for a CITY ride. Its signature and behaviour are
+// unchanged and must stay that way — internal/ride/service.go depends on both.
 func (r *Repository) deductOne(ctx context.Context, profileID, vehicleTypeID, rideID string) (bool, error) {
+	return r.deductOneUnit(ctx, profileID, vehicleTypeID, "RIDE_DEDUCTION", rideID, &rideID, nil)
+}
+
+// deductOneUnit is the single implementation behind every credit spend.
+//
+// It is shared rather than duplicated deliberately: the paid-before-bonus
+// ordering below and the post-spend balance snapshot written into the ledger
+// are what make balances auditable and reconcilable, and two copies of that
+// logic WILL drift — a future policy change (say, bonus-first) would land in one
+// and not the other.
+//
+// sourceRideID and sourceTripID are mutually exclusive; ride_credit_ledger
+// carries a CHECK (one_source_only) that enforces it.
+//
+// NOTE the asymmetry with refundOne, which always credits the PAID bucket
+// regardless of which bucket was spent. Do NOT "tidy" these two into a generic
+// adjust(+/-1): collapsing them erases that asymmetry and makes an intercity
+// refund path trivial to add, which is the one thing the intercity design
+// eliminates by construction.
+func (r *Repository) deductOneUnit(
+	ctx context.Context,
+	profileID, vehicleTypeID, entryType, idemKey string,
+	sourceRideID, sourceTripID *string,
+) (bool, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-
-	// Idempotency: skip if a deduction for this ride already exists.
-	var exists bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ride_credit_ledger WHERE idempotency_key = $1)`, rideID).Scan(&exists); err != nil {
-		return false, err
-	}
-	if exists {
-		return false, nil
-	}
 
 	var curRides, curBonus int
 	err = tx.QueryRow(ctx, `
@@ -155,13 +172,25 @@ func (r *Repository) deductOne(ctx context.Context, profileID, vehicleTypeID, ri
 		curBonus--
 	}
 
-	if _, err = tx.Exec(ctx, `
+	// ON CONFLICT rather than a SELECT EXISTS pre-check: two workers that both
+	// pass a pre-check would race, and one would get a raw 23505 that reads like
+	// a failure when the charge in fact succeeded. RowsAffected() == 0 here means
+	// ALREADY CHARGED, which is why this returns (false, nil) and not an error.
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO ride_credit_ledger
-		    (driver_id, vehicle_type_id, entry_type, rides_delta, bonus_delta, balance_rides, balance_bonus, source_ride_id, idempotency_key)
-		VALUES ($1,$2,'RIDE_DEDUCTION',$3,$4,$5,$6,$7,$8)
-	`, profileID, vehicleTypeID, ridesDelta, bonusDelta, curRides, curBonus, rideID, rideID); err != nil {
+		    (driver_id, vehicle_type_id, entry_type, rides_delta, bonus_delta,
+		     balance_rides, balance_bonus, source_ride_id, source_intercity_trip_id, idempotency_key)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (idempotency_key) DO NOTHING
+	`, profileID, vehicleTypeID, entryType, ridesDelta, bonusDelta,
+		curRides, curBonus, sourceRideID, sourceTripID, idemKey)
+	if err != nil {
 		return false, err
 	}
+	if tag.RowsAffected() == 0 {
+		return false, nil // already charged
+	}
+
 	if _, err = tx.Exec(ctx, `
 		UPDATE driver_entitlements SET rides_remaining = $3, bonus_remaining = $4, updated_at = now()
 		WHERE driver_id = $1 AND vehicle_type_id = $2
@@ -418,3 +447,18 @@ func (l *LedgerService) ListEntitlementsForUser(ctx context.Context, userID stri
 }
 
 func ptr(s string) *string { return &s }
+
+// DeductForIntercity spends one credit for ONE intercity seat.
+//
+// It takes the driver profile id and vehicle type id DIRECTLY rather than
+// resolving them from a user id, because settlement happens after departure:
+// re-resolving could land the charge on a different entitlement pool than the
+// publish gate checked, if the driver changed or deactivated a vehicle in
+// between. The charge row freezes both at departure.
+//
+// Returns (false, nil) when this key was already charged. Callers MUST treat
+// that as SUCCESS — treating it as a failure would bill a driver and then
+// penalise them for non-payment.
+func (l *LedgerService) DeductForIntercity(ctx context.Context, profileID, vehicleTypeID, idemKey, tripID string) (bool, error) {
+	return l.repo.deductOneUnit(ctx, profileID, vehicleTypeID, "INTERCITY_DEDUCTION", idemKey, nil, &tripID)
+}
