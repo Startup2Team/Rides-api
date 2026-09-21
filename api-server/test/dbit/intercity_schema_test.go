@@ -267,11 +267,16 @@ func TestIntercity_ValueBoundsAreEnforced(t *testing.T) {
 	tripID := insertIntercityTrip(t, ctx, 6)
 	cust := insertIntercityCustomer(t, ctx)
 
+	// The CHECK enforces only what is STRUCTURALLY impossible — a booking larger
+	// than the largest vehicle. The anti-abuse rule ("no account takes a whole
+	// vehicle") is proportional to total_seats and lives in the service layer,
+	// because a CHECK cannot see the parent trip. Five seats on a Coaster is an
+	// ordinary family booking and must be allowed here.
 	_, err := pool.Exec(ctx, `
 		INSERT INTO intercity_bookings
 		    (trip_id, customer_id, seats, status, price_per_seat_rwf, hold_expires_at)
-		VALUES ($1, $2, 9, 'HELD', 3000, NOW() + interval '5 minutes')`, tripID, cust)
-	require.Error(t, err, "seats must be capped so no one account takes a whole vehicle")
+		VALUES ($1, $2, 31, 'HELD', 3000, NOW() + interval '5 minutes')`, tripID, cust)
+	require.Error(t, err, "a booking larger than any vehicle must be rejected")
 
 	_, err = pool.Exec(ctx,
 		`UPDATE intercity_trips SET price_per_seat_rwf = 0 WHERE id = $1`, tripID)

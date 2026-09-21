@@ -60,17 +60,46 @@ func insertIntercityTrip(t *testing.T, ctx context.Context, totalSeats int) stri
 		VALUES ($1, $2, $3, TRUE, 'APPROVED') RETURNING id`,
 		profileID, vehicleTypeID, uniquePlate()).Scan(&vehicleID))
 
+	// Every trip is published by an OPERATOR. An individual is an operator with
+	// one vehicle who is also its driver, so the fixture creates that shape.
+	var operatorID string
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO intercity_operators (owner_user_id, display_name, kind, approval_status)
+		VALUES ($1, 'Test Operator', 'INDIVIDUAL', 'APPROVED') RETURNING id`,
+		driverUser.ID).Scan(&operatorID))
+	_, err = pool.Exec(ctx, `
+		INSERT INTO intercity_operator_drivers (operator_id, driver_profile_id)
+		VALUES ($1, $2) ON CONFLICT DO NOTHING`, operatorID, profileID)
+	require.NoError(t, err)
+
 	var tripID string
 	require.NoError(t, pool.QueryRow(ctx, `
 		INSERT INTO intercity_trips (
-			driver_id, vehicle_id, corridor, origin_name, destination_name,
+			operator_id, driver_id, vehicle_id, corridor, origin_name, destination_name,
 			origin_point, destination_point, staging_address, depart_at,
 			total_seats, price_per_seat_rwf)
-		VALUES ($1, $2, $3, 'Kigali', 'Musanze',
+		VALUES ($1, $2, $3, $4, 'Kigali', 'Musanze',
 			ST_SetSRID(ST_MakePoint(30.0619, -1.9441), 4326)::geography,
 			ST_SetSRID(ST_MakePoint(29.6344, -1.4995), 4326)::geography,
-			'Nyabugogo Taxi Park', NOW() + interval '2 hours', $4, 3000)
-		RETURNING id`, profileID, vehicleID, corridor, totalSeats).Scan(&tripID))
+			'Nyabugogo Taxi Park', NOW() + interval '2 hours', $5, 3000)
+		RETURNING id`, operatorID, profileID, vehicleID, corridor, totalSeats).Scan(&tripID))
+
+	// Several schema tests insert bookings with raw SQL — correctly, since they
+	// exercise DDL constraints — which leaves the trip's counters untouched by
+	// design. The hold sweeper is GLOBAL and this database persists between
+	// runs, so those rows would otherwise accumulate as permanent counter drift
+	// and make every later sweep report failures. Retire the fixture's bookings
+	// and zero its counters on the way out, so each run starts from a clean
+	// global state regardless of which tests inserted what.
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = pool.Exec(ctx,
+			`UPDATE intercity_bookings SET status = 'EXPIRED', updated_at = NOW()
+			  WHERE trip_id = $1 AND status IN ('HELD', 'CONFIRMED')`, tripID)
+		_, _ = pool.Exec(ctx,
+			`UPDATE intercity_trips SET held_seats = 0, booked_seats = 0 WHERE id = $1`, tripID)
+	})
+
 	return tripID
 }
 
