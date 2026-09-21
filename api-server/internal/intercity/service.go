@@ -134,6 +134,15 @@ var (
 	// ErrTripLimit is the open-trip publishing cap.
 	ErrTripLimit = apperrors.New(http.StatusConflict, "TRIP_LIMIT",
 		"you already have the maximum number of open trips")
+	// ErrVehicleNotIntercityEligible refuses a publish from a vehicle too small
+	// to run a corridor (MinIntercityVehicleSeats). 422 and not 400: the
+	// request is well-formed, the vehicle is simply the wrong one, and the
+	// message says so — retrying changes nothing, registering a bigger vehicle
+	// does.
+	ErrVehicleNotIntercityEligible = apperrors.Newf(http.StatusUnprocessableEntity,
+		"VEHICLE_NOT_INTERCITY_ELIGIBLE",
+		"intercity trips need a vehicle seating at least %d passengers — a cab, Hilux, Hiace or bus. "+
+			"A moto or tuk-tuk cannot be used for intercity travel.", MinIntercityVehicleSeats)
 	// ErrTripFrozen is the PATCH whitelist refusing a frozen field.
 	ErrTripFrozen = apperrors.New(http.StatusConflict, "TRIP_FROZEN",
 		"this trip has passengers: only the boarding point and extra seats can change")
@@ -703,12 +712,11 @@ func bookingView(b *Booking) *BookingView {
 // PublishTripInput is the driver's publish payload. driver_id is NEVER taken
 // from the body — it is resolved from the JWT.
 type PublishTripInput struct {
-	Corridor        string
-	VehicleID       string
-	OriginName      string
-	DestinationName string
-	Origin          geo.Point
-	Destination     geo.Point
+	Corridor  string
+	VehicleID string
+	// OriginName/DestinationName/Origin/Destination are NOT taken from the
+	// caller — publish derives all four from the corridor. Kept off the input
+	// struct entirely so the contract cannot quietly drift back.
 	StagingAddress  string
 	StagingLat      *float64
 	StagingLng      *float64
@@ -737,23 +745,15 @@ const insertTripSQL = `
 // seat at departure, so publishing with nothing to charge against would sell
 // seats the platform can never bill for.
 func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in PublishTripInput) (*TripView, error) {
-	originName, err := validateFreeText("origin_name", in.OriginName, maxPlaceNameLen)
-	if err != nil {
-		return nil, err
-	}
-	destName, err := validateFreeText("destination_name", in.DestinationName, maxPlaceNameLen)
-	if err != nil {
-		return nil, err
-	}
+	// origin_name, destination_name and both endpoint coordinates are DERIVED
+	// from the corridor (migration 101), never accepted from the caller. A
+	// corridor IS a fixed pair of places: letting each driver send their own
+	// would put two drivers' "Musanze" in two different spots, which is the
+	// fragmentation the corridor lookup table exists to prevent — and the client
+	// has no coordinates to send anyway, so publish could not succeed at all.
 	stagingAddr, err := validateFreeText("staging_address", in.StagingAddress, maxStagingAddrLen)
 	if err != nil {
 		return nil, err
-	}
-	if err := in.Origin.Validate(); err != nil {
-		return nil, validationErr("origin coordinates are invalid")
-	}
-	if err := in.Destination.Validate(); err != nil {
-		return nil, validationErr("destination coordinates are invalid")
 	}
 	if (in.StagingLat == nil) != (in.StagingLng == nil) {
 		return nil, validationErr("staging_lat and staging_lng must be supplied together")
@@ -776,37 +776,47 @@ func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in Publi
 
 	// The corridor must exist and be active: `corridor` is an FK, so a bad code
 	// would otherwise surface as a 23503 500 on a path no driver can self-serve.
-	var corridorOK bool
-	if err := s.repo.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM intercity_corridors WHERE code = $1 AND is_active)`,
-		in.Corridor).Scan(&corridorOK); err != nil {
+	var originName, destName string
+	var originLng, originLat, destLng, destLat float64
+	if err := s.repo.db.QueryRow(ctx, `
+		SELECT origin_name, destination_name,
+		       ST_X(origin_point::geometry), ST_Y(origin_point::geometry),
+		       ST_X(destination_point::geometry), ST_Y(destination_point::geometry)
+		  FROM intercity_corridors WHERE code = $1 AND is_active`,
+		in.Corridor).Scan(&originName, &destName,
+		&originLng, &originLat, &destLng, &destLat); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, validationErr("unknown corridor")
+		}
 		return nil, err
-	}
-	if !corridorOK {
-		return nil, validationErr("unknown corridor")
 	}
 
 	// Vehicle ownership and capacity in ONE predicate: the vehicle must be this
 	// driver's, active, and physically able to seat what is being sold.
 	var profileID, vehicleTypeCode string
 	var vehicleSeats *int
+	var typeMaxPassengers int
 	err = s.repo.db.QueryRow(ctx, `
-		SELECT dp.id, vt.code, dv.passenger_seats
+		SELECT dp.id, vt.code, dv.passenger_seats, vt.max_passengers
 		  FROM driver_vehicles dv
 		  JOIN driver_profiles dp ON dp.id = dv.driver_id
 		  JOIN vehicle_types vt   ON vt.id = dv.vehicle_type_id
 		 WHERE dv.id = $1 AND dv.is_active = TRUE AND dp.user_id = $2`,
-		in.VehicleID, driverUserID).Scan(&profileID, &vehicleTypeCode, &vehicleSeats)
+		in.VehicleID, driverUserID).Scan(&profileID, &vehicleTypeCode, &vehicleSeats, &typeMaxPassengers)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, validationErr("vehicle not found or not yours")
 	}
 	if err != nil {
 		return nil, err
 	}
-	capacity := 30
-	if vehicleSeats != nil && *vehicleSeats > 0 {
-		capacity = *vehicleSeats
+	// The floor comes BEFORE the capacity check: a moto asking for one seat
+	// satisfies `total_seats <= capacity` perfectly, and that is precisely the
+	// trip that must never exist. Driver.Vehicle.IntercityEligible reports the
+	// same predicate so the app can hide the screen rather than fail here.
+	if !VehicleEligible(vehicleSeats, typeMaxPassengers) {
+		return nil, ErrVehicleNotIntercityEligible
 	}
+	capacity := VehicleSeatCapacity(vehicleSeats, typeMaxPassengers)
 	if in.TotalSeats < 1 || in.TotalSeats > capacity {
 		return nil, validationErr("total_seats must be between 1 and %d for this vehicle", capacity)
 	}
@@ -845,7 +855,7 @@ func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in Publi
 	var tripID string
 	err = s.repo.db.QueryRow(ctx, insertTripSQL,
 		profileID, operatorID, in.VehicleID, in.Corridor, originName, destName,
-		in.Origin.Lng, in.Origin.Lat, in.Destination.Lng, in.Destination.Lat,
+		originLng, originLat, destLng, destLat,
 		stagingAddr, in.StagingLng, in.StagingLat,
 		in.DepartAt, in.TotalSeats, in.PricePerSeatRWF).Scan(&tripID)
 	if err != nil {
@@ -1125,8 +1135,16 @@ func (s *Service) PatchTrip(ctx context.Context, tripID, driverUserID string, in
 		   -- total_seats may never exceed the vehicle that is actually going.
 		   -- PublishTrip checks this; PATCH did not, so a 4-seat cab could be
 		   -- patched to 30 and sold 30 times.
+		   -- Same effective capacity PublishTrip uses (VehicleSeatCapacity):
+		   -- declared seats when set, else the type's catalogue capacity. A bare
+		   -- dv.passenger_seats is NULL for every vehicle whose owner never
+		   -- filled it in, and NULL makes this predicate false — which silently
+		   -- refused a legitimate seat increase.
 		   AND ($6::int IS NULL OR $6::int <= (
-		         SELECT dv.passenger_seats FROM driver_vehicles dv WHERE dv.id = t.vehicle_id))
+		         SELECT COALESCE(NULLIF(dv.passenger_seats, 0), vt.max_passengers)
+		           FROM driver_vehicles dv
+		           JOIN vehicle_types vt ON vt.id = dv.vehicle_type_id
+		          WHERE dv.id = t.vehicle_id))
 		   -- And it may not be RAISED once anything is sold. Raising it after the
 		   -- sale inflated the no-show discount budget, which was a complete bill
 		   -- escape before the budget was re-denominated; keeping capacity frozen

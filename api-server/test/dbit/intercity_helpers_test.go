@@ -18,9 +18,15 @@ import (
 func intercityCorridor(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	const code = "KGL_MUS"
+	// Coordinates are NOT NULL since migration 101: a corridor IS a fixed pair of
+	// places, so publish derives the trip's geography from here instead of asking
+	// the client to invent it.
 	_, err := pool.Exec(ctx, `
-		INSERT INTO intercity_corridors (code, origin_name, destination_name)
-		VALUES ($1, 'Kigali', 'Musanze') ON CONFLICT (code) DO NOTHING`, code)
+		INSERT INTO intercity_corridors (code, origin_name, destination_name, origin_point, destination_point)
+		VALUES ($1, 'Kigali', 'Musanze',
+		        ST_SetSRID(ST_MakePoint(30.0588, -1.9302), 4326)::geography,
+		        ST_SetSRID(ST_MakePoint(29.6344, -1.4995), 4326)::geography)
+		ON CONFLICT (code) DO NOTHING`, code)
 	require.NoError(t, err)
 	return code
 }

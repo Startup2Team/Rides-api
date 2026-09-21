@@ -103,7 +103,10 @@ func (h *Handler) Apply(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.GetClaims(r)
 
 	var body struct {
-		TransportType           string `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+		// HIACE/COASTER (migration 100) must be selectable at APPLICATION time, or
+		// a bus operator cannot onboard at all — they would be blocked before ever
+		// reaching vehicle registration.
+		TransportType           string `json:"transport_type"   validate:"required,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK HIACE COASTER"`
 		VehiclePlate            string `json:"vehicle_plate"    validate:"required"`
 		LicenseNumber           string `json:"license_number"   validate:"required"`
 		DateOfBirth             string `json:"date_of_birth"    validate:"required"` // YYYY-MM-DD
@@ -472,7 +475,7 @@ func NearbyDriversHandler(svc *Service) http.HandlerFunc {
 		var body struct {
 			Lat           float64 `json:"lat"            validate:"required"`
 			Lng           float64 `json:"lng"            validate:"required"`
-			TransportType string  `json:"transport_type" validate:"omitempty,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK"`
+			TransportType string  `json:"transport_type" validate:"omitempty,oneof=MOTO_BIKE CAB_TAXI HEAVY_FUSO LIGHT_HILUX TUK_TUK HIACE COASTER"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			respond.Error(w, apperrors.ErrBadRequest)

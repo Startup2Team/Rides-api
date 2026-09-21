@@ -180,11 +180,18 @@ All require JWT. Roles: `CUSTOMER_ONLY`, `DRIVER_PENDING`, `DRIVER_ACTIVE`.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/driver/session` | One-call bootstrap: driver profile, active vehicle, `vehicle_count`, `has_active_ride`, and `document_alerts` (license/insurance/authorization expiring within 30 days or expired). |
-| `GET` | `/driver/vehicles` | List own vehicles (active first). Lazily backfills a vehicle row from the profile for drivers who applied before multi-vehicle existed. |
+| `GET` | `/driver/vehicles` | List own vehicles (active first). Lazily backfills a vehicle row from the profile for drivers who applied before multi-vehicle existed. Each vehicle carries `intercity_eligible` (see below). |
 | `POST` | `/driver/vehicles` | Register another vehicle. Body: `{vehicle_type_code, plate_number, make?, model?, year?, color?, passenger_seats?, load_capacity_kg?}`. First vehicle auto-activates. `409 DUPLICATE_PLATE`. |
 | `PATCH` | `/driver/vehicles/{id}` | Update own vehicle (partial). |
 | `DELETE` | `/driver/vehicles/{id}` | Remove a vehicle. `409 LAST_VEHICLE` — can't delete the only one; deleting the active one activates the oldest remaining. |
 | `POST` | `/driver/vehicles/{id}/activate` | **Switch active vehicle.** Syncs `driver_profiles.transport_type/plate/seats/load` transactionally (matching follows). `403 DRIVER_NOT_APPROVED` unless approved; `409 VEHICLE_SWITCH_ON_RIDE` while a ride is in progress. |
+
+Every vehicle payload (`/driver/vehicles` and `session.active_vehicle`) carries
+**`intercity_eligible`** (bool): whether this vehicle may publish an intercity
+trip — a passenger capacity of at least 4 seats, so `CAB_TAXI`, `LIGHT_HILUX`,
+`HIACE` and `COASTER` qualify and `MOTO_BIKE`, `HEAVY_FUSO` and `TUK_TUK` do
+not. Clients gate the Intercity entry point on it; `POST /driver/intercity/trips`
+enforces the same rule and answers `422 VEHICLE_NOT_INTERCITY_ELIGIBLE`.
 
 Drivers also get a daily document-expiry notification (push + in-app) at the 30/14/7/3/1/0 day marks and once after expiry.
 
