@@ -234,3 +234,31 @@ func TestLedger_OneSourceOnlyIsEnforced(t *testing.T) {
 		profileID, vtID, rideID, tripID, uniqueKey("both"))
 	require.Error(t, err, "a row naming both a ride and a trip must be rejected")
 }
+
+// REGRESSION (payments review H1): a retry of an ALREADY-CHARGED key must return
+// (false, nil) — "already paid" — even when the balance has since reached zero.
+//
+// Returning ErrNoCredits here is not cosmetic: the settlement worker reads that
+// as collectable debt, so a crash between the ledger commit and the charge row
+// being marked CHARGED would leave a driver permanently owing money for a seat
+// they had already paid for. The earlier idempotency test retried with credit
+// still available, so it could not catch this.
+func TestLedger_AlreadyChargedKeyOnEmptyBalanceIsNotDebt(t *testing.T) {
+	ctx := context.Background()
+	svc, profileID, vtID, _ := newLedgerFixture(t, ctx, "COASTER", 1, 0)
+	tripID := insertIntercityTrip(t, ctx, 18)
+	key := "intercity:" + tripID + ":1"
+
+	ok, err := svc.DeductForIntercity(ctx, profileID, vtID, key, tripID)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	rides, bonus := entitlement(t, ctx, profileID, vtID)
+	require.Zero(t, rides)
+	require.Zero(t, bonus, "the balance is now empty — this is the crash-retry condition")
+
+	ok, err = svc.DeductForIntercity(ctx, profileID, vtID, key, tripID)
+	require.NoError(t, err, "an already-charged key must NOT report the driver as broke")
+	require.False(t, ok, "(false, nil) = already charged")
+	require.NotErrorIs(t, err, packages.ErrNoCredits)
+}

@@ -148,6 +148,26 @@ func (r *Repository) deductOneUnit(
 	}
 	defer tx.Rollback(ctx)
 
+	// Idempotency is checked BEFORE the balance, and that ordering is
+	// load-bearing. The ON CONFLICT below is the race guard, but it is reached
+	// only after the balance test — so checking balance first meant a retry of an
+	// ALREADY-CHARGED key on a since-emptied balance returned ErrNoCredits
+	// ("this driver is broke") instead of (false, nil) ("already paid").
+	//
+	// That is not cosmetic. The settlement worker treats ErrNoCredits as
+	// collectable debt, so a crash between the ledger commit and the charge row
+	// being marked CHARGED would leave the driver owing money for a seat they had
+	// already paid for — permanently, until they happened to top up.
+	var alreadyCharged bool
+	if err = tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM ride_credit_ledger WHERE idempotency_key = $1)`,
+		idemKey).Scan(&alreadyCharged); err != nil {
+		return false, err
+	}
+	if alreadyCharged {
+		return false, nil
+	}
+
 	var curRides, curBonus int
 	err = tx.QueryRow(ctx, `
 		SELECT rides_remaining, bonus_remaining FROM driver_entitlements

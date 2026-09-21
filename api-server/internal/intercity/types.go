@@ -87,3 +87,12 @@ type DriftError struct{ TripIDs []string }
 func (e *DriftError) Error() string {
 	return "intercity: seat counter drift on trips " + strings.Join(e.TripIDs, ", ")
 }
+
+// ObligationError names trips whose credit obligation could not be recorded.
+// Reported rather than swallowed: an unbillable trip that fails silently on
+// every tick is revenue disappearing with no trace.
+type ObligationError struct{ TripIDs []string }
+
+func (e *ObligationError) Error() string {
+	return "intercity: could not record obligations for trips " + strings.Join(e.TripIDs, ", ")
+}

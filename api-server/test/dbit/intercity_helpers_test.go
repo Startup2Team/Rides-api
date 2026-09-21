@@ -98,6 +98,11 @@ func insertIntercityTrip(t *testing.T, ctx context.Context, totalSeats int) stri
 			  WHERE trip_id = $1 AND status IN ('HELD', 'CONFIRMED')`, tripID)
 		_, _ = pool.Exec(ctx,
 			`UPDATE intercity_trips SET held_seats = 0, booked_seats = 0 WHERE id = $1`, tripID)
+		// Charge rows too: they are deliberately immutable in production, but a
+		// fixture that leaves them behind grows a PENDING backlog that starves
+		// both the departure and settlement workers in later runs.
+		_, _ = pool.Exec(ctx,
+			`UPDATE intercity_credit_charges SET status='CHARGED', charged_at=NOW() WHERE trip_id=$1 AND status='PENDING'`, tripID)
 	})
 
 	return tripID

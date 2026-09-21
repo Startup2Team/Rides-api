@@ -57,6 +57,16 @@ func TestObligations_PartiallyBoardedChargesAllSeats(t *testing.T) {
 func TestObligations_CreatedWithoutStartBeingCalled(t *testing.T) {
 	ctx := context.Background()
 	repo := intercity.NewRepository(pool)
+
+	// RunDepartures is GLOBAL and oldest-first. Drain any historical backlog
+	// BEFORE creating this test's trip — draining afterwards would consume it.
+	for {
+		n, _ := repo.RunDepartures(ctx, 500)
+		if n == 0 {
+			break
+		}
+	}
+
 	tripID := insertIntercityTrip(t, ctx, 18)
 	confirmSeats(t, ctx, repo, tripID, 3)
 
@@ -144,6 +154,15 @@ func TestSettlement_DrainsObligationsExactlyOnce(t *testing.T) {
 	repo := intercity.NewRepository(pool)
 	ledger := packages.NewLedgerService(packages.NewRepository(pool), zerolog.Nop())
 
+	// Settlement is global and oldest-first: drain the backlog BEFORE creating
+	// the obligations this test measures.
+	for {
+		n, _ := repo.SettleCharges(ctx, ledger, 500)
+		if n == 0 {
+			break
+		}
+	}
+
 	tripID := insertIntercityTrip(t, ctx, 18)
 	driverID, vtID := intercityTripDriver(t, ctx, tripID)
 	grantCredits(t, ctx, driverID, vtID, 10, 0)
@@ -151,7 +170,7 @@ func TestSettlement_DrainsObligationsExactlyOnce(t *testing.T) {
 	_, err := repo.CreateObligations(ctx, tripID)
 	require.NoError(t, err)
 
-	n, err := repo.SettleCharges(ctx, ledger, 50)
+	n, err := repo.SettleCharges(ctx, ledger, 500)
 	require.NoError(t, err)
 	require.Equal(t, 3, n)
 

@@ -20,12 +20,25 @@ import (
 // still recorded (and still notify the passenger) but no longer reduce the bill.
 const NoShowBudgetPercent = 40
 
+// DepartureFloor bounds how far back RunDepartures will reach. Without it, the
+// first deploy that wires this worker would retroactively bill every historical
+// trip in one pass.
+const DepartureFloor = "72 hours"
+
 // chargeableSeatsSQL computes what a trip owes, in SEATS.
 //
 // One expression over the cumulative ever-confirmed cohort, never a max() of two
 // partial views: CONFIRMED and BOARDED are DISJOINT statuses, so a
 // partially-boarded manifest — the normal case, since marking is optional —
 // would undercharge under any formula that reads only one of them.
+//
+// The no-show budget is a share of the SEATS ACTUALLY SOLD, never of
+// total_seats. An earlier version used total_seats and was a complete bill
+// escape: total_seats is raisable after the seats are sold, so a driver could
+// publish 12 seats, sell all 12, patch total_seats to 30 — making the budget 12
+// — mark all 12 passengers absent, and owe exactly nothing while collecting
+// twelve cash fares. Denominating in the manifest makes the discount
+// self-limiting: inflating capacity no longer inflates the allowance.
 //
 // v1 charged per booking (one credit for a six-seat booking, an 83% loss) and
 // v2 reintroduced the same bug by counting booking ROWS. Everything here sums
@@ -44,7 +57,7 @@ const chargeableSeatsSQL = `
 	SELECT GREATEST(
 	         0,
 	         (b.sold + b.no_shows)
-	           - LEAST(b.no_shows, (t.total_seats * $2::int) / 100)
+	           - LEAST(b.no_shows, ((b.sold + b.no_shows) * $2::int) / 100)
 	       )
 	  FROM b, t`
 
@@ -115,14 +128,35 @@ func (r *Repository) CreateObligations(ctx context.Context, tripID string) (int,
 // sweeper closes the trip having charged nothing, with no forensic trace and
 // nothing to distinguish it from a crashed app.
 func (r *Repository) RunDepartures(ctx context.Context, limit int) (int, error) {
+	// Deliberately NOT filtered on a non-terminal status. SweepStaleTrips
+	// force-COMPLETEs abandoned trips 12h past departure, and the two workers are
+	// independent: if settlement were behind, every affected trip would flip to
+	// COMPLETED and become permanently unbillable — the debt not deferred but
+	// GONE, with no row anywhere recording it had existed. A 30-seat bus is 30
+	// credits silently written off, per trip.
+	//
+	// CANCELLED is excluded because a trip that never ran owes nothing. Guarding
+	// cancellation itself against post-departure escape belongs in the service
+	// layer, which owns that endpoint.
+	//
+	// DepartureFloor stops the first deploy that wires this worker from
+	// retroactively billing every historical trip ever published.
 	rows, err := r.db.Query(ctx, `
 		SELECT t.id FROM intercity_trips t
 		 WHERE t.deleted_at IS NULL
-		   AND t.status IN ('OPEN','BOARDING','IN_TRANSIT')
+		   AND t.status <> 'CANCELLED'
 		   AND t.depart_at <= NOW()
+		   AND t.depart_at > NOW() - $2::interval
 		   AND NOT EXISTS (SELECT 1 FROM intercity_credit_charges c WHERE c.trip_id = t.id)
+		   -- A trip that sold nothing owes nothing, and would otherwise never
+		   -- acquire a charge row — so NOT EXISTS would re-select it on every
+		   -- tick forever. Require something billable to exist.
+		   AND EXISTS (
+		       SELECT 1 FROM intercity_bookings b
+		        WHERE b.trip_id = t.id AND b.deleted_at IS NULL
+		          AND b.status IN ('CONFIRMED','BOARDED','COMPLETED','NO_SHOW'))
 		 ORDER BY t.depart_at
-		 LIMIT $1`, limit)
+		 LIMIT $1`, limit, DepartureFloor)
 	if err != nil {
 		return 0, err
 	}
@@ -141,11 +175,20 @@ func (r *Repository) RunDepartures(ctx context.Context, limit int) (int, error) 
 	}
 
 	done := 0
+	var failed []string
 	for _, id := range ids {
-		if _, err := r.CreateObligations(ctx, id); err != nil {
-			continue // one bad trip must not stop the rest
+		created, err := r.CreateObligations(ctx, id)
+		if err != nil {
+			// One bad trip must not stop the rest — but it must not vanish either.
+			// A trip whose vehicle row was hard-deleted would otherwise error on
+			// every tick, forever, in total silence.
+			failed = append(failed, id)
+			continue
 		}
-		done++
+		done += created // count CHARGE ROWS, not trips visited
+	}
+	if len(failed) > 0 {
+		return done, &ObligationError{TripIDs: failed}
 	}
 	return done, nil
 }
