@@ -53,14 +53,18 @@ const acquireSeatsSQL = `
 // The price is copied from the trip inside the same statement: a booked
 // passenger pays the price that was advertised when they booked, even if the
 // driver later edits the trip.
+//
+// The ON CONFLICT target infers uq_intercity_booking_idem, which migration 099
+// made NON-partial for exactly this reason: a partial unique index cannot be
+// inferred by this form and raises at PLAN time, which would be a deterministic
+// 500 on every hold. Do not reintroduce a WHERE clause on that index.
 const insertHoldSQL = `
 	INSERT INTO intercity_bookings
 	    (trip_id, customer_id, seats, status, price_per_seat_rwf, hold_expires_at, idempotency_key)
 	SELECT $1, $2, $3, 'HELD', t.price_per_seat_rwf, NOW() + interval '5 minutes', $4
 	  FROM intercity_trips t
 	 WHERE t.id = $1 AND t.deleted_at IS NULL
-	ON CONFLICT (customer_id, idempotency_key) WHERE idempotency_key IS NOT NULL
-	DO NOTHING
+	ON CONFLICT (customer_id, idempotency_key) DO NOTHING
 	RETURNING id, seats, price_per_seat_rwf`
 
 const findHoldByIdemSQL = `
