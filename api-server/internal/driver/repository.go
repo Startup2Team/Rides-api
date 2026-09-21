@@ -61,6 +61,12 @@ type Profile struct {
 	// which meant a driver could never see or correct their own typo'd ID.
 	NationalIDNumber  *string `json:"national_id_number,omitempty"`
 	NationalIDCountry *string `json:"national_id_country,omitempty"`
+	// IntercityCommittedUntil gates this driver out of CITY dispatch while they
+	// are committed to a scheduled intercity trip. NULL, or any past time, means
+	// not committed — so the safe default is VISIBLE and every failure mode of
+	// this column makes a driver more available, never invisible. Derived from
+	// their live intercity trips; see internal/intercity/availability.go.
+	IntercityCommittedUntil *time.Time `json:"intercity_committed_until,omitempty"`
 }
 
 // Document is a driver_documents row.
@@ -219,7 +225,8 @@ const profileSelectCols = `
 	u.fcm_token,
 	dp.license_expiry_date, dp.insurance_expiry_date, dp.authorization_expiry_date,
 	dp.created_at, dp.updated_at,
-	u.national_id_number, u.national_id_country
+	u.national_id_number, u.national_id_country,
+	dp.intercity_committed_until
 `
 
 // scanProfile scans a driver_profiles+users row. maskNationalID controls
@@ -251,6 +258,7 @@ func scanProfile(row pgx.Row, maskNationalID bool) (*Profile, error) {
 		&p.LicenseExpiryDate, &p.InsuranceExpiryDate, &p.AuthorizationExpiryDate,
 		&p.CreatedAt, &p.UpdatedAt,
 		&rawNationalID, &p.NationalIDCountry,
+		&p.IntercityCommittedUntil,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -793,6 +801,12 @@ func (r *Repository) FindNearby(ctx context.Context, loc geo.Point, radiusM int,
 		  AND dl.updated_at > NOW() - INTERVAL '10 minutes'
 		  AND ST_DWithin(dl.location, ST_GeographyFromText($1), $3)
 		  AND dp.id != ALL($4::uuid[])
+		  -- Committed to a scheduled intercity trip. This path is only reached
+		  -- when the Redis GEO search errors or returns nothing, so the primary
+		  -- path carries the SAME check against the same column in
+		  -- matching/engine.go — neither is a cache of the other.
+		  -- NULL or a past time means not committed, so the default is visible.
+		  AND (dp.intercity_committed_until IS NULL OR dp.intercity_committed_until <= NOW())
 		  AND dp.user_id NOT IN (
 		      SELECT COALESCE(dp2.user_id, '00000000-0000-0000-0000-000000000000'::UUID)
 		      FROM rides r2

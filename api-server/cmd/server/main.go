@@ -44,6 +44,7 @@ import (
 	"github.com/workspace/ride-platform/internal/finance"
 	"github.com/workspace/ride-platform/internal/inbox"
 	"github.com/workspace/ride-platform/internal/incidents"
+	"github.com/workspace/ride-platform/internal/intercity"
 	"github.com/workspace/ride-platform/internal/ledger"
 	"github.com/workspace/ride-platform/internal/location"
 	"github.com/workspace/ride-platform/internal/matching"
@@ -395,6 +396,19 @@ func main() {
 		)
 	}
 
+	// Intercity: scheduled multi-seat trips. The credit gate is wired to the
+	// CONCRETE *packages.LedgerService (the v4 entitlement ledger) — NOT to
+	// pkgSvc, whose HasCredits has the same signature but reads the orphaned
+	// driver_ride_credits table and would wave a zero-balance driver through.
+	intercitySvc := intercity.NewService(intercity.NewRepository(db), ledgerSvc, log)
+	intercitySvc.SetBroadcaster(hub) // trip_seats_changed / trip_cancelled fan-out
+	intercitySvc.SetNotifier(notifySvc)
+	// Server-side authorisation for trip WebSocket subscriptions: a live
+	// booking, the assigned driver, or the operator owner. The hub is
+	// fail-closed until this is set.
+	hub.SetTripAccessChecker(intercitySvc)
+	intercityH := intercity.NewHandler(intercitySvc)
+
 	ratingRepo := rating.NewRepository(db)
 	ratingH := rating.NewHandler(ratingRepo, log)
 	notifH := notification.NewHandler(notifRepo)
@@ -508,6 +522,66 @@ func main() {
 					log.Error().Err(err).Msg("abandonment: failed to scan for abandoned rides")
 				} else if n > 0 {
 					log.Warn().Int("count", n).Msg("abandonment: cancelled rides with silent drivers")
+				}
+			}
+		}
+	}()
+
+	// ── Intercity workers ─────────────────────────────────────────────────────
+	// Without these the entire intercity product is free and its inventory never
+	// unlocks: no driver is ever charged a credit, and a held seat is never
+	// returned to the pool. Both were found by independent review as dead code —
+	// every method existed and nothing called it.
+	intercityRepo := intercity.NewRepository(db)
+	go func() {
+		holds := time.NewTicker(30 * time.Second)
+		departures := time.NewTicker(60 * time.Second)
+		settle := time.NewTicker(30 * time.Second)
+		stale := time.NewTicker(15 * time.Minute)
+		defer holds.Stop()
+		defer departures.Stop()
+		defer settle.Stop()
+		defer stale.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+
+			case <-holds.C:
+				// Releases seats whose 5-minute hold lapsed. A DriftError means a
+				// trip's counters no longer agree with its bookings: reported, never
+				// auto-repaired, because seat counters are money-adjacent inventory
+				// and a worker quietly patching them destroys the evidence.
+				if n, err := intercityRepo.SweepExpiredHolds(bgCtx, 200); err != nil {
+					log.Warn().Err(err).Int("released", n).Msg("intercity: seat counter drift while releasing holds")
+				} else if n > 0 {
+					log.Info().Int("count", n).Msg("intercity: released expired seat holds")
+				}
+
+			case <-departures.C:
+				// Records what each departed trip owes, on the SERVER's clock.
+				// Driver-triggered creation would make "never press Start" a
+				// completely free trip.
+				if n, err := intercityRepo.RunDepartures(bgCtx, 100); err != nil {
+					log.Error().Err(err).Int("charged_seats", n).Msg("intercity: could not record departure obligations")
+				} else if n > 0 {
+					log.Info().Int("seats", n).Msg("intercity: recorded departure obligations")
+				}
+
+			case <-settle.C:
+				if n, err := intercityRepo.SettleCharges(bgCtx, ledgerSvc, 100); err != nil {
+					log.Error().Err(err).Int("settled", n).Msg("intercity: settlement pass failed")
+				} else if n > 0 {
+					log.Info().Int("count", n).Msg("intercity: settled credit charges")
+				}
+
+			case <-stale.C:
+				// Liveness only: the availability gate is a timestamp that expires on
+				// its own, so a missed transition cannot strand a driver.
+				if n, err := intercityRepo.SweepStaleTrips(bgCtx, 100); err != nil {
+					log.Error().Err(err).Msg("intercity: stale-trip sweep failed")
+				} else if n > 0 {
+					log.Warn().Int("count", n).Msg("intercity: force-completed abandoned trips")
 				}
 			}
 		}
@@ -923,6 +997,26 @@ func main() {
 		r.Get("/rides/{ride_id}/rating", ratingH.GetRideRating)
 
 		r.Post("/support/tickets", ticketH.SubmitTicket)
+
+		// Intercity (passenger side). This group admits DRIVER_ACTIVE, so a
+		// rival driver browses here without a second account — every handler's
+		// ownership predicate is in its SQL, and no response carries the
+		// credit-clamped sellable seat count or a driver phone.
+		// Corridor browse is rate-limited: it is the scrapeable surface.
+		// The corridor list is the entry point of the whole flow: `corridor` is
+		// NOT NULL and FKs to intercity_corridors, so a client cannot invent one.
+		r.Get("/intercity/corridors", intercityH.ListCorridors)
+		r.With(mw.UserRateLimit429(rdb, "intercity_browse", 120, time.Minute)).
+			Get("/intercity/trips", intercityH.ListTrips)
+		r.Get("/intercity/trips/{id}", intercityH.GetTrip)
+		// Holds are free (no payment step), so they are the abuse surface:
+		// cap them per user on top of the service's 2-active-booking rule.
+		r.With(mw.UserRateLimit429(rdb, "intercity_hold", 20, time.Minute)).
+			Post("/intercity/trips/{id}/hold", intercityH.HoldSeats)
+		r.Post("/intercity/bookings/{id}/confirm", intercityH.ConfirmBooking)
+		r.Get("/intercity/bookings", intercityH.ListBookings)
+		r.Get("/intercity/bookings/{id}", intercityH.GetBooking)
+		r.Delete("/intercity/bookings/{id}", intercityH.CancelBooking)
 	})
 
 	// ── Rides (top-level, shared contract with mobile) ──────────────────────────
@@ -1058,6 +1152,22 @@ func main() {
 			r.Get("/earnings/daily", driverH.DailyEarnings)
 			r.Get("/earnings/weekly", driverH.WeeklyEarnings)
 			r.Get("/stats", driverH.Stats)
+
+			// Intercity (driver side). RoleDriverActive ONLY — this group's
+			// gate is exactly that, and it must stay that way: the wider
+			// driver group admits DRIVER_PENDING, and publishing is a
+			// phone-harvesting instrument in the hands of an unreviewed
+			// account (§9). driver_id always comes from the JWT, never a body.
+			r.With(mw.UserRateLimit429(rdb, "intercity_publish", 10, time.Hour)).
+				Post("/intercity/trips", intercityH.PublishTrip)
+			r.Get("/intercity/trips", intercityH.ListDriverTrips)
+			r.Get("/intercity/trips/{id}/manifest", intercityH.GetManifest)
+			r.Patch("/intercity/trips/{id}", intercityH.PatchTrip)
+			r.Post("/intercity/trips/{id}/board", intercityH.BoardPassenger)
+			r.Post("/intercity/trips/{id}/no-show", intercityH.MarkNoShow)
+			r.Post("/intercity/trips/{id}/start", intercityH.StartTrip)
+			r.Post("/intercity/trips/{id}/complete", intercityH.CompleteTrip)
+			r.Delete("/intercity/trips/{id}", intercityH.CancelTrip)
 		})
 	})
 

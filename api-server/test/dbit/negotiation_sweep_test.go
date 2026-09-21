@@ -58,6 +58,19 @@ func setupNegotiatingRide(t *testing.T, ctx context.Context, repo *ride.Reposito
 	profileID := insertDriverProfile(t, ctx, driverUser.ID, "MOTO_BIKE")
 
 	rideID = createTestRide(t, ctx, repo, customer.ID, profileID, ride.StatusNegotiating)
+
+	// CancelExpiredNegotiations is a GLOBAL sweep, and this database persists
+	// between runs. A ride left NEGOTIATING with a deadline is therefore not
+	// inert: once that deadline passes, every later run's sweep counts it too,
+	// which is what made TestCancelExpiredNegotiations_PastDeadline_* fail
+	// intermittently (it asserts an exact count of 1). Park the ride on the way
+	// out so it can never be swept by a future run.
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`UPDATE rides SET status = 'CANCELLED', negotiation_deadline_at = NULL WHERE id = $1`,
+			rideID)
+	})
+
 	return rideID, customer.ID, driverUser.ID
 }
 
@@ -66,11 +79,18 @@ func TestCancelExpiredNegotiations_PastDeadline_CancelledAndNotified(t *testing.
 	svc, repo := newTestRideServiceForSweep(t)
 	rideID, customerID, _ := setupNegotiatingRide(t, ctx, repo)
 
+	// Drain anything already expired before arming our own ride. The sweep is
+	// global, so without this the assertion below counts leftovers from earlier
+	// tests or earlier runs as well as ours. Our ride still has a NULL deadline
+	// at this point, so it is not affected.
+	_, err := svc.CancelExpiredNegotiations(ctx)
+	require.NoError(t, err)
+
 	require.NoError(t, repo.SetNegotiationDeadline(ctx, rideID, time.Now().Add(-time.Minute)))
 
 	n, err := svc.CancelExpiredNegotiations(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, n)
+	require.Equal(t, 1, n, "exactly our ride must be swept")
 
 	r, err := repo.FindByID(ctx, rideID)
 	require.NoError(t, err)

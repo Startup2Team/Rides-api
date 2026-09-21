@@ -160,11 +160,16 @@ func insertDriverProfile(t *testing.T, ctx context.Context, userID, vehicle stri
 	t.Helper()
 	key := uniqueKey("d")
 	var profileID string
+	// vehicle_plate is UNIQUE. Deriving it from the last 6 chars of uniqueKey()
+	// collides in practice — those are mostly trailing zeros of the nanosecond
+	// clock plus a short counter — which flaked TestMarkDriverArrivedIfNear_*,
+	// TestUpdateCustomerLocation_* and others once a run created enough
+	// profiles. uniquePlate() (national_id_test.go) is collision-proof.
 	require.NoError(t, pool.QueryRow(ctx, `
 		INSERT INTO driver_profiles
 		    (user_id, transport_type, vehicle_plate, license_number, date_of_birth, city, momo_pay_code, approval_status)
 		VALUES ($1, $2, $3, $4, '1995-01-01', 'Kigali', '+250788000000', 'APPROVED')
 		RETURNING id`,
-		userID, vehicle, "RA "+key[len(key)-6:], "DL-"+key).Scan(&profileID))
+		userID, vehicle, uniquePlate(), "DL-"+key).Scan(&profileID))
 	return profileID
 }

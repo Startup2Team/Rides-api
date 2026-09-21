@@ -3,6 +3,7 @@ package tracking
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -20,8 +21,12 @@ func safeClose(ch chan struct{}, once *sync.Once) {
 
 // Message is a typed payload sent over WebSocket connections.
 type Message struct {
-	Type    string                 `json:"type"`
-	RideID  string                 `json:"ride_id,omitempty"`
+	Type   string `json:"type"`
+	RideID string `json:"ride_id,omitempty"`
+	// TripID is set for intercity trip broadcasts. Additive and omitempty, so
+	// every existing payload is byte-identical and both socket clients (which
+	// are type-agnostic passthroughs) are unaffected.
+	TripID  string                 `json:"trip_id,omitempty"`
 	Payload map[string]interface{} `json:"payload,omitempty"`
 }
 
@@ -47,10 +52,31 @@ type Hub struct {
 	drivers   map[string]*Client
 	customers map[string]*Client
 	admins    map[string]*Client
-	rdb       goredis.UniversalClient
-	mu        sync.RWMutex
-	log       zerolog.Logger
-	pubsub    *goredis.PubSub
+	// trips is MANY watchers per trip, keyed trip_id -> user_id -> client.
+	// The ride maps are one-client-per-ride (SendToCustomer(rideID)); an
+	// intercity trip has a driver and every passenger on it.
+	trips    map[string]map[string]*Client
+	rdb      goredis.UniversalClient
+	mu       sync.RWMutex
+	log      zerolog.Logger
+	pubsub   *goredis.PubSub
+	tripAuth TripAccessChecker
+}
+
+// TripAccessChecker authorises a trip subscription against the database.
+// Implemented by intercity.Service; declared here in primitive types so
+// tracking does not import intercity.
+type TripAccessChecker interface {
+	CanWatchTrip(ctx context.Context, tripID, userID string) (bool, error)
+}
+
+// SetTripAccessChecker wires the server-side authorisation for trip watchers.
+// Until it is set the hub is FAIL-CLOSED: RegisterTripWatcher refuses every
+// subscription rather than defaulting to "allow".
+func (h *Hub) SetTripAccessChecker(c TripAccessChecker) {
+	h.mu.Lock()
+	h.tripAuth = c
+	h.mu.Unlock()
 }
 
 func NewHub(rdb goredis.UniversalClient, log zerolog.Logger) *Hub {
@@ -58,6 +84,7 @@ func NewHub(rdb goredis.UniversalClient, log zerolog.Logger) *Hub {
 		drivers:   make(map[string]*Client),
 		customers: make(map[string]*Client),
 		admins:    make(map[string]*Client),
+		trips:     make(map[string]map[string]*Client),
 		rdb:       rdb,
 		log:       log,
 	}
@@ -73,7 +100,7 @@ func (h *Hub) startPubSub() {
 
 	go func() {
 		ctx := context.Background()
-		h.pubsub = h.rdb.PSubscribe(ctx, "ws:driver:*", "ws:ride:*")
+		h.pubsub = h.rdb.PSubscribe(ctx, "ws:driver:*", "ws:ride:*", "ws:trip:*")
 		ch := h.pubsub.Channel()
 		for msg := range ch {
 			h.handlePubSubMessage(msg.Channel, msg.Payload)
@@ -117,6 +144,21 @@ func (h *Hub) handlePubSubMessage(channel, payload string) {
 			case client.Send <- msg:
 			default:
 				h.log.Warn().Str("ride_id", rideID).Msg("ws: customer send buffer full (pubsub)")
+			}
+		}
+	} else if strings.HasPrefix(channel, "ws:trip:") {
+		tripID := strings.TrimPrefix(channel, "ws:trip:")
+		h.mu.RLock()
+		watchers := make([]*Client, 0, len(h.trips[tripID]))
+		for _, client := range h.trips[tripID] {
+			watchers = append(watchers, client)
+		}
+		h.mu.RUnlock()
+		for _, client := range watchers {
+			select {
+			case client.Send <- msg:
+			default:
+				h.log.Warn().Str("trip_id", tripID).Msg("ws: trip watcher send buffer full (pubsub)")
 			}
 		}
 	} else if strings.HasPrefix(channel, "ws:broadcast:drivers") {
@@ -388,4 +430,120 @@ func (h *Hub) NotifyDriverAccountApproved(driverProfileID string) {
 	} else {
 		h.BroadcastToAllDrivers(msg)
 	}
+}
+
+// ── Intercity trip watchers ──────────────────────────────────────────────────
+
+// RegisterTripWatcher subscribes a user to one intercity trip's live feed.
+//
+// Authorisation is SERVER-SIDE and mandatory: the caller must hold a live
+// booking on the trip, be its assigned driver, or own the operator that
+// published it. Without this check any authenticated user could subscribe to
+// any trip id and receive a live feed of a rival driver's bookings — the WS
+// ticket proves who you are, never what you may watch.
+//
+// Fail-closed in every direction: no checker wired, a DB error, or a negative
+// answer all refuse the subscription.
+func (h *Hub) RegisterTripWatcher(ctx context.Context, tripID, userID string, client *Client) error {
+	h.mu.RLock()
+	auth := h.tripAuth
+	h.mu.RUnlock()
+	if auth == nil {
+		h.log.Error().Str("trip_id", tripID).Msg("ws: trip watcher refused — no access checker wired")
+		return errTripWatchDenied
+	}
+	ok, err := auth.CanWatchTrip(ctx, tripID, userID)
+	if err != nil {
+		h.log.Error().Err(err).Str("trip_id", tripID).Msg("ws: trip watcher authorisation failed")
+		return err
+	}
+	if !ok {
+		return errTripWatchDenied
+	}
+
+	h.mu.Lock()
+	if h.trips[tripID] == nil {
+		h.trips[tripID] = make(map[string]*Client)
+	}
+	if existing, dup := h.trips[tripID][userID]; dup {
+		existing.Done()
+	}
+	h.trips[tripID][userID] = client
+	h.mu.Unlock()
+
+	h.log.Info().Str("trip_id", tripID).Str("user_id", userID).Msg("ws: trip watcher connected")
+	return nil
+}
+
+// errTripWatchDenied is returned when the subscriber holds no booking on the
+// trip and neither drives nor operates it.
+var errTripWatchDenied = errors.New("tracking: not authorised to watch this trip")
+
+// ErrTripWatchDenied exposes the sentinel to callers (the WS handler) without
+// letting them construct it.
+func ErrTripWatchDenied() error { return errTripWatchDenied }
+
+// UnregisterTripWatcher drops one watcher, and the trip's bucket with the last
+// of them so a finished trip does not leak a map entry per replica.
+func (h *Hub) UnregisterTripWatcher(tripID, userID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	watchers, ok := h.trips[tripID]
+	if !ok {
+		return
+	}
+	delete(watchers, userID)
+	if len(watchers) == 0 {
+		delete(h.trips, tripID)
+	}
+}
+
+// BroadcastToTrip fans a message out to every watcher of a trip, on every
+// replica, over the same Redis pub/sub the ride channels use.
+//
+// Payloads are COUNTS ONLY (trip_seats_changed, trip_full, trip_departing,
+// trip_cancelled, booking_*): the watcher set is every passenger on the trip
+// plus the driver, so a passenger identity here is a leak to strangers who
+// happen to share a vehicle.
+func (h *Hub) BroadcastToTrip(tripID string, msg Message) {
+	msg.TripID = tripID
+
+	if h.rdb == nil {
+		h.mu.RLock()
+		watchers := make([]*Client, 0, len(h.trips[tripID]))
+		for _, client := range h.trips[tripID] {
+			watchers = append(watchers, client)
+		}
+		h.mu.RUnlock()
+		for _, client := range watchers {
+			select {
+			case client.Send <- msg:
+			default:
+				h.log.Warn().Str("trip_id", tripID).Msg("ws: trip watcher send buffer full")
+			}
+		}
+		return
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		h.log.Error().Err(err).Msg("ws pubsub: failed to marshal trip message")
+		return
+	}
+	h.rdb.Publish(context.Background(), "ws:trip:"+tripID, string(payload))
+}
+
+// NotifyTrip is an intercity.TripBroadcaster-compatible wrapper around
+// BroadcastToTrip, expressed in primitive types so package intercity can
+// declare the interface without importing package tracking (mirrors
+// NotifyCustomer for package driver).
+func (h *Hub) NotifyTrip(tripID, msgType string, payload map[string]interface{}) {
+	h.BroadcastToTrip(tripID, Message{Type: msgType, TripID: tripID, Payload: payload})
+}
+
+// TripWatcherCount reports how many watchers this process holds for a trip.
+func (h *Hub) TripWatcherCount(tripID string) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.trips[tripID])
 }

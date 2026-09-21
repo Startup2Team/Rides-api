@@ -82,11 +82,17 @@ func runMigrations(dbURL string) error {
 
 // ── unique-value helpers: keep tests independent + rerunnable on a dirty DB ──
 
-var phoneCounter = time.Now().UnixNano() % 9_000_000
+var phoneCounter int64
 
+// uniquePhone must be unique against the WHOLE database, not just this run: the
+// dbit database persists, and a 7-digit suffix seeded from the clock collides
+// with users left by earlier runs once a few thousand accumulate (it held 4984
+// when this bit). Nine digits derived from the microsecond clock plus a counter
+// makes a collision vanishingly unlikely; 15 characters still fits
+// users.phone_number VARCHAR(20), and CreateUser does no format validation.
 func uniquePhone() string {
-	n := atomic.AddInt64(&phoneCounter, 1) % 9_000_000
-	return fmt.Sprintf("+25078%07d", n)
+	n := atomic.AddInt64(&phoneCounter, 1)
+	return fmt.Sprintf("+25078%09d", (time.Now().UnixNano()/1000+n)%1_000_000_000)
 }
 
 var keyCounter int64
