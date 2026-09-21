@@ -61,6 +61,9 @@ var ErrSeatsUnavailable = errors.New("intercity: seats unavailable")
 // cannot be used to probe for other customers' booking ids.
 var ErrBookingNotFound = errors.New("intercity: booking not found")
 
+// ErrTripNotFound is returned for a missing or soft-deleted trip.
+var ErrTripNotFound = errors.New("intercity: trip not found")
+
 // Booking is a passenger's claim on seats in a trip.
 type Booking struct {
 	ID            string

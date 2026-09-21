@@ -671,6 +671,18 @@ func (e *Engine) searchCandidatesWithRadius(ctx context.Context, pickup geo.Poin
 			continue
 		}
 
+		// Committed to a scheduled intercity trip, so not available for city
+		// rides. This is the PRIMARY dispatch path: fallbackPostGIS is reached
+		// only when the Redis GEO search errors or returns nothing, so a gate
+		// placed only in FindNearby would miss almost every real dispatch.
+		//
+		// The profile is already loaded above, so this costs no extra query, and
+		// it reads the same authoritative column the fallback checks rather than
+		// a cache that could be stale or absent.
+		if profile.IntercityCommittedUntil != nil && profile.IntercityCommittedUntil.After(time.Now()) {
+			continue
+		}
+
 		declines := 0
 		if d, err := e.redis.Get(ctx, rkeys.K.DriverDailyDeclines(profileID)).Int(); err == nil {
 			declines = d
