@@ -134,6 +134,15 @@ var (
 	// ErrTripLimit is the open-trip publishing cap.
 	ErrTripLimit = apperrors.New(http.StatusConflict, "TRIP_LIMIT",
 		"you already have the maximum number of open trips")
+	// ErrVehicleNotIntercityEligible refuses a publish from a vehicle too small
+	// to run a corridor (MinIntercityVehicleSeats). 422 and not 400: the
+	// request is well-formed, the vehicle is simply the wrong one, and the
+	// message says so — retrying changes nothing, registering a bigger vehicle
+	// does.
+	ErrVehicleNotIntercityEligible = apperrors.Newf(http.StatusUnprocessableEntity,
+		"VEHICLE_NOT_INTERCITY_ELIGIBLE",
+		"intercity trips need a vehicle seating at least %d passengers — a cab, Hilux, Hiace or bus. "+
+			"A moto or tuk-tuk cannot be used for intercity travel.", MinIntercityVehicleSeats)
 	// ErrTripFrozen is the PATCH whitelist refusing a frozen field.
 	ErrTripFrozen = apperrors.New(http.StatusConflict, "TRIP_FROZEN",
 		"this trip has passengers: only the boarding point and extra seats can change")
@@ -790,23 +799,28 @@ func (s *Service) PublishTrip(ctx context.Context, driverUserID string, in Publi
 	// driver's, active, and physically able to seat what is being sold.
 	var profileID, vehicleTypeCode string
 	var vehicleSeats *int
+	var typeMaxPassengers int
 	err = s.repo.db.QueryRow(ctx, `
-		SELECT dp.id, vt.code, dv.passenger_seats
+		SELECT dp.id, vt.code, dv.passenger_seats, vt.max_passengers
 		  FROM driver_vehicles dv
 		  JOIN driver_profiles dp ON dp.id = dv.driver_id
 		  JOIN vehicle_types vt   ON vt.id = dv.vehicle_type_id
 		 WHERE dv.id = $1 AND dv.is_active = TRUE AND dp.user_id = $2`,
-		in.VehicleID, driverUserID).Scan(&profileID, &vehicleTypeCode, &vehicleSeats)
+		in.VehicleID, driverUserID).Scan(&profileID, &vehicleTypeCode, &vehicleSeats, &typeMaxPassengers)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, validationErr("vehicle not found or not yours")
 	}
 	if err != nil {
 		return nil, err
 	}
-	capacity := 30
-	if vehicleSeats != nil && *vehicleSeats > 0 {
-		capacity = *vehicleSeats
+	// The floor comes BEFORE the capacity check: a moto asking for one seat
+	// satisfies `total_seats <= capacity` perfectly, and that is precisely the
+	// trip that must never exist. Driver.Vehicle.IntercityEligible reports the
+	// same predicate so the app can hide the screen rather than fail here.
+	if !VehicleEligible(vehicleSeats, typeMaxPassengers) {
+		return nil, ErrVehicleNotIntercityEligible
 	}
+	capacity := VehicleSeatCapacity(vehicleSeats, typeMaxPassengers)
 	if in.TotalSeats < 1 || in.TotalSeats > capacity {
 		return nil, validationErr("total_seats must be between 1 and %d for this vehicle", capacity)
 	}
@@ -1125,8 +1139,16 @@ func (s *Service) PatchTrip(ctx context.Context, tripID, driverUserID string, in
 		   -- total_seats may never exceed the vehicle that is actually going.
 		   -- PublishTrip checks this; PATCH did not, so a 4-seat cab could be
 		   -- patched to 30 and sold 30 times.
+		   -- Same effective capacity PublishTrip uses (VehicleSeatCapacity):
+		   -- declared seats when set, else the type's catalogue capacity. A bare
+		   -- dv.passenger_seats is NULL for every vehicle whose owner never
+		   -- filled it in, and NULL makes this predicate false — which silently
+		   -- refused a legitimate seat increase.
 		   AND ($6::int IS NULL OR $6::int <= (
-		         SELECT dv.passenger_seats FROM driver_vehicles dv WHERE dv.id = t.vehicle_id))
+		         SELECT COALESCE(NULLIF(dv.passenger_seats, 0), vt.max_passengers)
+		           FROM driver_vehicles dv
+		           JOIN vehicle_types vt ON vt.id = dv.vehicle_type_id
+		          WHERE dv.id = t.vehicle_id))
 		   -- And it may not be RAISED once anything is sold. Raising it after the
 		   -- sale inflated the no-show discount budget, which was a complete bill
 		   -- escape before the budget was re-denominated; keeping capacity frozen

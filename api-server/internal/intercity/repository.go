@@ -65,7 +65,7 @@ const insertHoldSQL = `
 	  FROM intercity_trips t
 	 WHERE t.id = $1 AND t.deleted_at IS NULL
 	ON CONFLICT (customer_id, idempotency_key) DO NOTHING
-	RETURNING id, seats, price_per_seat_rwf`
+	RETURNING id, seats, price_per_seat_rwf, hold_expires_at`
 
 const findHoldByIdemSQL = `
 	SELECT id, trip_id, customer_id, seats, status, price_per_seat_rwf, hold_expires_at
@@ -89,8 +89,13 @@ func (r *Repository) Hold(ctx context.Context, tripID, customerID string, seats 
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
 	b := Booking{TripID: tripID, CustomerID: customerID, Status: BookingHeld}
+	// hold_expires_at comes back with the row: it is the passenger's countdown
+	// to confirm, and the RETURNING list omitted it — so a FRESH hold answered
+	// without an expiry while the idempotent replay (findHoldByIdemSQL) carried
+	// one. Same endpoint, two shapes, and the client could not show the timer on
+	// the first attempt.
 	err = tx.QueryRow(ctx, insertHoldSQL, tripID, customerID, seats, idemKey).
-		Scan(&b.ID, &b.Seats, &b.PricePerSeat)
+		Scan(&b.ID, &b.Seats, &b.PricePerSeat, &b.HoldExpiresAt)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

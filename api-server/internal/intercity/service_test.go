@@ -158,3 +158,42 @@ func TestFirstName(t *testing.T) {
 	assert.Equal(t, "Aline", firstName("  Aline  "))
 	assert.Equal(t, "Passenger", firstName(""), "a nameless account is still a passenger")
 }
+
+// A vehicle's right to run a corridor is a property of the VEHICLE, not of the
+// trip being published: a moto publishing a single seat passes every seat check
+// there is, and is exactly the trip that must not exist.
+func TestVehicleEligible_MatchesTheCatalogue(t *testing.T) {
+	seats := func(n int) *int { return &n }
+
+	cases := []struct {
+		name         string
+		declared     *int
+		typeMax      int
+		wantEligible bool
+		wantCapacity int
+	}{
+		{"moto", seats(1), 1, false, 1},
+		{"heavy fuso (cargo)", seats(1), 1, false, 1},
+		{"tuk-tuk", seats(3), 3, false, 3},
+		{"cab", seats(4), 4, true, 4},
+		{"hilux", seats(6), 6, true, 6},
+		{"hiace", seats(8), 8, true, 8},
+		{"coaster", seats(18), 18, true, 18},
+		// Declared seats are missing for every vehicle registered before the
+		// column was collected: fall back to the type, never to the table's
+		// structural bound of 30.
+		{"cab, seats never declared", nil, 4, true, 4},
+		{"moto, seats never declared", nil, 1, false, 1},
+		{"coaster, seats never declared", nil, 18, true, 18},
+		{"cab, seats declared as 0", seats(0), 4, true, 4},
+		// The TYPE is the regulatory category. A moto whose owner typed 6 into
+		// passenger_seats is still a moto.
+		{"moto claiming six seats", seats(6), 1, false, 6},
+		// And a cab that really only seats two cannot run a corridor either.
+		{"cab declaring two seats", seats(2), 4, false, 2},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.wantCapacity, VehicleSeatCapacity(c.declared, c.typeMax), c.name)
+		assert.Equal(t, c.wantEligible, VehicleEligible(c.declared, c.typeMax), c.name)
+	}
+}

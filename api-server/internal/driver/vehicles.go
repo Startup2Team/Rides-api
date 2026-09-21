@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/workspace/ride-platform/internal/intercity"
 	apperrors "github.com/workspace/ride-platform/pkg/errors"
 )
 
@@ -47,6 +48,13 @@ type Vehicle struct {
 	PassengerSeats  *int     `json:"passenger_seats,omitempty"`
 	LoadCapacityKg  *float64 `json:"load_capacity_kg,omitempty"`
 	IsActive        bool     `json:"is_active"`
+	// IntercityEligible reports whether this vehicle may publish an intercity
+	// trip (intercity.VehicleEligible — a passenger capacity of at least
+	// intercity.MinIntercityVehicleSeats). Additive and driver-facing: the app
+	// reads it off the vehicle list / driver session to decide whether to show
+	// the Intercity entry point at all, so a moto or tuk-tuk driver never walks
+	// into a screen whose publish call can only ever be refused.
+	IntercityEligible bool `json:"intercity_eligible"`
 	// ApprovalStatus gates activation (Service.ActivateVehicle) and going
 	// online while this is the active vehicle (Service.SetAvailability) — see
 	// the VehicleStatus* constants above.
@@ -92,15 +100,20 @@ func (r *Repository) lookupVehicleTypeID(ctx context.Context, code string) (stri
 
 func scanVehicle(row pgx.Row) (*Vehicle, error) {
 	v := &Vehicle{}
+	var typeMaxPassengers int
 	err := row.Scan(
 		&v.ID, &v.DriverID, &v.VehicleTypeID, &v.VehicleTypeCode,
 		&v.PlateNumber, &v.Make, &v.Model, &v.Year, &v.Color,
 		&v.PassengerSeats, &v.LoadCapacityKg, &v.IsActive,
 		&v.ApprovalStatus, &v.RejectionReason, &v.CreatedAt, &v.UpdatedAt,
+		&typeMaxPassengers,
 	)
 	if err != nil {
 		return nil, err
 	}
+	// Derived, never stored: the rule lives in one place (intercity) and a
+	// column would drift the moment the floor or the catalogue moves.
+	v.IntercityEligible = intercity.VehicleEligible(v.PassengerSeats, typeMaxPassengers)
 	return v, nil
 }
 
@@ -108,7 +121,8 @@ const vehicleSelectCols = `
 	dv.id, dv.driver_id, dv.vehicle_type_id, vt.code,
 	dv.plate_number, dv.make, dv.model, dv.year, dv.color,
 	dv.passenger_seats, dv.load_capacity_kg, dv.is_active,
-	dv.approval_status, dv.rejection_reason, dv.created_at, dv.updated_at
+	dv.approval_status, dv.rejection_reason, dv.created_at, dv.updated_at,
+	vt.max_passengers
 `
 
 func (r *Repository) ListVehicles(ctx context.Context, driverProfileID string) ([]*Vehicle, error) {
